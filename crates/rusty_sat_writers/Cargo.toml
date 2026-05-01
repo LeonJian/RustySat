@@ -1,0 +1,12 @@
+[package]
+name = "rusty_sat_writers"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusty_sat_core = { path = "../rusty_sat_core" }
+rusty_sat_image = { path = "../rusty_sat_image" }
+
+[lints]
+workspace = true

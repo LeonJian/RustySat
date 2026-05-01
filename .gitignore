@@ -1,0 +1,6 @@
+/target/
+/.DS_Store
+/satpy/
+/deps/
+
+**/.DS_Store

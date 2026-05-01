@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/rusty_sat_core",
+    "crates/rusty_sat_config",
+    "crates/rusty_sat_readers",
+    "crates/rusty_sat_resample",
+    "crates/rusty_sat_composites",
+    "crates/rusty_sat_image",
+    "crates/rusty_sat_writers",
+    "crates/rusty_sat_cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/pytroll/satpy"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

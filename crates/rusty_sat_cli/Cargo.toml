@@ -1,0 +1,15 @@
+[package]
+name = "rusty_sat_cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rusty-sat"
+path = "src/main.rs"
+
+[dependencies]
+rusty_sat_core = { path = "../rusty_sat_core" }
+
+[lints]
+workspace = true
