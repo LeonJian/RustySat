@@ -17,6 +17,7 @@ pub enum RustySatError {
     Unsupported { feature: String },
     InvalidInput { message: String },
     NotFound { item: String },
+    Ambiguous { message: String },
 }
 
 impl RustySatError {
@@ -35,6 +36,12 @@ impl RustySatError {
     pub fn not_found(item: impl Into<String>) -> Self {
         Self::NotFound { item: item.into() }
     }
+
+    pub fn ambiguous(message: impl Into<String>) -> Self {
+        Self::Ambiguous {
+            message: message.into(),
+        }
+    }
 }
 
 impl Display for RustySatError {
@@ -43,6 +50,7 @@ impl Display for RustySatError {
             Self::Unsupported { feature } => write!(f, "unsupported feature: {feature}"),
             Self::InvalidInput { message } => write!(f, "invalid input: {message}"),
             Self::NotFound { item } => write!(f, "not found: {item}"),
+            Self::Ambiguous { message } => write!(f, "ambiguous result: {message}"),
         }
     }
 }
@@ -144,6 +152,22 @@ impl WavelengthRange {
         self.central.get()
     }
 
+    pub fn distance_to_number(&self, value: f64) -> f64 {
+        if self.contains_number(value) {
+            (self.central.get() - value).abs()
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    pub fn distance_to_range(&self, other: &Self) -> f64 {
+        if self.contains_range(other) {
+            (self.central.get() - other.central.get()).abs()
+        } else {
+            f64::INFINITY
+        }
+    }
+
     pub fn unit(&self) -> &str {
         &self.unit
     }
@@ -202,6 +226,61 @@ impl DataValue {
             }
             _ => self == requested,
         }
+    }
+
+    fn absolute_distance(&self, key: &str) -> f64 {
+        match self {
+            Self::Text(value) if key == "calibration" => calibration_priority(value),
+            Self::Text(_) => 0.0,
+            Self::Number(value) => value.get(),
+            Self::Wavelength(_) => 0.0,
+            Self::Modifiers(modifiers) => modifiers.as_slice().len() as f64,
+        }
+    }
+
+    fn distance_from_query_value(&self, query_value: &QueryValue) -> f64 {
+        match query_value {
+            QueryValue::Any => 0.0,
+            QueryValue::One(value) => self.distance_from_data_value(value),
+            QueryValue::AnyOf(values) => values
+                .iter()
+                .map(|value| self.distance_from_data_value(value))
+                .fold(f64::INFINITY, f64::min),
+        }
+    }
+
+    fn distance_from_data_value(&self, requested: &DataValue) -> f64 {
+        match (self, requested) {
+            (DataValue::Wavelength(range), DataValue::Number(number)) => {
+                range.distance_to_number(number.get())
+            }
+            (DataValue::Wavelength(range), DataValue::Wavelength(requested_range)) => {
+                range.distance_to_range(requested_range)
+            }
+            (DataValue::Number(number), DataValue::Wavelength(range)) => {
+                range.distance_to_number(number.get())
+            }
+            (DataValue::Number(number), DataValue::Number(requested)) => {
+                if number == requested {
+                    number.get()
+                } else {
+                    f64::INFINITY
+                }
+            }
+            _ if self == requested => 0.0,
+            _ => f64::INFINITY,
+        }
+    }
+}
+
+fn calibration_priority(value: &str) -> f64 {
+    match value {
+        "reflectance" => 0.0,
+        "brightness_temperature" => 1.0,
+        "radiance" => 2.0,
+        "radiance_wavenumber" => 3.0,
+        "counts" => 4.0,
+        _ => 1000.0,
     }
 }
 
@@ -354,6 +433,13 @@ impl DataId {
     pub fn qualifier(&self, key: &str) -> Option<&DataValue> {
         self.qualifiers.get(key)
     }
+
+    fn sort_keys(&self) -> BTreeSet<String> {
+        let mut keys = BTreeSet::new();
+        keys.insert("name".to_string());
+        keys.extend(self.qualifiers.keys().cloned());
+        keys
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -426,6 +512,96 @@ impl DataQuery {
             .filter(|data_id| self.matches(data_id))
             .collect()
     }
+
+    pub fn sort_data_ids<'a>(
+        &self,
+        data_ids: impl IntoIterator<Item = &'a DataId>,
+    ) -> Vec<ScoredDataId<'a>> {
+        let mut scored: Vec<_> = data_ids
+            .into_iter()
+            .map(|data_id| ScoredDataId {
+                data_id,
+                distance: self.distance_to(data_id),
+            })
+            .collect();
+        scored.sort_by(|left, right| {
+            left.distance
+                .total_cmp(&right.distance)
+                .then_with(|| left.data_id.cmp(right.data_id))
+        });
+        scored
+    }
+
+    pub fn best_matches<'a>(
+        &self,
+        data_ids: impl IntoIterator<Item = &'a DataId>,
+    ) -> Vec<&'a DataId> {
+        let scored = self.sort_data_ids(self.filter_data_ids(data_ids));
+        let Some(best) = scored.first() else {
+            return Vec::new();
+        };
+        if !best.distance.is_finite() {
+            return Vec::new();
+        }
+        scored
+            .iter()
+            .take_while(|score| score.distance == best.distance)
+            .map(|score| score.data_id)
+            .collect()
+    }
+
+    pub fn best_match<'a>(
+        &self,
+        data_ids: impl IntoIterator<Item = &'a DataId>,
+    ) -> Result<&'a DataId> {
+        let matches = self.best_matches(data_ids);
+        match matches.as_slice() {
+            [] => Err(RustySatError::not_found("dataset matching query")),
+            [data_id] => Ok(data_id),
+            _ => Err(RustySatError::ambiguous(format!(
+                "query matched {} equally good datasets",
+                matches.len()
+            ))),
+        }
+    }
+
+    fn distance_to(&self, data_id: &DataId) -> f64 {
+        let mut keys = data_id.sort_keys();
+        keys.extend(self.filters.keys().cloned());
+        let mut distance = 0.0;
+
+        if let Some(query_name) = &self.name {
+            if query_name != data_id.name() {
+                return f64::INFINITY;
+            }
+        }
+
+        for key in keys {
+            if key == "name" {
+                continue;
+            }
+            let query_value = self.filters.get(&key).unwrap_or(&QueryValue::Any);
+            match (query_value, data_id.qualifier(&key)) {
+                (QueryValue::Any, Some(value)) => distance += value.absolute_distance(&key),
+                (QueryValue::Any, None) => {}
+                (_, Some(value)) => {
+                    distance += value.distance_from_query_value(query_value);
+                }
+                (_, None) => distance += 100_000.0,
+            }
+            if !distance.is_finite() {
+                break;
+            }
+        }
+
+        distance
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoredDataId<'a> {
+    pub data_id: &'a DataId,
+    pub distance: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -607,5 +783,122 @@ mod tests {
             data_id.qualifier("modifiers"),
             Some(&DataValue::Modifiers(modifiers))
         );
+    }
+
+    #[test]
+    fn best_match_prefers_smallest_resolution_when_unspecified() {
+        let coarse = DataId::new("solar_zenith_angle")
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap();
+        let fine = DataId::new("solar_zenith_angle")
+            .unwrap()
+            .with_qualifier("resolution", 250.0)
+            .unwrap();
+
+        let query = DataQuery::named("solar_zenith_angle").unwrap();
+        assert_eq!(query.best_match([&coarse, &fine]).unwrap(), &fine);
+    }
+
+    #[test]
+    fn best_match_prefers_calibration_priority_when_unspecified() {
+        let counts = DataId::new("cheese_shops")
+            .unwrap()
+            .with_qualifier("calibration", "counts")
+            .unwrap();
+        let reflectance = DataId::new("cheese_shops")
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap();
+
+        let query = DataQuery::named("cheese_shops").unwrap();
+        assert_eq!(
+            query.best_match([&counts, &reflectance]).unwrap(),
+            &reflectance
+        );
+    }
+
+    #[test]
+    fn best_match_prefers_unmodified_dataset_when_unspecified() {
+        let unmodified = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier(
+                "modifiers",
+                ModifierTuple::new(Vec::<String>::new()).unwrap(),
+            )
+            .unwrap();
+        let modified = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("modifiers", ModifierTuple::new(["sunz_corrected"]).unwrap())
+            .unwrap();
+
+        let query = DataQuery::named("VIS006").unwrap();
+        assert_eq!(
+            query.best_match([&modified, &unmodified]).unwrap(),
+            &unmodified
+        );
+    }
+
+    #[test]
+    fn sort_data_ids_uses_wavelength_distance_and_other_metadata() {
+        let hrv = DataId::new("HRV")
+            .unwrap()
+            .with_qualifier(
+                "wavelength",
+                WavelengthRange::micrometers(0.5, 0.7, 0.9).unwrap(),
+            )
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap()
+            .with_qualifier(
+                "modifiers",
+                ModifierTuple::new(Vec::<String>::new()).unwrap(),
+            )
+            .unwrap();
+        let vis008 = DataId::new("VIS008")
+            .unwrap()
+            .with_qualifier(
+                "wavelength",
+                WavelengthRange::micrometers(0.74, 0.81, 0.88).unwrap(),
+            )
+            .unwrap()
+            .with_qualifier("resolution", 3000.0)
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap()
+            .with_qualifier(
+                "modifiers",
+                ModifierTuple::new(Vec::<String>::new()).unwrap(),
+            )
+            .unwrap();
+
+        let query = DataQuery::new().with_filter("wavelength", 0.8).unwrap();
+        assert_eq!(query.best_match([&vis008, &hrv]).unwrap(), &hrv);
+    }
+
+    #[test]
+    fn best_match_reports_ambiguity_for_equal_scores() {
+        let left = DataId::new("dup")
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap()
+            .with_qualifier("polarization", "H")
+            .unwrap();
+        let right = DataId::new("dup")
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap()
+            .with_qualifier("polarization", "V")
+            .unwrap();
+
+        let err = DataQuery::named("dup")
+            .unwrap()
+            .with_filter("polarization", QueryValue::Any)
+            .unwrap()
+            .best_match([&left, &right])
+            .unwrap_err();
+        assert!(matches!(err, RustySatError::Ambiguous { .. }));
     }
 }

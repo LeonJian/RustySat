@@ -52,7 +52,7 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
 - `[x]` Step 2: Config system.
 - `[~]` Step 3: `DataId` and `DataQuery` parity.
   - `[x]` Step 3a: typed `DataId` values, wavelength ranges, modifiers, and basic `DataQuery` matching.
-  - `[ ]` Step 3b: Satpy-like best-match preference sorting and ambiguity errors.
+  - `[x]` Step 3b: Satpy-like best-match preference sorting and ambiguity errors.
   - `[ ]` Step 3c: compatibility tests from representative Satpy dataset IDs.
 - `[ ]` Step 4: `Scene` core and dependency graph.
 - `[ ]` Step 5: fake reader vertical slice.
@@ -112,7 +112,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `Scene`
 - `Dataset`
 - `DataId` with typed qualifier values
-- `DataQuery` with exact, one-of, wildcard, and wavelength containment matching
+- `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
 - shared `RustySatError`
 
 The config crate now has the first real foundation:
