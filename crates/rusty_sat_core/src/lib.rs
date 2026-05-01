@@ -646,10 +646,162 @@ impl Dataset {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencySource {
+    UserProvided,
+    Reader(String),
+    Composite(String),
+    Modifier(String),
+    Unknown,
+}
+
+impl DependencySource {
+    pub fn reader(name: impl Into<String>) -> Result<Self> {
+        non_empty_named_source("reader", name).map(Self::Reader)
+    }
+
+    pub fn composite(name: impl Into<String>) -> Result<Self> {
+        non_empty_named_source("composite", name).map(Self::Composite)
+    }
+
+    pub fn modifier(name: impl Into<String>) -> Result<Self> {
+        non_empty_named_source("modifier", name).map(Self::Modifier)
+    }
+}
+
+fn non_empty_named_source(kind: &str, name: impl Into<String>) -> Result<String> {
+    let name = name.into();
+    if name.trim().is_empty() {
+        return Err(RustySatError::invalid_input(format!(
+            "{kind} dependency source name cannot be empty"
+        )));
+    }
+    Ok(name)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyNode {
+    id: DataId,
+    source: DependencySource,
+    dependencies: BTreeSet<DataId>,
+}
+
+impl DependencyNode {
+    pub fn new(id: DataId, source: DependencySource) -> Self {
+        Self {
+            id,
+            source,
+            dependencies: BTreeSet::new(),
+        }
+    }
+
+    pub fn id(&self) -> &DataId {
+        &self.id
+    }
+
+    pub fn source(&self) -> &DependencySource {
+        &self.source
+    }
+
+    pub fn dependencies(&self) -> &BTreeSet<DataId> {
+        &self.dependencies
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DependencyGraph {
+    nodes: BTreeMap<DataId, DependencyNode>,
+}
+
+impl DependencyGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub fn add_node(&mut self, id: DataId, source: DependencySource) -> Result<()> {
+        if let Some(existing) = self.nodes.get_mut(&id) {
+            if existing.source != source && existing.source != DependencySource::Unknown {
+                return Err(RustySatError::ambiguous(format!(
+                    "dependency node '{}' already exists with a different source",
+                    id.name()
+                )));
+            }
+            existing.source = source;
+            return Ok(());
+        }
+        self.nodes
+            .insert(id.clone(), DependencyNode::new(id, source));
+        Ok(())
+    }
+
+    pub fn add_leaf(&mut self, id: DataId) -> Result<()> {
+        self.add_node(id, DependencySource::UserProvided)
+    }
+
+    pub fn add_dependency(&mut self, parent: DataId, dependency: DataId) -> Result<()> {
+        if !self.contains(&parent) {
+            self.add_node(parent.clone(), DependencySource::Unknown)?;
+        }
+        if !self.contains(&dependency) {
+            self.add_node(dependency.clone(), DependencySource::Unknown)?;
+        }
+        let Some(node) = self.nodes.get_mut(&parent) else {
+            return Err(RustySatError::not_found("dependency parent node"));
+        };
+        node.dependencies.insert(dependency);
+        Ok(())
+    }
+
+    pub fn get(&self, id: &DataId) -> Option<&DependencyNode> {
+        self.nodes.get(id)
+    }
+
+    pub fn contains(&self, id: &DataId) -> bool {
+        self.nodes.contains_key(id)
+    }
+
+    pub fn remove(&mut self, id: &DataId) -> Option<DependencyNode> {
+        for node in self.nodes.values_mut() {
+            node.dependencies.remove(id);
+        }
+        self.nodes.remove(id)
+    }
+
+    pub fn dependencies_for(&self, id: &DataId) -> Result<&BTreeSet<DataId>> {
+        self.nodes
+            .get(id)
+            .map(DependencyNode::dependencies)
+            .ok_or_else(|| RustySatError::not_found(format!("dependency node '{}'", id.name())))
+    }
+
+    pub fn dependents_of(&self, id: &DataId) -> BTreeSet<DataId> {
+        self.nodes
+            .iter()
+            .filter_map(|(node_id, node)| node.dependencies().contains(id).then(|| node_id.clone()))
+            .collect()
+    }
+
+    pub fn leaves(&self) -> BTreeSet<DataId> {
+        self.nodes
+            .iter()
+            .filter_map(|(id, node)| node.dependencies().is_empty().then(|| id.clone()))
+            .collect()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Scene {
     datasets: BTreeMap<DataId, Dataset>,
     wishlist: BTreeSet<DataId>,
+    dependency_graph: DependencyGraph,
 }
 
 impl Scene {
@@ -668,6 +820,9 @@ impl Scene {
     pub fn insert_dataset(&mut self, dataset: Dataset) {
         let id = dataset.id().clone();
         self.wishlist.insert(id.clone());
+        self.dependency_graph
+            .add_leaf(id.clone())
+            .expect("DataId from Dataset must be valid dependency leaf");
         self.datasets.insert(id, dataset);
     }
 
@@ -675,8 +830,18 @@ impl Scene {
         self.datasets.get(id)
     }
 
+    pub fn remove_dataset(&mut self, id: &DataId) -> Option<Dataset> {
+        self.wishlist.remove(id);
+        self.dependency_graph.remove(id);
+        self.datasets.remove(id)
+    }
+
     pub fn wishlist(&self) -> &BTreeSet<DataId> {
         &self.wishlist
+    }
+
+    pub fn dependency_graph(&self) -> &DependencyGraph {
+        &self.dependency_graph
     }
 }
 
@@ -724,6 +889,78 @@ mod tests {
         assert_eq!(scene.len(), 1);
         assert!(scene.get(&data_id).is_some());
         assert!(scene.wishlist().contains(&data_id));
+        assert!(scene.dependency_graph().contains(&data_id));
+        assert_eq!(
+            scene.dependency_graph().get(&data_id).unwrap().source(),
+            &DependencySource::UserProvided
+        );
+        assert!(scene.dependency_graph().leaves().contains(&data_id));
+    }
+
+    #[test]
+    fn scene_removes_dataset_from_wishlist_and_dependency_graph() {
+        let data_id = DataId::new("VIS006").unwrap();
+        let dataset = Dataset::new(data_id.clone());
+        let mut scene = Scene::new();
+        scene.insert_dataset(dataset);
+
+        assert!(scene.remove_dataset(&data_id).is_some());
+        assert!(scene.is_empty());
+        assert!(!scene.wishlist().contains(&data_id));
+        assert!(!scene.dependency_graph().contains(&data_id));
+    }
+
+    #[test]
+    fn dependency_graph_tracks_explicit_edges() {
+        let composite = DataId::new("natural_color").unwrap();
+        let red = DataId::new("VIS006").unwrap();
+        let green = DataId::new("VIS008").unwrap();
+        let mut graph = DependencyGraph::new();
+
+        graph
+            .add_node(
+                composite.clone(),
+                DependencySource::composite("natural_color").unwrap(),
+            )
+            .unwrap();
+        graph
+            .add_node(red.clone(), DependencySource::reader("seviri_l1b").unwrap())
+            .unwrap();
+        graph
+            .add_dependency(composite.clone(), red.clone())
+            .unwrap();
+        graph
+            .add_dependency(composite.clone(), green.clone())
+            .unwrap();
+
+        assert_eq!(graph.len(), 3);
+        assert!(graph.dependencies_for(&composite).unwrap().contains(&red));
+        assert!(graph.dependencies_for(&composite).unwrap().contains(&green));
+        assert!(graph.dependents_of(&red).contains(&composite));
+        assert!(graph.leaves().contains(&red));
+        assert!(graph.leaves().contains(&green));
+        assert!(!graph.leaves().contains(&composite));
+        assert_eq!(
+            graph.get(&green).unwrap().source(),
+            &DependencySource::Unknown
+        );
+    }
+
+    #[test]
+    fn dependency_graph_rejects_conflicting_sources() {
+        let data_id = DataId::new("VIS006").unwrap();
+        let mut graph = DependencyGraph::new();
+        graph
+            .add_node(
+                data_id.clone(),
+                DependencySource::reader("reader_a").unwrap(),
+            )
+            .unwrap();
+        let err = graph
+            .add_node(data_id, DependencySource::reader("reader_b").unwrap())
+            .unwrap_err();
+
+        assert!(matches!(err, RustySatError::Ambiguous { .. }));
     }
 
     #[test]
