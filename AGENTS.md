@@ -50,10 +50,10 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
 - `[x]` Step 0: Repository orientation and rules.
 - `[x]` Step 1: Rust workspace skeleton.
 - `[x]` Step 2: Config system.
-- `[~]` Step 3: `DataId` and `DataQuery` parity.
+- `[x]` Step 3: `DataId` and `DataQuery` parity.
   - `[x]` Step 3a: typed `DataId` values, wavelength ranges, modifiers, and basic `DataQuery` matching.
   - `[x]` Step 3b: Satpy-like best-match preference sorting and ambiguity errors.
-  - `[ ]` Step 3c: compatibility tests from representative Satpy dataset IDs.
+  - `[x]` Step 3c: compatibility tests from representative Satpy dataset IDs.
 - `[ ]` Step 4: `Scene` core and dependency graph.
 - `[ ]` Step 5: fake reader vertical slice.
 - `[ ]` Step 6: filename pattern parser compatible with `trollsift`.

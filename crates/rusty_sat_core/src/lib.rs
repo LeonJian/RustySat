@@ -490,17 +490,23 @@ impl DataQuery {
     }
 
     pub fn matches(&self, data_id: &DataId) -> bool {
+        let mut shared_key_matched = false;
         if let Some(name) = &self.name {
             if data_id.name() != name {
                 return false;
             }
+            shared_key_matched = true;
         }
-        self.filters
-            .iter()
-            .all(|(key, query_value)| match data_id.qualifier(key) {
-                Some(value) => value.matches_query_value(query_value),
-                None => matches!(query_value, QueryValue::Any),
-            })
+        for (key, query_value) in &self.filters {
+            let Some(value) = data_id.qualifier(key) else {
+                continue;
+            };
+            shared_key_matched = true;
+            if !value.matches_query_value(query_value) {
+                return false;
+            }
+        }
+        shared_key_matched
     }
 
     pub fn filter_data_ids<'a>(
@@ -900,5 +906,73 @@ mod tests {
             .best_match([&left, &right])
             .unwrap_err();
         assert!(matches!(err, RustySatError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn satpy_compat_filtering_by_name_ignores_missing_extra_query_keys() {
+        let composite_id = DataId::new("natural_color").unwrap();
+        let query = DataQuery::named("natural_color")
+            .unwrap()
+            .with_filter("resolution", 250.0)
+            .unwrap();
+
+        assert_eq!(query.filter_data_ids([&composite_id]), vec![&composite_id]);
+    }
+
+    #[test]
+    fn satpy_compat_query_without_shared_keys_does_not_match() {
+        let static_image = DataId::new("static_image").unwrap();
+        let query = DataQuery::new()
+            .with_filter("wavelength", 0.22)
+            .unwrap()
+            .with_filter("modifiers", ModifierTuple::new(["mod1"]).unwrap())
+            .unwrap();
+
+        assert!(query.filter_data_ids([&static_image]).is_empty());
+    }
+
+    #[test]
+    fn satpy_compat_seviri_hrv_priority_over_vis008_for_point_eight_micrometers() {
+        let candidates = seviri_visible_candidates();
+        let query = DataQuery::new().with_filter("wavelength", 0.8).unwrap();
+        let best = query.best_match(candidates.iter()).unwrap();
+
+        assert_eq!(best.name(), "HRV");
+        assert_eq!(
+            best.qualifier("calibration"),
+            Some(&DataValue::Text("reflectance".to_string()))
+        );
+    }
+
+    fn seviri_visible_candidates() -> Vec<DataId> {
+        let mut candidates = Vec::new();
+        for (name, wavelength, resolution) in [
+            ("HRV", (0.5, 0.7, 0.9), 1000.134348869),
+            ("VIS006", (0.56, 0.635, 0.71), 3000.403165817),
+            ("VIS008", (0.74, 0.81, 0.88), 3000.403165817),
+        ] {
+            for calibration in ["reflectance", "radiance", "counts"] {
+                candidates.push(
+                    DataId::new(name)
+                        .unwrap()
+                        .with_qualifier(
+                            "wavelength",
+                            WavelengthRange::new(wavelength.0, wavelength.1, wavelength.2, "um")
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .with_qualifier("resolution", resolution)
+                        .unwrap()
+                        .with_qualifier("calibration", calibration)
+                        .unwrap()
+                        .with_qualifier(
+                            "modifiers",
+                            ModifierTuple::new(Vec::<String>::new()).unwrap(),
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+        candidates
     }
 }
