@@ -684,6 +684,7 @@ pub struct DependencyNode {
     id: DataId,
     source: DependencySource,
     dependencies: BTreeSet<DataId>,
+    optional_dependencies: BTreeSet<DataId>,
 }
 
 impl DependencyNode {
@@ -692,6 +693,7 @@ impl DependencyNode {
             id,
             source,
             dependencies: BTreeSet::new(),
+            optional_dependencies: BTreeSet::new(),
         }
     }
 
@@ -705,6 +707,17 @@ impl DependencyNode {
 
     pub fn dependencies(&self) -> &BTreeSet<DataId> {
         &self.dependencies
+    }
+
+    pub fn optional_dependencies(&self) -> &BTreeSet<DataId> {
+        &self.optional_dependencies
+    }
+
+    pub fn all_dependencies(&self) -> BTreeSet<DataId> {
+        self.dependencies
+            .union(&self.optional_dependencies)
+            .cloned()
+            .collect()
     }
 }
 
@@ -760,6 +773,20 @@ impl DependencyGraph {
         Ok(())
     }
 
+    pub fn add_optional_dependency(&mut self, parent: DataId, dependency: DataId) -> Result<()> {
+        if !self.contains(&parent) {
+            self.add_node(parent.clone(), DependencySource::Unknown)?;
+        }
+        if !self.contains(&dependency) {
+            self.add_node(dependency.clone(), DependencySource::Unknown)?;
+        }
+        let Some(node) = self.nodes.get_mut(&parent) else {
+            return Err(RustySatError::not_found("dependency parent node"));
+        };
+        node.optional_dependencies.insert(dependency);
+        Ok(())
+    }
+
     pub fn get(&self, id: &DataId) -> Option<&DependencyNode> {
         self.nodes.get(id)
     }
@@ -771,6 +798,7 @@ impl DependencyGraph {
     pub fn remove(&mut self, id: &DataId) -> Option<DependencyNode> {
         for node in self.nodes.values_mut() {
             node.dependencies.remove(id);
+            node.optional_dependencies.remove(id);
         }
         self.nodes.remove(id)
     }
@@ -785,15 +813,100 @@ impl DependencyGraph {
     pub fn dependents_of(&self, id: &DataId) -> BTreeSet<DataId> {
         self.nodes
             .iter()
-            .filter_map(|(node_id, node)| node.dependencies().contains(id).then(|| node_id.clone()))
+            .filter_map(|(node_id, node)| {
+                node.all_dependencies()
+                    .contains(id)
+                    .then(|| node_id.clone())
+            })
             .collect()
     }
 
     pub fn leaves(&self) -> BTreeSet<DataId> {
         self.nodes
             .iter()
-            .filter_map(|(id, node)| node.dependencies().is_empty().then(|| id.clone()))
+            .filter_map(|(id, node)| node.all_dependencies().is_empty().then(|| id.clone()))
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeRecipe {
+    output: DataId,
+    name: String,
+    prerequisites: BTreeSet<DataId>,
+    optional_prerequisites: BTreeSet<DataId>,
+}
+
+impl CompositeRecipe {
+    pub fn new(output: DataId, name: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "composite recipe name cannot be empty",
+            ));
+        }
+        Ok(Self {
+            output,
+            name,
+            prerequisites: BTreeSet::new(),
+            optional_prerequisites: BTreeSet::new(),
+        })
+    }
+
+    pub fn with_prerequisite(mut self, prerequisite: DataId) -> Self {
+        self.prerequisites.insert(prerequisite);
+        self
+    }
+
+    pub fn with_optional_prerequisite(mut self, prerequisite: DataId) -> Self {
+        self.optional_prerequisites.insert(prerequisite);
+        self
+    }
+
+    pub fn output(&self) -> &DataId {
+        &self.output
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModifierRecipe {
+    output: DataId,
+    name: String,
+    input: DataId,
+    prerequisites: BTreeSet<DataId>,
+}
+
+impl ModifierRecipe {
+    pub fn new(output: DataId, name: impl Into<String>, input: DataId) -> Result<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "modifier recipe name cannot be empty",
+            ));
+        }
+        Ok(Self {
+            output,
+            name,
+            input,
+            prerequisites: BTreeSet::new(),
+        })
+    }
+
+    pub fn with_prerequisite(mut self, prerequisite: DataId) -> Self {
+        self.prerequisites.insert(prerequisite);
+        self
+    }
+
+    pub fn output(&self) -> &DataId {
+        &self.output
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -937,6 +1050,38 @@ impl Scene {
 
         Ok(plan)
     }
+
+    pub fn register_composite(&mut self, recipe: CompositeRecipe) -> Result<()> {
+        let output = recipe.output.clone();
+        self.dependency_graph.add_node(
+            output.clone(),
+            DependencySource::composite(recipe.name.clone())?,
+        )?;
+        for prerequisite in recipe.prerequisites {
+            self.dependency_graph
+                .add_dependency(output.clone(), prerequisite)?;
+        }
+        for prerequisite in recipe.optional_prerequisites {
+            self.dependency_graph
+                .add_optional_dependency(output.clone(), prerequisite)?;
+        }
+        Ok(())
+    }
+
+    pub fn register_modifier(&mut self, recipe: ModifierRecipe) -> Result<()> {
+        let output = recipe.output.clone();
+        self.dependency_graph.add_node(
+            output.clone(),
+            DependencySource::modifier(recipe.name.clone())?,
+        )?;
+        self.dependency_graph
+            .add_dependency(output.clone(), recipe.input)?;
+        for prerequisite in recipe.prerequisites {
+            self.dependency_graph
+                .add_dependency(output.clone(), prerequisite)?;
+        }
+        Ok(())
+    }
 }
 
 fn reader_for_dataset(id: &DataId, inventories: &[&ReaderInventory]) -> Result<String> {
@@ -1075,6 +1220,65 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, RustySatError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn scene_registers_composite_recipe_dependencies() {
+        let composite = DataId::new("natural_color").unwrap();
+        let red = DataId::new("VIS006").unwrap();
+        let green = DataId::new("VIS008").unwrap();
+        let blue = DataId::new("VIS004").unwrap();
+        let optional_sza = DataId::new("solar_zenith_angle").unwrap();
+        let recipe = CompositeRecipe::new(composite.clone(), "natural_color")
+            .unwrap()
+            .with_prerequisite(red.clone())
+            .with_prerequisite(green.clone())
+            .with_prerequisite(blue.clone())
+            .with_optional_prerequisite(optional_sza.clone());
+        let mut scene = Scene::new();
+
+        scene.register_composite(recipe).unwrap();
+
+        let node = scene.dependency_graph().get(&composite).unwrap();
+        assert_eq!(
+            node.source(),
+            &DependencySource::Composite("natural_color".to_string())
+        );
+        assert!(node.dependencies().contains(&red));
+        assert!(node.dependencies().contains(&green));
+        assert!(node.dependencies().contains(&blue));
+        assert!(node.optional_dependencies().contains(&optional_sza));
+        assert!(scene
+            .dependency_graph()
+            .dependents_of(&optional_sza)
+            .contains(&composite));
+    }
+
+    #[test]
+    fn scene_registers_modifier_recipe_dependencies() {
+        let base = DataId::new("VIS006").unwrap();
+        let angle = DataId::new("solar_zenith_angle").unwrap();
+        let corrected = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("modifiers", ModifierTuple::new(["sunz_corrected"]).unwrap())
+            .unwrap();
+        let recipe = ModifierRecipe::new(corrected.clone(), "sunz_corrected", base.clone())
+            .unwrap()
+            .with_prerequisite(angle.clone());
+        let mut scene = Scene::new();
+
+        scene.register_modifier(recipe).unwrap();
+
+        let node = scene.dependency_graph().get(&corrected).unwrap();
+        assert_eq!(
+            node.source(),
+            &DependencySource::Modifier("sunz_corrected".to_string())
+        );
+        assert!(node.dependencies().contains(&base));
+        assert!(node.dependencies().contains(&angle));
+        assert!(scene.dependency_graph().leaves().contains(&base));
+        assert!(scene.dependency_graph().leaves().contains(&angle));
+        assert!(!scene.dependency_graph().leaves().contains(&corrected));
     }
 
     #[test]

@@ -54,10 +54,10 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
   - `[x]` Step 3a: typed `DataId` values, wavelength ranges, modifiers, and basic `DataQuery` matching.
   - `[x]` Step 3b: Satpy-like best-match preference sorting and ambiguity errors.
   - `[x]` Step 3c: compatibility tests from representative Satpy dataset IDs.
-- `[~]` Step 4: `Scene` core and dependency graph.
+- `[x]` Step 4: `Scene` core and dependency graph.
   - `[x]` Step 4a: dependency graph data model, user-provided dataset leaves, and Scene removal semantics.
   - `[x]` Step 4b: Scene load request planning against available reader dataset IDs.
-  - `[ ]` Step 4c: dependency graph population for composites and modifiers.
+  - `[x]` Step 4c: dependency graph population for composites and modifiers.
 - `[ ]` Step 5: fake reader vertical slice.
 - `[ ]` Step 6: filename pattern parser compatible with `trollsift`.
 - `[ ]` Step 7: area definitions and YAML area loading.
@@ -118,6 +118,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
 - `DependencyGraph` with node sources, dependency edges, leaves, dependents, and Scene integration for user-provided datasets.
 - `ReaderInventory` and `SceneLoadPlan` for planning reader-backed dataset loads without reading data yet.
+- `CompositeRecipe` and `ModifierRecipe` for populating dependency graph edges before real generation exists.
 - shared `RustySatError`
 
 The config crate now has the first real foundation:
