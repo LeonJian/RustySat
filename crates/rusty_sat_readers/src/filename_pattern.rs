@@ -1,0 +1,545 @@
+//! Trollsift-compatible filename pattern helpers.
+//!
+//! This module intentionally starts with the common subset Satpy readers need:
+//! Python-style named fields, non-greedy string matching, integer/float
+//! extraction, strftime-shaped fields, validation, composing, and globifying.
+//! Reference behavior inspected before implementation:
+//! `deps/trollsift/doc/source/usage.rst` and `deps/trollsift/trollsift/parser.py`.
+
+use regex::Regex;
+use rusty_sat_core::{Result, RustySatError};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternValue {
+    Text(String),
+    Integer(i64),
+    Float(f64),
+}
+
+impl PatternValue {
+    fn as_compose_text(&self) -> String {
+        match self {
+            Self::Text(value) => value.clone(),
+            Self::Integer(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+        }
+    }
+}
+
+impl From<&str> for PatternValue {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+impl From<String> for PatternValue {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<i64> for PatternValue {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<f64> for PatternValue {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FilenamePattern {
+    pattern: String,
+    tokens: Vec<Token>,
+    fields: Vec<Field>,
+    regex: Regex,
+}
+
+impl FilenamePattern {
+    pub fn new(pattern: impl Into<String>) -> Result<Self> {
+        let pattern = pattern.into();
+        let mut tokens = parse_tokens(&pattern)?;
+        assign_capture_names(&mut tokens);
+        let fields = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::Field(field) => Some(field.clone()),
+                Token::Literal(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let regex = Regex::new(&format!("^{}$", regex_body(&tokens)?)).map_err(|err| {
+            RustySatError::invalid_input(format!("invalid filename pattern regex: {err}"))
+        })?;
+
+        Ok(Self {
+            pattern,
+            tokens,
+            fields,
+            regex,
+        })
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    pub fn keys(&self) -> BTreeSet<String> {
+        self.fields.iter().map(|field| field.name.clone()).collect()
+    }
+
+    pub fn parse(&self, filename: &str) -> Result<BTreeMap<String, PatternValue>> {
+        let captures = self
+            .regex
+            .captures(filename)
+            .ok_or_else(|| RustySatError::not_found("filename matching pattern"))?;
+        let mut values = BTreeMap::new();
+        let mut raw_values = BTreeMap::<String, String>::new();
+        for field in &self.fields {
+            let raw = captures
+                .name(&field.capture_name)
+                .ok_or_else(|| RustySatError::not_found(format!("field '{}'", field.name)))?
+                .as_str();
+            if let Some(previous) = raw_values.get(&field.name) {
+                if previous != raw {
+                    return Err(RustySatError::invalid_input(format!(
+                        "repeated field '{}' did not match previous value",
+                        field.name
+                    )));
+                }
+                continue;
+            }
+            raw_values.insert(field.name.clone(), raw.to_string());
+            values.insert(field.name.clone(), convert_value(raw, field)?);
+        }
+        Ok(values)
+    }
+
+    pub fn validate(&self, filename: &str) -> bool {
+        self.parse(filename).is_ok()
+    }
+
+    pub fn compose(
+        &self,
+        values: &BTreeMap<String, PatternValue>,
+        allow_partial: bool,
+    ) -> Result<String> {
+        let mut out = String::new();
+        for token in &self.tokens {
+            match token {
+                Token::Literal(literal) => out.push_str(literal),
+                Token::Field(field) => match values.get(&field.name) {
+                    Some(value) => out.push_str(&format_value(value, field)?),
+                    None if allow_partial => out.push_str(&field.original),
+                    None => {
+                        return Err(RustySatError::not_found(format!(
+                            "compose value for field '{}'",
+                            field.name
+                        )));
+                    }
+                },
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn globify(&self, values: &BTreeMap<String, PatternValue>) -> Result<String> {
+        let mut out = String::new();
+        for token in &self.tokens {
+            match token {
+                Token::Literal(literal) => out.push_str(literal),
+                Token::Field(field) => match values.get(&field.name) {
+                    Some(value) => out.push_str(&format_value(value, field)?),
+                    None => out.push_str(&glob_for_field(field)?),
+                },
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token {
+    Literal(String),
+    Field(Field),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Field {
+    name: String,
+    spec: String,
+    capture_name: String,
+    original: String,
+}
+
+fn parse_tokens(pattern: &str) -> Result<Vec<Token>> {
+    let mut tokens = Vec::new();
+    let mut literal = String::new();
+    let mut chars = pattern.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '{' => {
+                if matches!(chars.peek(), Some((_, '{'))) {
+                    chars.next();
+                    literal.push('{');
+                    continue;
+                }
+                flush_literal(&mut tokens, &mut literal);
+                let end = pattern[idx + 1..]
+                    .find('}')
+                    .map(|offset| idx + 1 + offset)
+                    .ok_or_else(|| {
+                        RustySatError::invalid_input("unclosed filename pattern field")
+                    })?;
+                let raw = &pattern[idx + 1..end];
+                tokens.push(Token::Field(parse_field(raw)?));
+                while let Some((next_idx, _)) = chars.peek() {
+                    if *next_idx <= end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            '}' => {
+                if matches!(chars.peek(), Some((_, '}'))) {
+                    chars.next();
+                    literal.push('}');
+                } else {
+                    return Err(RustySatError::invalid_input(
+                        "unmatched '}' in filename pattern",
+                    ));
+                }
+            }
+            _ => literal.push(ch),
+        }
+    }
+    flush_literal(&mut tokens, &mut literal);
+    Ok(tokens)
+}
+
+fn flush_literal(tokens: &mut Vec<Token>, literal: &mut String) {
+    if !literal.is_empty() {
+        tokens.push(Token::Literal(std::mem::take(literal)));
+    }
+}
+
+fn parse_field(raw: &str) -> Result<Field> {
+    let no_conversion = raw
+        .split_once('!')
+        .map(|(name, rest)| {
+            let spec = rest.split_once(':').map(|(_, spec)| spec).unwrap_or("");
+            (name, spec)
+        })
+        .unwrap_or_else(|| raw.split_once(':').unwrap_or((raw, "")));
+    let name = no_conversion.0.trim();
+    if name.is_empty() {
+        return Err(RustySatError::invalid_input(
+            "filename pattern field name cannot be empty",
+        ));
+    }
+    if !is_valid_field_name(name) {
+        return Err(RustySatError::invalid_input(format!(
+            "unsupported filename pattern field name '{name}'"
+        )));
+    }
+    Ok(Field {
+        name: name.to_string(),
+        spec: no_conversion.1.to_string(),
+        capture_name: String::new(),
+        original: format!("{{{raw}}}"),
+    })
+}
+
+fn is_valid_field_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn assign_capture_names(tokens: &mut [Token]) {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for token in tokens {
+        let Token::Field(field) = token else {
+            continue;
+        };
+        let count = counts.entry(field.name.clone()).or_default();
+        field.capture_name = if *count == 0 {
+            field.name.clone()
+        } else {
+            format!("{}__{}", field.name, count)
+        };
+        *count += 1;
+    }
+}
+
+fn regex_body(tokens: &[Token]) -> Result<String> {
+    let mut seen = BTreeMap::<String, String>::new();
+    let mut body = String::new();
+    for token in tokens {
+        match token {
+            Token::Literal(literal) => body.push_str(&regex::escape(literal)),
+            Token::Field(field) => {
+                if let Some(existing_spec) = seen.get(&field.name) {
+                    if existing_spec != &field.spec {
+                        return Err(RustySatError::invalid_input(format!(
+                            "field '{}' is repeated with different formats",
+                            field.name
+                        )));
+                    }
+                    body.push_str(&format!(
+                        r"(?P<{}>{})",
+                        field.capture_name,
+                        regex_for_spec(&field.spec)?
+                    ));
+                    continue;
+                }
+                seen.insert(field.name.clone(), field.spec.clone());
+                body.push_str(&format!(
+                    r"(?P<{}>{})",
+                    field.capture_name,
+                    regex_for_spec(&field.spec)?
+                ));
+            }
+        }
+    }
+    Ok(body)
+}
+
+fn regex_for_spec(spec: &str) -> Result<String> {
+    if spec.is_empty() {
+        return Ok(".*?".to_string());
+    }
+    if spec.contains('%') {
+        return datetime_regex(spec);
+    }
+
+    let kind = spec.chars().last().unwrap_or('s');
+    let width = leading_width(spec);
+    let base = match kind {
+        'd' | 'i' => r"[-+]?\d",
+        'f' | 'e' | 'E' | 'g' => r"[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?",
+        'x' | 'X' => r"[-+]?(0[xX])?[\dA-Fa-f]",
+        'o' => r"[-+]?[0-7]",
+        'b' => r"[-+]?[0-1]",
+        'c' => r".",
+        's' => r"\S",
+        _ => {
+            return Err(RustySatError::invalid_input(format!(
+                "unsupported filename pattern format spec '{spec}'"
+            )));
+        }
+    };
+    Ok(match width {
+        Some(width) if kind != 'f' && kind != 'e' && kind != 'E' && kind != 'g' => {
+            format!("{base}{{{width}}}")
+        }
+        _ if matches!(kind, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 's' | 'c') => format!("{base}*?"),
+        _ => base.to_string(),
+    })
+}
+
+fn datetime_regex(spec: &str) -> Result<String> {
+    let mut out = spec.to_string();
+    for (key, value) in datetime_token_map() {
+        out = out.replace(key, value);
+    }
+    Ok(out)
+}
+
+fn glob_for_field(field: &Field) -> Result<String> {
+    let spec = field.spec.as_str();
+    if spec.is_empty() {
+        return Ok("*".to_string());
+    }
+    if spec.contains('%') {
+        let mut out = spec.to_string();
+        for (key, value) in datetime_glob_map() {
+            out = out.replace(key, value);
+        }
+        return Ok(out);
+    }
+    Ok(match leading_width(spec) {
+        Some(width) => "?".repeat(width),
+        None => "*".to_string(),
+    })
+}
+
+fn convert_value(raw: &str, field: &Field) -> Result<PatternValue> {
+    let spec = field.spec.as_str();
+    let kind = spec.chars().last().unwrap_or('s');
+    if spec.contains('%') || spec.is_empty() || matches!(kind, 's' | 'c') {
+        return Ok(PatternValue::Text(raw.to_string()));
+    }
+    if matches!(kind, 'd' | 'i') {
+        return raw
+            .trim()
+            .parse::<i64>()
+            .map(PatternValue::Integer)
+            .map_err(|err| {
+                RustySatError::invalid_input(format!(
+                    "invalid integer field '{}': {err}",
+                    field.name
+                ))
+            });
+    }
+    if matches!(kind, 'f' | 'e' | 'E' | 'g') {
+        return raw
+            .trim()
+            .parse::<f64>()
+            .map(PatternValue::Float)
+            .map_err(|err| {
+                RustySatError::invalid_input(format!("invalid float field '{}': {err}", field.name))
+            });
+    }
+    Ok(PatternValue::Text(raw.to_string()))
+}
+
+fn format_value(value: &PatternValue, field: &Field) -> Result<String> {
+    let raw = value.as_compose_text();
+    if let Some(width) = leading_width(&field.spec) {
+        let kind = field.spec.chars().last().unwrap_or('s');
+        if matches!(kind, 'd' | 'i') {
+            return Ok(format!(
+                "{:0width$}",
+                raw.parse::<i64>().unwrap_or_default(),
+                width = width
+            ));
+        }
+    }
+    Ok(raw)
+}
+
+fn leading_width(spec: &str) -> Option<usize> {
+    let digits = spec
+        .chars()
+        .skip_while(|ch| matches!(ch, '<' | '>' | '=' | '^' | '+' | '-' | ' '))
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn datetime_token_map() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("%Y", r"\d{4}"),
+        ("%y", r"\d{2}"),
+        ("%m", r"\d{2}"),
+        ("%d", r"\d{2}"),
+        ("%H", r"\d{2}"),
+        ("%M", r"\d{2}"),
+        ("%S", r"\d{2}"),
+        ("%j", r"\d{3}"),
+        ("%f", r"[^ \t\n\r\f\v\-_:]+"),
+        ("%z", r"[^ \t\n\r\f\v\-_:]+"),
+        ("%Z", r"[^ \t\n\r\f\v\-_:]+"),
+        ("%%", "%"),
+    ]
+}
+
+fn datetime_glob_map() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("%Y", "????"),
+        ("%y", "??"),
+        ("%m", "??"),
+        ("%d", "??"),
+        ("%H", "??"),
+        ("%M", "??"),
+        ("%S", "??"),
+        ("%j", "???"),
+        ("%f", "*"),
+        ("%z", "*"),
+        ("%Z", "*"),
+        ("%%", "?"),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_trollsift_usage_example() {
+        let parser = FilenamePattern::new(
+            "/somedir/{directory}/hrpt_{platform_name}_{start_time:%Y%m%d_%H%M}_{orbit:05d}.l1b",
+        )
+        .unwrap();
+        let values = parser
+            .parse("/somedir/otherdir/hrpt_noaa16_20140210_1004_69022.l1b")
+            .unwrap();
+
+        assert_eq!(
+            values["directory"],
+            PatternValue::Text("otherdir".to_string())
+        );
+        assert_eq!(
+            values["platform_name"],
+            PatternValue::Text("noaa16".to_string())
+        );
+        assert_eq!(
+            values["start_time"],
+            PatternValue::Text("20140210_1004".to_string())
+        );
+        assert_eq!(values["orbit"], PatternValue::Integer(69022));
+    }
+
+    #[test]
+    fn string_fields_are_non_greedy_like_trollsift() {
+        let parser = FilenamePattern::new("{field_one}_{field_two}").unwrap();
+        let values = parser.parse("abc_def_ghi").unwrap();
+
+        assert_eq!(values["field_one"], PatternValue::Text("abc".to_string()));
+        assert_eq!(
+            values["field_two"],
+            PatternValue::Text("def_ghi".to_string())
+        );
+    }
+
+    #[test]
+    fn validates_and_rejects_full_match_failures() {
+        let parser = FilenamePattern::new("A_{channel:3s}_{segment:3d}.dat").unwrap();
+
+        assert!(parser.validate("A_VIS_007.dat"));
+        assert!(!parser.validate("prefix_A_VIS_007.dat"));
+        assert!(parser.parse("A_VIS_007.dat").is_ok());
+        assert!(parser.parse("A_VIS_bad.dat").is_err());
+    }
+
+    #[test]
+    fn compose_supports_strict_and_partial_modes() {
+        let parser = FilenamePattern::new("{platform}_{orbit:05d}_{product}.dat").unwrap();
+        let values = BTreeMap::from([
+            ("platform".to_string(), PatternValue::from("noaa19")),
+            ("orbit".to_string(), PatternValue::from(42_i64)),
+        ]);
+
+        assert!(parser.compose(&values, false).is_err());
+        assert_eq!(
+            parser.compose(&values, true).unwrap(),
+            "noaa19_00042_{product}.dat"
+        );
+    }
+
+    #[test]
+    fn globify_matches_common_trollsift_patterns() {
+        let parser =
+            FilenamePattern::new("{a}_{start_time:%Y%m%d_%H%M}_{orbit:05d}_{kind}.dat").unwrap();
+        let values = BTreeMap::from([("a".to_string(), PatternValue::from("hrpt"))]);
+
+        assert_eq!(
+            parser.globify(&values).unwrap(),
+            "hrpt_????????_????_?????_*.dat"
+        );
+    }
+
+    #[test]
+    fn repeated_fields_must_match_same_text() {
+        let parser = FilenamePattern::new("{platform}_{platform}_{orbit:03d}").unwrap();
+
+        assert!(parser.validate("npp_npp_001"));
+        assert!(!parser.validate("npp_noaa20_001"));
+    }
+}

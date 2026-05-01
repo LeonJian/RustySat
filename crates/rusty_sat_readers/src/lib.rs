@@ -1,5 +1,7 @@
 //! Reader framework foundations.
 
+pub mod filename_pattern;
+
 use rusty_sat_core::{DataId, Dataset, ReaderInventory, Result, RustySatError};
 use std::collections::BTreeMap;
 

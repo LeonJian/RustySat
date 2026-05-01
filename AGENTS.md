@@ -18,7 +18,7 @@ This project must move slowly and deliberately. Do not attempt to rewrite all of
 1. Read this file first.
 2. Check the current implementation state below.
 3. Pick the next unchecked roadmap item only.
-4. Read the matching Python reference code before designing Rust behavior.
+4. Read the matching Python reference docs and code before designing Rust behavior.
 5. Implement the smallest useful Rust capability.
 6. Add focused tests.
 7. Run `cargo check --workspace` and `cargo test --workspace`.
@@ -28,6 +28,8 @@ This project must move slowly and deliberately. Do not attempt to rewrite all of
 Do not bundle unrelated roadmap items together. If a Satpy update introduces new behavior, track it as a separate task and implement it separately.
 
 If a roadmap step is too large, split it into smaller lettered substeps before implementation. Complete one substep at a time, update this file after each substep, and leave the next substep clear for future work.
+
+Every rewrite step must aim for Satpy-compatible results, not only similar-looking APIs. For behavior copied from Satpy or a dependency, cite the inspected reference paths in the implementation notes or tests when practical, and add parity tests that use representative inputs from the Python docs or tests.
 
 ## Git Rules
 
@@ -60,7 +62,9 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
   - `[x]` Step 4c: dependency graph population for composites and modifiers.
 - `[x]` Step 5: fake reader vertical slice.
   - `[x]` Step 5a: in-memory fake reader inventory and dataset loading.
-- `[ ]` Step 6: filename pattern parser compatible with `trollsift`.
+- `[~]` Step 6: filename pattern parser compatible with `trollsift`.
+  - `[x]` Step 6a: basic parser keys, parse, validate, compose, and globify for common Satpy filename patterns.
+  - `[ ]` Step 6b: advanced trollsift parity for custom conversions, richer format specs, and datetime typed values.
 - `[ ]` Step 7: area definitions and YAML area loading.
 - `[ ]` Step 8: first real reader.
 - `[ ]` Step 9: nearest resampling.
@@ -83,10 +87,13 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
 
 - Prefer Rust-native APIs over Python-shaped clones.
 - Preserve Satpy YAML compatibility as the main compatibility contract.
+- Preserve Satpy behavior as the result contract: for the same supported input, Rusty Sat should produce the same dataset choices, metadata interpretation, dependency decisions, geometry, imagery, or writer output as Satpy.
 - Use explicit `Result<T, RustySatError>` returns for fallible operations.
 - Keep incomplete behavior explicit with placeholder errors, not silent defaults.
 - Keep public types documented enough for future agents to understand intent.
 - Avoid adding heavy dependencies until the relevant roadmap step needs them.
+- Split growing modules into focused files before they become hard to review. Avoid letting one source file become the dumping ground for unrelated core, reader, parser, resampling, or writer behavior.
+- Keep tests close to the module they validate, but move larger fixtures or broad parity suites into separate test files when they would make a source file hard to scan.
 
 ## Upstream Satpy Tracking
 
@@ -123,6 +130,8 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - shared `RustySatError`
 
 The readers crate now has an in-memory `FakeReader` that can expose an inventory, load cloned datasets, and drive a `Scene` planning/insertion vertical slice in tests.
+
+The readers crate also has `filename_pattern::FilenamePattern`, a focused trollsift-compatible starter parser. It supports keys, full-match parsing, non-greedy string fields, integer/float conversion, repeated-field equality checks, strict/partial compose, validation, and globify for common Satpy filename patterns. Advanced trollsift conversions and typed datetime values are still pending.
 
 The config crate now has the first real foundation:
 
