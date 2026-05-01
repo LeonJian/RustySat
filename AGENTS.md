@@ -58,7 +58,8 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
   - `[x]` Step 4a: dependency graph data model, user-provided dataset leaves, and Scene removal semantics.
   - `[x]` Step 4b: Scene load request planning against available reader dataset IDs.
   - `[x]` Step 4c: dependency graph population for composites and modifiers.
-- `[ ]` Step 5: fake reader vertical slice.
+- `[x]` Step 5: fake reader vertical slice.
+  - `[x]` Step 5a: in-memory fake reader inventory and dataset loading.
 - `[ ]` Step 6: filename pattern parser compatible with `trollsift`.
 - `[ ]` Step 7: area definitions and YAML area loading.
 - `[ ]` Step 8: first real reader.
@@ -120,6 +121,8 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `ReaderInventory` and `SceneLoadPlan` for planning reader-backed dataset loads without reading data yet.
 - `CompositeRecipe` and `ModifierRecipe` for populating dependency graph edges before real generation exists.
 - shared `RustySatError`
+
+The readers crate now has an in-memory `FakeReader` that can expose an inventory, load cloned datasets, and drive a `Scene` planning/insertion vertical slice in tests.
 
 The config crate now has the first real foundation:
 

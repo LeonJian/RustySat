@@ -992,9 +992,11 @@ impl Scene {
     pub fn insert_dataset(&mut self, dataset: Dataset) {
         let id = dataset.id().clone();
         self.wishlist.insert(id.clone());
-        self.dependency_graph
-            .add_leaf(id.clone())
-            .expect("DataId from Dataset must be valid dependency leaf");
+        if !self.dependency_graph.contains(&id) {
+            self.dependency_graph
+                .add_leaf(id.clone())
+                .expect("DataId from Dataset must be valid dependency leaf");
+        }
         self.datasets.insert(id, dataset);
     }
 
