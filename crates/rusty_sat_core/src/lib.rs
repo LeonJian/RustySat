@@ -797,6 +797,65 @@ impl DependencyGraph {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderInventory {
+    name: String,
+    available_dataset_ids: BTreeSet<DataId>,
+}
+
+impl ReaderInventory {
+    pub fn new(
+        name: impl Into<String>,
+        available_dataset_ids: impl IntoIterator<Item = DataId>,
+    ) -> Result<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "reader inventory name cannot be empty",
+            ));
+        }
+        Ok(Self {
+            name,
+            available_dataset_ids: available_dataset_ids.into_iter().collect(),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn available_dataset_ids(&self) -> &BTreeSet<DataId> {
+        &self.available_dataset_ids
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneLoadPlan {
+    reader_datasets: BTreeMap<String, BTreeSet<DataId>>,
+    already_loaded: BTreeSet<DataId>,
+}
+
+impl SceneLoadPlan {
+    pub fn is_empty(&self) -> bool {
+        self.reader_datasets.is_empty()
+    }
+
+    pub fn reader_datasets(&self) -> &BTreeMap<String, BTreeSet<DataId>> {
+        &self.reader_datasets
+    }
+
+    pub fn already_loaded(&self) -> &BTreeSet<DataId> {
+        &self.already_loaded
+    }
+
+    fn add_reader_dataset(&mut self, reader_name: impl Into<String>, id: DataId) {
+        self.reader_datasets
+            .entry(reader_name.into())
+            .or_default()
+            .insert(id);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Scene {
     datasets: BTreeMap<DataId, Dataset>,
@@ -843,6 +902,61 @@ impl Scene {
     pub fn dependency_graph(&self) -> &DependencyGraph {
         &self.dependency_graph
     }
+
+    pub fn plan_reader_loads<'a>(
+        &mut self,
+        wishlist: impl IntoIterator<Item = DataQuery>,
+        inventories: impl IntoIterator<Item = &'a ReaderInventory>,
+    ) -> Result<SceneLoadPlan> {
+        let inventories: Vec<_> = inventories.into_iter().collect();
+        let mut plan = SceneLoadPlan::default();
+
+        for query in wishlist {
+            let best_id = query
+                .best_match(
+                    inventories
+                        .iter()
+                        .flat_map(|inventory| inventory.available_dataset_ids().iter()),
+                )?
+                .clone();
+
+            self.wishlist.insert(best_id.clone());
+            if self.datasets.contains_key(&best_id) {
+                self.dependency_graph.add_leaf(best_id.clone())?;
+                plan.already_loaded.insert(best_id);
+                continue;
+            }
+
+            let reader_name = reader_for_dataset(&best_id, &inventories)?;
+            self.dependency_graph.add_node(
+                best_id.clone(),
+                DependencySource::reader(reader_name.clone())?,
+            )?;
+            plan.add_reader_dataset(reader_name, best_id);
+        }
+
+        Ok(plan)
+    }
+}
+
+fn reader_for_dataset(id: &DataId, inventories: &[&ReaderInventory]) -> Result<String> {
+    let mut readers = inventories
+        .iter()
+        .filter(|inventory| inventory.available_dataset_ids().contains(id))
+        .map(|inventory| inventory.name().to_string());
+    let Some(reader_name) = readers.next() else {
+        return Err(RustySatError::not_found(format!(
+            "reader for dataset '{}'",
+            id.name()
+        )));
+    };
+    if readers.next().is_some() {
+        return Err(RustySatError::ambiguous(format!(
+            "dataset '{}' is available from multiple readers",
+            id.name()
+        )));
+    }
+    Ok(reader_name)
 }
 
 #[cfg(test)]
@@ -961,6 +1075,70 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, RustySatError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn scene_plans_reader_loads_with_best_available_match() {
+        let low_res = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("resolution", 3000.0)
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap();
+        let high_res = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap();
+        let inventory =
+            ReaderInventory::new("seviri_l1b", [low_res.clone(), high_res.clone()]).unwrap();
+        let mut scene = Scene::new();
+
+        let plan = scene
+            .plan_reader_loads([DataQuery::named("VIS006").unwrap()], [&inventory])
+            .unwrap();
+
+        assert!(scene.wishlist().contains(&high_res));
+        assert_eq!(
+            plan.reader_datasets()
+                .get("seviri_l1b")
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![&high_res]
+        );
+        assert_eq!(
+            scene.dependency_graph().get(&high_res).unwrap().source(),
+            &DependencySource::Reader("seviri_l1b".to_string())
+        );
+    }
+
+    #[test]
+    fn scene_load_plan_skips_already_loaded_dataset() {
+        let data_id = DataId::new("VIS006").unwrap();
+        let inventory = ReaderInventory::new("seviri_l1b", [data_id.clone()]).unwrap();
+        let mut scene = Scene::new();
+        scene.insert_dataset(Dataset::new(data_id.clone()));
+
+        let plan = scene
+            .plan_reader_loads([DataQuery::named("VIS006").unwrap()], [&inventory])
+            .unwrap();
+
+        assert!(plan.is_empty());
+        assert!(plan.already_loaded().contains(&data_id));
+    }
+
+    #[test]
+    fn scene_load_plan_reports_unknown_dataset() {
+        let inventory = ReaderInventory::new("seviri_l1b", Vec::<DataId>::new()).unwrap();
+        let mut scene = Scene::new();
+
+        let err = scene
+            .plan_reader_loads([DataQuery::named("MISSING").unwrap()], [&inventory])
+            .unwrap_err();
+
+        assert!(matches!(err, RustySatError::NotFound { .. }));
     }
 
     #[test]

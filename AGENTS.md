@@ -56,7 +56,7 @@ If a roadmap step is too large, split it into smaller lettered substeps before i
   - `[x]` Step 3c: compatibility tests from representative Satpy dataset IDs.
 - `[~]` Step 4: `Scene` core and dependency graph.
   - `[x]` Step 4a: dependency graph data model, user-provided dataset leaves, and Scene removal semantics.
-  - `[ ]` Step 4b: Scene load request planning against available reader dataset IDs.
+  - `[x]` Step 4b: Scene load request planning against available reader dataset IDs.
   - `[ ]` Step 4c: dependency graph population for composites and modifiers.
 - `[ ]` Step 5: fake reader vertical slice.
 - `[ ]` Step 6: filename pattern parser compatible with `trollsift`.
@@ -117,6 +117,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
 - `DependencyGraph` with node sources, dependency edges, leaves, dependents, and Scene integration for user-provided datasets.
+- `ReaderInventory` and `SceneLoadPlan` for planning reader-backed dataset loads without reading data yet.
 - shared `RustySatError`
 
 The config crate now has the first real foundation:
