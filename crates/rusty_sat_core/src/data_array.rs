@@ -14,6 +14,7 @@
 //! items and should not be silently faked here.
 
 use crate::{Result, RustySatError};
+use std::collections::BTreeSet;
 
 /// Numeric element types supported by the first Rusty Sat data-array layer.
 pub trait NumericElement:
@@ -68,6 +69,7 @@ impl DataType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataArray<T: NumericElement> {
     shape: Vec<usize>,
+    dims: Vec<String>,
     values: Vec<T>,
 }
 
@@ -78,7 +80,28 @@ impl<T: NumericElement> DataArray<T> {
     pub fn from_vec(shape: impl Into<Vec<usize>>, values: Vec<T>) -> Result<Self> {
         let shape = shape.into();
         validate_shape_and_len(&shape, values.len())?;
-        Ok(Self { shape, values })
+        let dims = default_dim_names(shape.len());
+        Ok(Self {
+            shape,
+            dims,
+            values,
+        })
+    }
+
+    pub fn from_vec_named(
+        shape: impl Into<Vec<usize>>,
+        dims: impl IntoIterator<Item = impl Into<String>>,
+        values: Vec<T>,
+    ) -> Result<Self> {
+        let shape = shape.into();
+        let dims = dims.into_iter().map(Into::into).collect::<Vec<_>>();
+        validate_shape_and_len(&shape, values.len())?;
+        validate_dims(&shape, &dims)?;
+        Ok(Self {
+            shape,
+            dims,
+            values,
+        })
     }
 
     pub fn dtype(&self) -> DataType {
@@ -91,6 +114,14 @@ impl<T: NumericElement> DataArray<T> {
 
     pub fn shape_nd(&self) -> &[usize] {
         &self.shape
+    }
+
+    pub fn dims(&self) -> &[String] {
+        &self.dims
+    }
+
+    pub fn dim(&self, index: usize) -> Option<&str> {
+        self.dims.get(index).map(String::as_str)
     }
 
     pub fn len(&self) -> usize {
@@ -117,7 +148,7 @@ impl<T: NumericElement> DataArray<T> {
 
 impl DataArray<f64> {
     pub fn new(height: usize, width: usize, values: Vec<f64>) -> Result<Self> {
-        Self::from_vec(vec![height, width], values)
+        Self::from_vec_named(vec![height, width], ["y", "x"], values)
     }
 
     pub fn shape(&self) -> (usize, usize) {
@@ -162,6 +193,16 @@ impl AnyDataArray {
             Self::U8(array) => array.shape_nd(),
             Self::U16(array) => array.shape_nd(),
             Self::I16(array) => array.shape_nd(),
+        }
+    }
+
+    pub fn dims(&self) -> &[String] {
+        match self {
+            Self::F32(array) => array.dims(),
+            Self::F64(array) => array.dims(),
+            Self::U8(array) => array.dims(),
+            Self::U16(array) => array.dims(),
+            Self::I16(array) => array.dims(),
         }
     }
 
@@ -278,6 +319,45 @@ fn validate_shape_and_len(shape: &[usize], actual_len: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_dims(shape: &[usize], dims: &[String]) -> Result<()> {
+    if dims.len() != shape.len() {
+        return Err(RustySatError::invalid_input(format!(
+            "data array has {} dimensions but {} dimension names",
+            shape.len(),
+            dims.len()
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for dim in dims {
+        if dim.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "data array dimension name cannot be empty",
+            ));
+        }
+        if !seen.insert(dim) {
+            return Err(RustySatError::invalid_input(format!(
+                "duplicate data array dimension name '{dim}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn default_dim_names(ndim: usize) -> Vec<String> {
+    match ndim {
+        1 => vec!["y".to_string()],
+        2 => vec!["y".to_string(), "x".to_string()],
+        3 => vec!["bands".to_string(), "y".to_string(), "x".to_string()],
+        4 => vec![
+            "time".to_string(),
+            "bands".to_string(),
+            "y".to_string(),
+            "x".to_string(),
+        ],
+        _ => (0..ndim).map(|idx| format!("dim_{idx}")).collect(),
+    }
+}
+
 fn row_major_offset(shape: &[usize], indexes: &[usize]) -> Option<usize> {
     if shape.len() != indexes.len() {
         return None;
@@ -303,8 +383,24 @@ mod tests {
         assert_eq!(array.dtype(), DataType::U16);
         assert_eq!(array.ndim(), 2);
         assert_eq!(array.shape_nd(), &[2, 2]);
+        assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
         assert_eq!(array.get_nd(&[1, 0]), Some(3));
         assert_eq!(array.get_nd(&[2, 0]), None);
+    }
+
+    #[test]
+    fn constructs_arrays_with_named_dimensions() {
+        let array =
+            DataArray::<f32>::from_vec_named(vec![3, 2, 2], ["bands", "y", "x"], vec![0.0; 12])
+                .unwrap();
+
+        assert_eq!(array.ndim(), 3);
+        assert_eq!(array.shape_nd(), &[3, 2, 2]);
+        assert_eq!(
+            array.dims(),
+            &["bands".to_string(), "y".to_string(), "x".to_string()]
+        );
+        assert_eq!(array.dim(1), Some("y"));
     }
 
     #[test]
@@ -314,6 +410,7 @@ mod tests {
         assert_eq!(grid.dtype(), DataType::F64);
         assert_eq!(grid.shape(), (2, 3));
         assert_eq!(grid.shape_nd(), &[2, 3]);
+        assert_eq!(grid.dims(), &["y".to_string(), "x".to_string()]);
         assert_eq!(grid.get(1, 2), Some(6.0));
     }
 
@@ -327,6 +424,13 @@ mod tests {
     }
 
     #[test]
+    fn validates_dimension_names() {
+        assert!(DataArray::<u8>::from_vec_named(vec![2, 2], ["y"], vec![0; 4]).is_err());
+        assert!(DataArray::<u8>::from_vec_named(vec![2, 2], ["y", "y"], vec![0; 4]).is_err());
+        assert!(DataArray::<u8>::from_vec_named(vec![2, 2], ["y", ""], vec![0; 4]).is_err());
+    }
+
+    #[test]
     fn stores_runtime_typed_arrays() {
         let array =
             AnyDataArray::from(DataArray::<i16>::from_vec(vec![3], vec![-1, 0, 1]).unwrap());
@@ -334,6 +438,7 @@ mod tests {
         assert_eq!(array.dtype(), DataType::I16);
         assert_eq!(array.ndim(), 1);
         assert_eq!(array.shape(), &[3]);
+        assert_eq!(array.dims(), &["y".to_string()]);
         assert_eq!(array.len(), 3);
         assert!(array.as_f64().is_none());
         assert_eq!(array.values_as_f64(), vec![-1.0, 0.0, 1.0]);

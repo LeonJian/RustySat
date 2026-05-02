@@ -120,8 +120,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.1a: Add owned generic `DataArray<T>`, runtime `AnyDataArray`, dtype markers, and keep `DataGrid = DataArray<f64>` compatibility for existing vertical slices.
     - `[x]` P0.1.1b: Migrate `Dataset` storage from f64-only `DataGrid` to runtime typed arrays while preserving f64 grid helpers for resampling/writer code.
     - `[x]` P0.1.1c: Audit reader/resampler/writer APIs and extend the first image writer to accept runtime-typed numeric arrays directly.
-    - `[ ]` P0.1.1d: Decide whether nearest resampling should become generic over numeric arrays now or wait for mask/chunk foundations.
-  - `[ ]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
+    - `[x]` P0.1.1d: Keep nearest resampling f64-only until mask/chunk foundations clarify generic numeric output behavior.
+  - `[~]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
+    - `[x]` P0.1.2a: Add validated dimension names to `DataArray`; default 1D to `y`, 2D to `y,x`, 3D to `bands,y,x`, and 4D to `time,bands,y,x`.
+    - `[ ]` P0.1.2b: Add dimension-aware shape helpers and enforce image/resampler dimensional expectations through names where practical.
   - `[ ]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
   - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
@@ -285,6 +287,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `Scene`
 - `Dataset`
 - `DataArray<T>` with owned n-dimensional numeric data for `f32`, `f64`, `u8`, `u16`, and `i16`
+- validated `DataArray` dimension names with Satpy/xarray-style defaults for 1D through 4D data
 - `AnyDataArray` runtime dtype wrapper and `DataType` markers
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
