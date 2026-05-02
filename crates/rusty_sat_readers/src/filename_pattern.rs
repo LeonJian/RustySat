@@ -171,6 +171,7 @@ enum Token {
 struct Field {
     name: String,
     spec: String,
+    conversion: Option<char>,
     capture_name: String,
     original: String,
 }
@@ -229,14 +230,23 @@ fn flush_literal(tokens: &mut Vec<Token>, literal: &mut String) {
 }
 
 fn parse_field(raw: &str) -> Result<Field> {
-    let no_conversion = raw
-        .split_once('!')
-        .map(|(name, rest)| {
-            let spec = rest.split_once(':').map(|(_, spec)| spec).unwrap_or("");
-            (name, spec)
-        })
-        .unwrap_or_else(|| raw.split_once(':').unwrap_or((raw, "")));
-    let name = no_conversion.0.trim();
+    let (name_and_conversion, spec) = raw.split_once(':').unwrap_or((raw, ""));
+    let (name, conversion) = match name_and_conversion.split_once('!') {
+        Some((name, conversion)) => {
+            let mut chars = conversion.chars();
+            let conversion = chars
+                .next()
+                .ok_or_else(|| RustySatError::invalid_input("empty filename pattern conversion"))?;
+            if chars.next().is_some() {
+                return Err(RustySatError::invalid_input(format!(
+                    "unsupported filename pattern conversion '{conversion}'"
+                )));
+            }
+            (name, Some(conversion))
+        }
+        None => (name_and_conversion, None),
+    };
+    let name = name.trim();
     if name.is_empty() {
         return Err(RustySatError::invalid_input(
             "filename pattern field name cannot be empty",
@@ -249,7 +259,8 @@ fn parse_field(raw: &str) -> Result<Field> {
     }
     Ok(Field {
         name: name.to_string(),
-        spec: no_conversion.1.to_string(),
+        spec: spec.to_string(),
+        conversion,
         capture_name: String::new(),
         original: format!("{{{raw}}}"),
     })
@@ -318,11 +329,12 @@ fn regex_for_spec(spec: &str) -> Result<String> {
         return datetime_regex(spec);
     }
 
-    let kind = spec.chars().last().unwrap_or('s');
-    let width = leading_width(spec);
+    let parsed = ParsedSpec::new(spec);
+    let kind = parsed.kind;
+    let width = parsed.width;
     let base = match kind {
         'd' | 'i' => r"[-+]?\d",
-        'f' | 'e' | 'E' | 'g' => r"[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?",
+        'f' | 'e' | 'E' | 'g' => return Ok(float_regex(width, parsed.precision)),
         'x' | 'X' => r"[-+]?(0[xX])?[\dA-Fa-f]",
         'o' => r"[-+]?[0-7]",
         'b' => r"[-+]?[0-1]",
@@ -335,12 +347,27 @@ fn regex_for_spec(spec: &str) -> Result<String> {
         }
     };
     Ok(match width {
-        Some(width) if kind != 'f' && kind != 'e' && kind != 'E' && kind != 'g' => {
-            format!("{base}{{{width}}}")
+        Some(width)
+            if parsed.fill.is_some() || matches!(kind, 'd' | 'i' | 'x' | 'X' | 'o' | 'b') =>
+        {
+            format!(r".{{{width}}}")
         }
+        Some(width) => format!("{base}{{{width}}}"),
         _ if matches!(kind, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 's' | 'c') => format!("{base}*?"),
         _ => base.to_string(),
     })
+}
+
+fn float_regex(width: Option<usize>, precision: Option<usize>) -> String {
+    if let Some(width) = width {
+        return format!(r".{{{width}}}");
+    }
+    match precision {
+        Some(precision) => {
+            format!(r"[-+]?(\d+(\.\d{{{precision}}})|\.\d{{{precision}}})([eE][-+]?\d+)?")
+        }
+        None => r"[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?".to_string(),
+    }
 }
 
 fn datetime_regex(spec: &str) -> Result<String> {
@@ -363,7 +390,7 @@ fn glob_for_field(field: &Field) -> Result<String> {
         }
         return Ok(out);
     }
-    Ok(match leading_width(spec) {
+    Ok(match ParsedSpec::new(spec).width {
         Some(width) => "?".repeat(width),
         None => "*".to_string(),
     })
@@ -371,25 +398,25 @@ fn glob_for_field(field: &Field) -> Result<String> {
 
 fn convert_value(raw: &str, field: &Field) -> Result<PatternValue> {
     let spec = field.spec.as_str();
-    let kind = spec.chars().last().unwrap_or('s');
+    let parsed = ParsedSpec::new(spec);
+    let kind = parsed.kind;
     if spec.contains('%') || spec.is_empty() || matches!(kind, 's' | 'c') {
         return Ok(PatternValue::Text(raw.to_string()));
     }
     if matches!(kind, 'd' | 'i') {
-        return raw
-            .trim()
-            .parse::<i64>()
-            .map(PatternValue::Integer)
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "invalid integer field '{}': {err}",
-                    field.name
-                ))
-            });
+        return parse_integer(raw, 10, field);
+    }
+    if matches!(kind, 'x' | 'X') {
+        return parse_integer(raw, 16, field);
+    }
+    if kind == 'o' {
+        return parse_integer(raw, 8, field);
+    }
+    if kind == 'b' {
+        return parse_integer(raw, 2, field);
     }
     if matches!(kind, 'f' | 'e' | 'E' | 'g') {
-        return raw
-            .trim()
+        return cleaned_number_text(raw, &parsed)
             .parse::<f64>()
             .map(PatternValue::Float)
             .map_err(|err| {
@@ -400,24 +427,154 @@ fn convert_value(raw: &str, field: &Field) -> Result<PatternValue> {
 }
 
 fn format_value(value: &PatternValue, field: &Field) -> Result<String> {
-    let raw = value.as_compose_text();
-    if let Some(width) = leading_width(&field.spec) {
-        let kind = field.spec.chars().last().unwrap_or('s');
-        if matches!(kind, 'd' | 'i') {
-            return Ok(format!(
-                "{:0width$}",
-                raw.parse::<i64>().unwrap_or_default(),
-                width = width
-            ));
+    let converted = apply_conversion(value.as_compose_text(), field.conversion)?;
+    let parsed = ParsedSpec::new(&field.spec);
+    if let Some(width) = parsed.width {
+        if matches!(parsed.kind, 'd' | 'i') {
+            let number = converted.parse::<i64>().unwrap_or_default();
+            let fill = parsed.fill.unwrap_or(if parsed.zero { '0' } else { ' ' });
+            return Ok(pad_left(&number.to_string(), width, fill));
         }
     }
-    Ok(raw)
+    Ok(converted)
 }
 
-fn leading_width(spec: &str) -> Option<usize> {
-    let digits = spec
+fn parse_integer(raw: &str, radix: u32, field: &Field) -> Result<PatternValue> {
+    let parsed = ParsedSpec::new(&field.spec);
+    let cleaned = cleaned_number_text(raw, &parsed);
+    let cleaned = cleaned.trim_start_matches("0x").trim_start_matches("0X");
+    i64::from_str_radix(cleaned, radix)
+        .map(PatternValue::Integer)
+        .map_err(|err| {
+            RustySatError::invalid_input(format!("invalid integer field '{}': {err}", field.name))
+        })
+}
+
+fn cleaned_number_text<'a>(raw: &'a str, parsed: &ParsedSpec) -> String {
+    let trimmed = raw.trim();
+    match parsed.fill {
+        Some(fill) => trimmed.trim_matches(fill).trim().to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+fn apply_conversion(mut value: String, conversion: Option<char>) -> Result<String> {
+    match conversion {
+        None | Some('s') => {}
+        Some('c') => {
+            let mut chars = value.chars();
+            value = match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => value,
+            };
+        }
+        Some('l') => value = value.to_lowercase(),
+        Some('t') => {
+            value = value
+                .split(' ')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            first.to_uppercase().collect::<String>()
+                                + &chars.as_str().to_lowercase()
+                        }
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        Some('u') => value = value.to_uppercase(),
+        Some('h') => value = remove_separators(&value.to_lowercase()),
+        Some('H') => value = remove_separators(&value.to_uppercase()),
+        Some('R') => value = remove_separators(&value),
+        Some('r') => value = format!("'{value}'"),
+        Some(other) => {
+            return Err(RustySatError::invalid_input(format!(
+                "unsupported filename pattern conversion '{other}'"
+            )));
+        }
+    }
+    Ok(value)
+}
+
+fn remove_separators(value: &str) -> String {
+    value
         .chars()
-        .skip_while(|ch| matches!(ch, '<' | '>' | '=' | '^' | '+' | '-' | ' '))
+        .filter(|ch| !matches!(ch, '-' | '_' | ':' | ' '))
+        .collect()
+}
+
+fn pad_left(value: &str, width: usize, fill: char) -> String {
+    if value.len() >= width {
+        return value.to_string();
+    }
+    format!("{}{}", fill.to_string().repeat(width - value.len()), value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedSpec {
+    fill: Option<char>,
+    zero: bool,
+    width: Option<usize>,
+    precision: Option<usize>,
+    kind: char,
+}
+
+impl ParsedSpec {
+    fn new(spec: &str) -> Self {
+        let kind = spec
+            .chars()
+            .last()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .unwrap_or('s');
+        let (fill, zero) = parse_fill(spec);
+        let width = parse_width(spec);
+        let precision = parse_precision(spec);
+        Self {
+            fill,
+            zero,
+            width,
+            precision,
+            kind,
+        }
+    }
+}
+
+fn parse_fill(spec: &str) -> (Option<char>, bool) {
+    let mut chars = spec.chars();
+    let first = chars.next();
+    let second = chars.next();
+    if matches!(second, Some('<' | '>' | '=' | '^')) {
+        return (first, false);
+    }
+    (None, spec.starts_with('0'))
+}
+
+fn parse_width(spec: &str) -> Option<usize> {
+    let mut digits = String::new();
+    let mut started = false;
+    for ch in spec.chars() {
+        if ch == '.' {
+            break;
+        }
+        if ch.is_ascii_digit() {
+            started = true;
+            digits.push(ch);
+        } else if started {
+            break;
+        }
+    }
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn parse_precision(spec: &str) -> Option<usize> {
+    let (_, precision) = spec.split_once('.')?;
+    let digits = precision
+        .chars()
         .take_while(|ch| ch.is_ascii_digit())
         .collect::<String>();
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
@@ -541,5 +698,93 @@ mod tests {
 
         assert!(parser.validate("npp_npp_001"));
         assert!(!parser.validate("npp_noaa20_001"));
+    }
+
+    #[test]
+    fn compose_supports_trollsift_string_conversions() {
+        let value = PatternValue::from("this Is A-Test b_test c test");
+        let values = BTreeMap::from([("a".to_string(), value)]);
+
+        assert_eq!(
+            FilenamePattern::new("{a!c}")
+                .unwrap()
+                .compose(&values, false)
+                .unwrap(),
+            "This is a-test b_test c test"
+        );
+        assert_eq!(
+            FilenamePattern::new("{a!h}")
+                .unwrap()
+                .compose(&values, false)
+                .unwrap(),
+            "thisisatestbtestctest"
+        );
+        assert_eq!(
+            FilenamePattern::new("{a!H}")
+                .unwrap()
+                .compose(&values, false)
+                .unwrap(),
+            "THISISATESTBTESTCTEST"
+        );
+        assert_eq!(
+            FilenamePattern::new("{a!R}")
+                .unwrap()
+                .compose(&values, false)
+                .unwrap(),
+            "thisIsATestbtestctest"
+        );
+        assert_eq!(
+            FilenamePattern::new("{a!u}")
+                .unwrap()
+                .compose(&values, false)
+                .unwrap(),
+            "THIS IS A-TEST B_TEST C TEST"
+        );
+        assert_eq!(
+            FilenamePattern::new("{a!r}")
+                .unwrap()
+                .compose(&values, false)
+                .unwrap(),
+            "'this Is A-Test b_test c test'"
+        );
+    }
+
+    #[test]
+    fn parses_trollsift_integer_radices_and_padding() {
+        for (fmt, string) in [
+            ("{foo:x}", "7b"),
+            ("{foo:X}", "7B"),
+            ("{foo:03x}", "07b"),
+            ("{foo:3x}", " 7b"),
+            ("{foo:o}", "173"),
+            ("{foo:_>4o}", "_173"),
+            ("{foo:b}", "1111011"),
+            ("{foo:8b}", " 1111011"),
+        ] {
+            let parser = FilenamePattern::new(fmt).unwrap();
+            assert_eq!(
+                parser.parse(string).unwrap()["foo"],
+                PatternValue::Integer(123)
+            );
+        }
+    }
+
+    #[test]
+    fn parses_trollsift_fixed_point_examples() {
+        for (fmt, string, expected) in [
+            ("{foo:f}", "12.34", 12.34),
+            ("{foo:5.2f}", "-1.23", -1.23),
+            ("{foo:5.2f}", " 1.23", 1.23),
+            ("{foo:05.2f}", "01.23", 1.23),
+            ("{foo:.2f}", "12.34", 12.34),
+            ("{foo:4.2f}", "-.12", -0.12),
+            ("{foo:7.2e}", "-1.23e4", -1.23e4),
+        ] {
+            let parser = FilenamePattern::new(fmt).unwrap();
+            assert_eq!(
+                parser.parse(string).unwrap()["foo"],
+                PatternValue::Float(expected)
+            );
+        }
     }
 }
