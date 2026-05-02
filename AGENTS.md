@@ -71,10 +71,10 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 7a: `AreaDefinition` metadata, shape/extent validation, and common Satpy/Pyresample YAML area loading.
   - `[x]` Step 7b: projection-unit resolution-derived shapes/extents for common Pyresample `create_area_def` inputs.
   - `[x]` Step 7c: swath definition coordinate storage/loading foundations.
-- `[~]` Step 8: first real reader.
+- `[x]` Step 8: first real reader.
   - `[x]` Step 8a: Satpy-style reader YAML metadata parsing and dataset inventory generation.
   - `[x]` Step 8b: YAML-backed filename matching and file grouping using the existing filename pattern parser.
-  - `[ ]` Step 8c: first small file handler that loads real array values from an openly documented simple format.
+  - `[x]` Step 8c: first small file handler that loads real array values from an openly documented simple format.
 - `[ ]` Step 9: nearest resampling.
 - `[ ]` Step 10: first writer.
 - `[ ]` Step 11: first composite.
@@ -147,6 +147,12 @@ The readers crate now has a metadata-only `yaml_reader` module based on inspecte
 - Builds `DataId` inventory entries from dataset names, scalar resolutions, wavelength triplets, polarization, modifiers, and calibration variants.
 - Matches configured file type patterns against filename tails, parses filename metadata with `FilenamePattern`, filters selected filenames, and sorts file types after their `requires` dependencies.
 - Exposes `YamlMetadataReader` through the common `Reader` trait, but dataset array loading is intentionally unsupported until a real file handler substep.
+
+The readers crate now has the first real array-loading vertical slice:
+
+- `rusty_sat_core::DataGrid` stores 2D f64 dataset values with shape validation.
+- `text_grid::TextGridReader` combines Satpy-style YAML metadata, filename matching, and a tiny plain-text numeric grid file handler.
+- This proves the Reader trait can return real `Dataset` values. It is intentionally not a production satellite reader; NetCDF/HDF/GeoTIFF product handlers remain future work.
 
 The config crate now has the first real foundation:
 

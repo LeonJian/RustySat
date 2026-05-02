@@ -1,8 +1,10 @@
 //! Reader framework foundations.
 
 pub mod filename_pattern;
+pub mod text_grid;
 pub mod yaml_reader;
 
+pub use text_grid::{load_text_grid, parse_text_grid, TextGridReader};
 pub use yaml_reader::{
     DatasetConfig, FileMatch, FileTypeConfig, ReaderInfo, YamlMetadataReader, YamlReaderConfig,
 };

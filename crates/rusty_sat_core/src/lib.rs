@@ -614,6 +614,7 @@ pub struct ScoredDataId<'a> {
 pub struct Dataset {
     id: DataId,
     metadata: BTreeMap<String, String>,
+    data: Option<DataGrid>,
 }
 
 impl Dataset {
@@ -621,11 +622,25 @@ impl Dataset {
         Self {
             id,
             metadata: BTreeMap::new(),
+            data: None,
         }
+    }
+
+    pub fn with_data(mut self, data: DataGrid) -> Self {
+        self.data = Some(data);
+        self
     }
 
     pub fn id(&self) -> &DataId {
         &self.id
+    }
+
+    pub fn data(&self) -> Option<&DataGrid> {
+        self.data.as_ref()
+    }
+
+    pub fn set_data(&mut self, data: DataGrid) {
+        self.data = Some(data);
     }
 
     pub fn metadata(&self) -> &BTreeMap<String, String> {
@@ -643,6 +658,53 @@ impl Dataset {
         }
         self.metadata.insert(key, value.into());
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataGrid {
+    height: usize,
+    width: usize,
+    values: Vec<f64>,
+}
+
+impl DataGrid {
+    pub fn new(height: usize, width: usize, values: Vec<f64>) -> Result<Self> {
+        if height == 0 || width == 0 {
+            return Err(RustySatError::invalid_input(
+                "data grid dimensions must be non-zero",
+            ));
+        }
+        let expected_len = height * width;
+        if values.len() != expected_len {
+            return Err(RustySatError::invalid_input(format!(
+                "data grid has {} values but shape {}x{} requires {}",
+                values.len(),
+                height,
+                width,
+                expected_len
+            )));
+        }
+        Ok(Self {
+            height,
+            width,
+            values,
+        })
+    }
+
+    pub fn shape(&self) -> (usize, usize) {
+        (self.height, self.width)
+    }
+
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+
+    pub fn get(&self, y: usize, x: usize) -> Option<f64> {
+        if y >= self.height || x >= self.width {
+            return None;
+        }
+        Some(self.values[y * self.width + x])
     }
 }
 
@@ -1156,6 +1218,17 @@ mod tests {
             &DependencySource::UserProvided
         );
         assert!(scene.dependency_graph().leaves().contains(&data_id));
+    }
+
+    #[test]
+    fn dataset_can_store_real_grid_values() {
+        let data_id = DataId::new("VIS006").unwrap();
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let dataset = Dataset::new(data_id).with_data(grid);
+
+        assert_eq!(dataset.data().unwrap().shape(), (2, 3));
+        assert_eq!(dataset.data().unwrap().get(1, 2), Some(6.0));
+        assert_eq!(dataset.data().unwrap().get(2, 0), None);
     }
 
     #[test]
