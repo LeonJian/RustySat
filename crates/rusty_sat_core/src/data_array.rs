@@ -21,26 +21,48 @@ pub trait NumericElement:
     Copy + Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static
 {
     const DTYPE: DataType;
+
+    fn to_f64(self) -> f64;
 }
 
 impl NumericElement for f32 {
     const DTYPE: DataType = DataType::F32;
+
+    fn to_f64(self) -> f64 {
+        f64::from(self)
+    }
 }
 
 impl NumericElement for f64 {
     const DTYPE: DataType = DataType::F64;
+
+    fn to_f64(self) -> f64 {
+        self
+    }
 }
 
 impl NumericElement for u8 {
     const DTYPE: DataType = DataType::U8;
+
+    fn to_f64(self) -> f64 {
+        f64::from(self)
+    }
 }
 
 impl NumericElement for u16 {
     const DTYPE: DataType = DataType::U16;
+
+    fn to_f64(self) -> f64 {
+        f64::from(self)
+    }
 }
 
 impl NumericElement for i16 {
     const DTYPE: DataType = DataType::I16;
+
+    fn to_f64(self) -> f64 {
+        f64::from(self)
+    }
 }
 
 /// Runtime dtype marker for Satpy-style numeric datasets.
@@ -509,27 +531,11 @@ impl AnyDataArray {
 
     pub fn values_as_f64(&self) -> Vec<f64> {
         match self {
-            Self::F32(array) => array
-                .values()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
+            Self::F32(array) => array.values().iter().map(|value| value.to_f64()).collect(),
             Self::F64(array) => array.values().to_vec(),
-            Self::U8(array) => array
-                .values()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            Self::U16(array) => array
-                .values()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
-            Self::I16(array) => array
-                .values()
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect(),
+            Self::U8(array) => array.values().iter().map(|value| value.to_f64()).collect(),
+            Self::U16(array) => array.values().iter().map(|value| value.to_f64()).collect(),
+            Self::I16(array) => array.values().iter().map(|value| value.to_f64()).collect(),
         }
     }
 }

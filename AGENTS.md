@@ -132,7 +132,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[~]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
     - `[x]` P0.1.4a: Add validated chunk-shape metadata to `DataArray` and runtime typed arrays without introducing lazy IO yet.
     - `[x]` P0.1.4b: Add a lazy chunk source abstraction for deferred file-backed array loading.
-    - `[ ]` P0.1.4c: Teach readers/resamplers/writers to preserve or consume chunked arrays incrementally.
+    - `[~]` P0.1.4c: Teach readers/resamplers/writers to preserve or consume chunked arrays incrementally.
+      - `[x]` P0.1.4c1: Teach the first PGM writer to consume 2D lazy arrays by reading chunks into one y-stripe at a time.
+      - `[ ]` P0.1.4c2: Add reader-side lazy chunk source fixtures before production NetCDF/HDF handlers.
+      - `[ ]` P0.1.4c3: Add resampler-side chunk preservation once generic numeric resampling is ready.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
 - `[ ]` P0-2: CRS and projection system.
@@ -359,6 +362,7 @@ The writers crate now has the first real image-output vertical slice:
 
 - `PgmWriter` writes single-band numeric datasets to binary PGM (`P5`) grayscale image files.
 - It now accepts runtime-typed `AnyDataArray` values for supported numeric dtypes, not only f64 `DataGrid` values.
+- It can also write 2D `LazyDataArray<T>` inputs to PGM by reading chunks into one y-stripe at a time. This proves incremental writer consumption without requiring a full-image eager array, but it is still a PGM-only vertical slice and not the final Satpy `simple_image`/PNG writer path.
 - It requires image-like `y,x` dimensions for runtime-typed arrays.
 - It treats masked pixels as fill pixels and excludes them from autoscaling.
 - It supports explicit linear scaling, autoscaling over finite values, and fill values for non-finite pixels.

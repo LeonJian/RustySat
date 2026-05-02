@@ -115,6 +115,36 @@ impl<T: NumericElement> LazyDataArray<T> {
         &self.chunks
     }
 
+    pub fn shape_yx(&self) -> Result<(usize, usize)> {
+        let Some(y_index) = self.dims.iter().position(|dim| dim == "y") else {
+            return Err(RustySatError::invalid_input(
+                "lazy data array requires a 'y' dimension",
+            ));
+        };
+        let Some(x_index) = self.dims.iter().position(|dim| dim == "x") else {
+            return Err(RustySatError::invalid_input(
+                "lazy data array requires an 'x' dimension",
+            ));
+        };
+        Ok((self.shape[y_index], self.shape[x_index]))
+    }
+
+    pub fn require_dims_exact(&self, expected: &[&str]) -> Result<()> {
+        if self.dims.len() != expected.len()
+            || !self
+                .dims
+                .iter()
+                .zip(expected)
+                .all(|(left, right)| left == right)
+        {
+            return Err(RustySatError::invalid_input(format!(
+                "lazy data array dimensions {:?} do not match expected {:?}",
+                self.dims, expected
+            )));
+        }
+        Ok(())
+    }
+
     pub fn chunk_count(&self) -> usize {
         self.chunks
             .chunk_count_for_shape(&self.shape)
