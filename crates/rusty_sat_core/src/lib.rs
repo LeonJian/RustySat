@@ -618,7 +618,7 @@ pub struct ScoredDataId<'a> {
 pub struct Dataset {
     id: DataId,
     metadata: BTreeMap<String, String>,
-    data: Option<DataGrid>,
+    data: Option<AnyDataArray>,
 }
 
 impl Dataset {
@@ -631,7 +631,12 @@ impl Dataset {
     }
 
     pub fn with_data(mut self, data: DataGrid) -> Self {
-        self.data = Some(data);
+        self.data = Some(data.into());
+        self
+    }
+
+    pub fn with_array(mut self, data: impl Into<AnyDataArray>) -> Self {
+        self.data = Some(data.into());
         self
     }
 
@@ -640,11 +645,19 @@ impl Dataset {
     }
 
     pub fn data(&self) -> Option<&DataGrid> {
+        self.data.as_ref().and_then(AnyDataArray::as_f64)
+    }
+
+    pub fn array(&self) -> Option<&AnyDataArray> {
         self.data.as_ref()
     }
 
     pub fn set_data(&mut self, data: DataGrid) {
-        self.data = Some(data);
+        self.data = Some(data.into());
+    }
+
+    pub fn set_array(&mut self, data: impl Into<AnyDataArray>) {
+        self.data = Some(data.into());
     }
 
     pub fn metadata(&self) -> &BTreeMap<String, String> {
@@ -1183,9 +1196,25 @@ mod tests {
         let grid = DataGrid::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let dataset = Dataset::new(data_id).with_data(grid);
 
+        assert_eq!(dataset.array().unwrap().dtype(), DataType::F64);
         assert_eq!(dataset.data().unwrap().shape(), (2, 3));
         assert_eq!(dataset.data().unwrap().get(1, 2), Some(6.0));
         assert_eq!(dataset.data().unwrap().get(2, 0), None);
+    }
+
+    #[test]
+    fn dataset_can_store_runtime_typed_array_values() {
+        let data_id = DataId::new("quality_flags").unwrap();
+        let array = DataArray::<u8>::from_vec(vec![2, 2], vec![0, 1, 2, 3]).unwrap();
+        let mut dataset = Dataset::new(data_id).with_array(array);
+
+        assert_eq!(dataset.array().unwrap().dtype(), DataType::U8);
+        assert_eq!(dataset.array().unwrap().shape(), &[2, 2]);
+        assert!(dataset.data().is_none());
+
+        dataset.set_array(DataArray::<i16>::from_vec(vec![3], vec![-1, 0, 1]).unwrap());
+        assert_eq!(dataset.array().unwrap().dtype(), DataType::I16);
+        assert_eq!(dataset.array().unwrap().shape(), &[3]);
     }
 
     #[test]
