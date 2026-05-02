@@ -10,6 +10,10 @@ use std::error::Error;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 
+mod data_array;
+
+pub use data_array::{AnyDataArray, DataArray, DataGrid, DataType, NumericElement};
+
 pub type Result<T> = std::result::Result<T, RustySatError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,53 +662,6 @@ impl Dataset {
         }
         self.metadata.insert(key, value.into());
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct DataGrid {
-    height: usize,
-    width: usize,
-    values: Vec<f64>,
-}
-
-impl DataGrid {
-    pub fn new(height: usize, width: usize, values: Vec<f64>) -> Result<Self> {
-        if height == 0 || width == 0 {
-            return Err(RustySatError::invalid_input(
-                "data grid dimensions must be non-zero",
-            ));
-        }
-        let expected_len = height * width;
-        if values.len() != expected_len {
-            return Err(RustySatError::invalid_input(format!(
-                "data grid has {} values but shape {}x{} requires {}",
-                values.len(),
-                height,
-                width,
-                expected_len
-            )));
-        }
-        Ok(Self {
-            height,
-            width,
-            values,
-        })
-    }
-
-    pub fn shape(&self) -> (usize, usize) {
-        (self.height, self.width)
-    }
-
-    pub fn values(&self) -> &[f64] {
-        &self.values
-    }
-
-    pub fn get(&self, y: usize, x: usize) -> Option<f64> {
-        if y >= self.height || x >= self.width {
-            return None;
-        }
-        Some(self.values[y * self.width + x])
     }
 }
 

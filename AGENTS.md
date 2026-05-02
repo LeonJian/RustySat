@@ -116,7 +116,9 @@ Required corrections to the plan:
 Highest priority. Complete these before major reader/composite/writer expansion.
 
 - `[~]` P0-1: DataArray/DataGrid foundation.
-  - `[ ]` P0.1.1: Replace f64-only 2D `DataGrid` with a Rust-native `DataArray`/`ArrayD<T>` style model supporting numeric dtypes such as `f32`, `f64`, `u8`, `u16`, and `i16`.
+  - `[~]` P0.1.1: Replace f64-only 2D `DataGrid` with a Rust-native `DataArray`/`ArrayD<T>` style model supporting numeric dtypes such as `f32`, `f64`, `u8`, `u16`, and `i16`.
+    - `[x]` P0.1.1a: Add owned generic `DataArray<T>`, runtime `AnyDataArray`, dtype markers, and keep `DataGrid = DataArray<f64>` compatibility for existing vertical slices.
+    - `[ ]` P0.1.1b: Migrate `Dataset` storage from f64-only `DataGrid` to runtime typed arrays while preserving f64 grid helpers for resampling/writer code.
   - `[ ]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
   - `[ ]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
   - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
@@ -280,6 +282,8 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 
 - `Scene`
 - `Dataset`
+- `DataArray<T>` with owned n-dimensional numeric data for `f32`, `f64`, `u8`, `u16`, and `i16`
+- `AnyDataArray` runtime dtype wrapper and `DataType` markers
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
 - `DependencyGraph` with node sources, dependency edges, leaves, dependents, and Scene integration for user-provided datasets.
@@ -300,7 +304,7 @@ The readers crate now has a metadata-only `yaml_reader` module based on inspecte
 
 The readers crate now has the first real array-loading vertical slice:
 
-- `rusty_sat_core::DataGrid` stores 2D f64 dataset values with shape validation.
+- `rusty_sat_core::DataGrid` is now a compatibility alias for `DataArray<f64>` and still stores the existing 2D f64 dataset values used by early reader/resampler/writer code.
 - `text_grid::TextGridReader` combines Satpy-style YAML metadata, filename matching, and a tiny plain-text numeric grid file handler.
 - This proves the Reader trait can return real `Dataset` values. It is intentionally not a production satellite reader; NetCDF/HDF/GeoTIFF product handlers remain future work.
 
