@@ -1,36 +1,10 @@
 //! Geometry and resampling foundations.
 
+pub mod area;
+
+pub use area::{load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition};
+
 use rusty_sat_core::{Dataset, Result, RustySatError};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AreaDefinition {
-    id: String,
-    height: usize,
-    width: usize,
-}
-
-impl AreaDefinition {
-    pub fn new(id: impl Into<String>, height: usize, width: usize) -> Result<Self> {
-        let id = id.into();
-        if id.trim().is_empty() {
-            return Err(RustySatError::invalid_input("area id cannot be empty"));
-        }
-        if height == 0 || width == 0 {
-            return Err(RustySatError::invalid_input(
-                "area dimensions must be non-zero",
-            ));
-        }
-        Ok(Self { id, height, width })
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn shape(&self) -> (usize, usize) {
-        (self.height, self.width)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwathDefinition {

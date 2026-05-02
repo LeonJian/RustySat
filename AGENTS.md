@@ -67,7 +67,10 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 6b: trollsift custom compose conversions plus richer integer and fixed-point parsing.
   - `[x]` Step 6c: typed datetime values for common numeric strftime filename fields.
   - `[x]` Step 6d: remaining initial trollsift edge-case parity for partial compose and conversion errors.
-- `[ ]` Step 7: area definitions and YAML area loading.
+- `[~]` Step 7: area definitions and YAML area loading.
+  - `[x]` Step 7a: `AreaDefinition` metadata, shape/extent validation, and common Satpy/Pyresample YAML area loading.
+  - `[ ]` Step 7b: dynamic area definitions, resolution-derived extents, and richer pyresample compatibility.
+  - `[ ]` Step 7c: swath definition coordinate storage/loading foundations.
 - `[ ]` Step 8: first real reader.
 - `[ ]` Step 9: nearest resampling.
 - `[ ]` Step 10: first writer.
@@ -141,6 +144,12 @@ The config crate now has the first real foundation:
 - `RUSTY_SAT_CONFIG_PATH` and `SATPY_CONFIG_PATH` environment path support.
 - Component config lookup for readers, writers, composites, and enhancements.
 - YAML file loading with recursive merge where later files override earlier files.
+
+The resample crate now has a focused `area` module based on inspected Pyresample/Satpy references:
+
+- `AreaDefinition` with id, description, projection id, projection parameters, shape, area extent, and pixel-size helpers.
+- YAML loading for common Satpy/Pyresample area definitions with mapping projections, PROJ strings, `shape.height`/`shape.width`, flat `area_extent`, and `lower_left_xy`/`upper_right_xy`.
+- Validation for empty ids, zero-sized shapes, invalid extents, missing area ids, and malformed YAML.
 
 No real Satpy reader, resampler, compositor, enhancement, or writer behavior has been ported yet.
 
