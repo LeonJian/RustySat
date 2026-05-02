@@ -1,33 +1,14 @@
 //! Geometry and resampling foundations.
 
 pub mod area;
+pub mod swath;
 
 pub use area::{
     load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition, PixelResolution,
 };
+pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};
 
 use rusty_sat_core::{Dataset, Result, RustySatError};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwathDefinition {
-    height: usize,
-    width: usize,
-}
-
-impl SwathDefinition {
-    pub fn new(height: usize, width: usize) -> Result<Self> {
-        if height == 0 || width == 0 {
-            return Err(RustySatError::invalid_input(
-                "swath dimensions must be non-zero",
-            ));
-        }
-        Ok(Self { height, width })
-    }
-
-    pub fn shape(&self) -> (usize, usize) {
-        (self.height, self.width)
-    }
-}
 
 pub trait Resampler {
     fn name(&self) -> &str;

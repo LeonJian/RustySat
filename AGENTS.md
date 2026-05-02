@@ -67,10 +67,10 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 6b: trollsift custom compose conversions plus richer integer and fixed-point parsing.
   - `[x]` Step 6c: typed datetime values for common numeric strftime filename fields.
   - `[x]` Step 6d: remaining initial trollsift edge-case parity for partial compose and conversion errors.
-- `[~]` Step 7: area definitions and YAML area loading.
+- `[x]` Step 7: area definitions and YAML area loading.
   - `[x]` Step 7a: `AreaDefinition` metadata, shape/extent validation, and common Satpy/Pyresample YAML area loading.
   - `[x]` Step 7b: projection-unit resolution-derived shapes/extents for common Pyresample `create_area_def` inputs.
-  - `[ ]` Step 7c: swath definition coordinate storage/loading foundations.
+  - `[x]` Step 7c: swath definition coordinate storage/loading foundations.
 - `[ ]` Step 8: first real reader.
 - `[ ]` Step 9: nearest resampling.
 - `[ ]` Step 10: first writer.
@@ -151,6 +151,13 @@ The resample crate now has a focused `area` module based on inspected Pyresample
 - YAML loading for common Satpy/Pyresample area definitions with mapping projections, PROJ strings, `shape.height`/`shape.width`, flat `area_extent`, and `lower_left_xy`/`upper_right_xy`.
 - Projection-unit resolution helpers for deterministic Pyresample-style derivations: `area_extent + resolution` derives shape, and `center + radius + resolution` derives extent and shape. Unit conversion, pyproj CRS validation, and lon/lat-driven dynamic freezing are still future work.
 - Validation for empty ids, zero-sized shapes, invalid extents, missing area ids, and malformed YAML.
+
+The resample crate also has a focused `swath` module based on inspected Pyresample references:
+
+- `SwathDefinition` can represent dimension-only swaths or validated longitude/latitude coordinate arrays.
+- It preserves Pyresample's default lon/lat WGS84 CRS convention as explicit metadata.
+- YAML loading supports small 1D and 2D longitude/latitude fixtures for tests and future reader work.
+- Real geocentric resolution, aggregation, boundary extraction, CRS transforms, and resampling behavior are still future work.
 
 No real Satpy reader, resampler, compositor, enhancement, or writer behavior has been ported yet.
 
