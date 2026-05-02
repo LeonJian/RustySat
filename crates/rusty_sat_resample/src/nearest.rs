@@ -7,10 +7,11 @@
 //!
 //! This module starts with projection-coordinate area-to-area resampling. It
 //! uses pixel centers and an optional radius of influence like Pyresample, but
-//! does not yet implement kd-tree lookup, swaths, CRS transforms, or masks.
+//! does not yet implement kd-tree lookup, CRS transforms, or full fill-vs-mask
+//! policy.
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
-use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError};
+use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError, ValidityMask};
 
 #[derive(Debug, Clone)]
 pub struct NearestAreaResampler {
@@ -112,21 +113,27 @@ pub fn resample_area_nearest(
     }
     let (dst_height, dst_width) = destination.shape();
     let mut values = Vec::with_capacity(dst_height * dst_width);
+    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
     for y in 0..dst_height {
         for x in 0..dst_width {
             let (dst_x, dst_y) = pixel_center(destination, y, x);
             let Some((src_y, src_x, distance)) = nearest_source_pixel(source, dst_x, dst_y) else {
                 values.push(fill_value);
+                mask_flags.push(false);
                 continue;
             };
             if radius_of_influence.is_some_and(|radius| distance > radius) {
                 values.push(fill_value);
+                mask_flags.push(false);
                 continue;
             }
+            let source_index = src_y * source.shape().1 + src_x;
+            let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
             values.push(source_grid.get(src_y, src_x).unwrap_or(fill_value));
+            mask_flags.push(source_masked);
         }
     }
-    DataGrid::new(dst_height, dst_width, values)
+    finish_resampled_grid(dst_height, dst_width, values, mask_flags)
 }
 
 pub fn resample_swath_nearest(
@@ -152,22 +159,41 @@ pub fn resample_swath_nearest(
     })?;
     let (dst_height, dst_width) = destination.shape();
     let mut values = Vec::with_capacity(dst_height * dst_width);
+    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
     for y in 0..dst_height {
         for x in 0..dst_width {
             let (dst_x, dst_y) = pixel_center(destination, y, x);
             let Some((source_index, distance)) = nearest_swath_point(lons, lats, dst_x, dst_y)
             else {
                 values.push(fill_value);
+                mask_flags.push(false);
                 continue;
             };
             if radius_of_influence.is_some_and(|radius| distance > radius) {
                 values.push(fill_value);
+                mask_flags.push(false);
                 continue;
             }
+            let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
             values.push(source_grid.values()[source_index]);
+            mask_flags.push(source_masked);
         }
     }
-    DataGrid::new(dst_height, dst_width, values)
+    finish_resampled_grid(dst_height, dst_width, values, mask_flags)
+}
+
+fn finish_resampled_grid(
+    height: usize,
+    width: usize,
+    values: Vec<f64>,
+    mask_flags: Vec<bool>,
+) -> Result<DataGrid> {
+    let grid = DataGrid::new(height, width, values)?;
+    if mask_flags.iter().any(|masked| *masked) {
+        grid.with_mask(ValidityMask::from_masked_flags(mask_flags))
+    } else {
+        Ok(grid)
+    }
 }
 
 fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, usize, f64)> {
@@ -267,6 +293,23 @@ mod tests {
     }
 
     #[test]
+    fn nearest_propagates_source_mask_for_area_resampling() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true, false, false]))
+            .unwrap();
+
+        let result =
+            resample_area_nearest(&source_grid, &source, &destination, None, -999.0).unwrap();
+
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(result.mask().unwrap().masked_count(), 1);
+        assert_eq!(result.is_masked(1), Some(true));
+    }
+
+    #[test]
     fn nearest_uses_fill_value_outside_radius() {
         let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
         let destination = area("destination", 1, 1, [1.0, 1.0, 2.0, 2.0]);
@@ -360,6 +403,25 @@ mod tests {
             resample_swath_nearest(&source_grid, &swath, &destination, Some(0.0), -999.0).unwrap();
 
         assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn nearest_propagates_source_mask_for_swath_resampling() {
+        let swath =
+            SwathDefinition::from_lonlats(2, 2, vec![0.5, 1.5, 0.5, 1.5], vec![1.5, 1.5, 0.5, 0.5])
+                .unwrap();
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, false, true, false]))
+            .unwrap();
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+
+        let result =
+            resample_swath_nearest(&source_grid, &swath, &destination, Some(0.0), -999.0).unwrap();
+
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(result.mask().unwrap().masked_count(), 1);
+        assert_eq!(result.is_masked(2), Some(true));
     }
 
     #[test]
