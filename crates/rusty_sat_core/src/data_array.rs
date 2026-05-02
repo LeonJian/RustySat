@@ -124,6 +124,44 @@ impl<T: NumericElement> DataArray<T> {
         self.dims.get(index).map(String::as_str)
     }
 
+    pub fn dim_index(&self, dim: &str) -> Option<usize> {
+        self.dims.iter().position(|candidate| candidate == dim)
+    }
+
+    pub fn size_of_dim(&self, dim: &str) -> Option<usize> {
+        self.dim_index(dim).map(|index| self.shape[index])
+    }
+
+    pub fn shape_yx(&self) -> Result<(usize, usize)> {
+        let Some(y) = self.size_of_dim("y") else {
+            return Err(RustySatError::invalid_input(
+                "data array requires a 'y' dimension",
+            ));
+        };
+        let Some(x) = self.size_of_dim("x") else {
+            return Err(RustySatError::invalid_input(
+                "data array requires an 'x' dimension",
+            ));
+        };
+        Ok((y, x))
+    }
+
+    pub fn require_dims_exact(&self, expected: &[&str]) -> Result<()> {
+        if self.dims.len() != expected.len()
+            || !self
+                .dims
+                .iter()
+                .zip(expected)
+                .all(|(left, right)| left == right)
+        {
+            return Err(RustySatError::invalid_input(format!(
+                "data array dimensions {:?} do not match expected {:?}",
+                self.dims, expected
+            )));
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -203,6 +241,46 @@ impl AnyDataArray {
             Self::U8(array) => array.dims(),
             Self::U16(array) => array.dims(),
             Self::I16(array) => array.dims(),
+        }
+    }
+
+    pub fn dim_index(&self, dim: &str) -> Option<usize> {
+        match self {
+            Self::F32(array) => array.dim_index(dim),
+            Self::F64(array) => array.dim_index(dim),
+            Self::U8(array) => array.dim_index(dim),
+            Self::U16(array) => array.dim_index(dim),
+            Self::I16(array) => array.dim_index(dim),
+        }
+    }
+
+    pub fn size_of_dim(&self, dim: &str) -> Option<usize> {
+        match self {
+            Self::F32(array) => array.size_of_dim(dim),
+            Self::F64(array) => array.size_of_dim(dim),
+            Self::U8(array) => array.size_of_dim(dim),
+            Self::U16(array) => array.size_of_dim(dim),
+            Self::I16(array) => array.size_of_dim(dim),
+        }
+    }
+
+    pub fn shape_yx(&self) -> Result<(usize, usize)> {
+        match self {
+            Self::F32(array) => array.shape_yx(),
+            Self::F64(array) => array.shape_yx(),
+            Self::U8(array) => array.shape_yx(),
+            Self::U16(array) => array.shape_yx(),
+            Self::I16(array) => array.shape_yx(),
+        }
+    }
+
+    pub fn require_dims_exact(&self, expected: &[&str]) -> Result<()> {
+        match self {
+            Self::F32(array) => array.require_dims_exact(expected),
+            Self::F64(array) => array.require_dims_exact(expected),
+            Self::U8(array) => array.require_dims_exact(expected),
+            Self::U16(array) => array.require_dims_exact(expected),
+            Self::I16(array) => array.require_dims_exact(expected),
         }
     }
 
@@ -401,6 +479,11 @@ mod tests {
             &["bands".to_string(), "y".to_string(), "x".to_string()]
         );
         assert_eq!(array.dim(1), Some("y"));
+        assert_eq!(array.dim_index("x"), Some(2));
+        assert_eq!(array.size_of_dim("bands"), Some(3));
+        assert_eq!(array.shape_yx().unwrap(), (2, 2));
+        array.require_dims_exact(&["bands", "y", "x"]).unwrap();
+        assert!(array.require_dims_exact(&["y", "x"]).is_err());
     }
 
     #[test]

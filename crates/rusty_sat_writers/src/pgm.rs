@@ -129,7 +129,8 @@ pub fn encode_pgm_array(
     scale: Option<LinearScale>,
     fill_value: u8,
 ) -> Result<Vec<u8>> {
-    let shape = array.shape_2d()?;
+    array.require_dims_exact(&["y", "x"])?;
+    let shape = array.shape_yx()?;
     encode_pgm_values(shape, array.values_as_f64(), scale, fill_value)
 }
 
@@ -222,7 +223,17 @@ mod tests {
         let array = AnyDataArray::from(DataArray::<u8>::from_vec(vec![3], vec![0, 1, 2]).unwrap());
         let err = encode_pgm_array(&array, None, 0).unwrap_err();
 
-        assert!(err.to_string().contains("expected 2D array"));
+        assert!(err.to_string().contains("do not match expected"));
+    }
+
+    #[test]
+    fn rejects_2d_array_without_image_dimensions() {
+        let array = AnyDataArray::from(
+            DataArray::<u8>::from_vec_named(vec![1, 3], ["row", "col"], vec![0, 1, 2]).unwrap(),
+        );
+        let err = encode_pgm_array(&array, None, 0).unwrap_err();
+
+        assert!(err.to_string().contains("do not match expected"));
     }
 
     #[test]
