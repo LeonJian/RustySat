@@ -2,7 +2,11 @@
 
 use std::path::Path;
 
-use rusty_sat_core::{Result, RustySatError};
+pub mod pgm;
+
+pub use pgm::{encode_pgm, write_pgm, LinearScale, PgmWriter};
+
+use rusty_sat_core::{Dataset, Result, RustySatError};
 use rusty_sat_image::Image;
 
 pub trait Writer {
@@ -11,6 +15,13 @@ pub trait Writer {
     fn save_image(&self, _image: &Image, _path: &Path) -> Result<()> {
         Err(RustySatError::unsupported(format!(
             "{} writer",
+            self.name()
+        )))
+    }
+
+    fn save_dataset(&self, _dataset: &Dataset, _path: &Path) -> Result<()> {
+        Err(RustySatError::unsupported(format!(
+            "{} dataset writer",
             self.name()
         )))
     }

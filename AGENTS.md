@@ -79,7 +79,8 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 9a: projection-coordinate nearest resampling from one `AreaDefinition` grid to another.
   - `[x]` Step 9b: radius/fill behavior parity tests against representative Pyresample cases.
   - `[x]` Step 9c: swath-to-area nearest foundations.
-- `[ ]` Step 10: first writer.
+- `[x]` Step 10: first writer.
+  - `[x]` Step 10a: first grayscale image writer using binary PGM output from `DataGrid`.
 - `[ ]` Step 11: first composite.
 - `[ ]` Step 12+: expand Satpy parity feature by feature.
 
@@ -185,7 +186,13 @@ The resample crate now has a first `nearest` module based on inspected Pyresampl
 - `resample_swath_nearest` can resample coordinate-backed `SwathDefinition` data to lon/lat `AreaDefinition` grids with brute-force nearest lookup for small/test cases.
 - It does not yet implement Pyresample's kd-tree acceleration, CRS transforms, masks, anti-meridian handling, geocentric distances, or multi-band handling.
 
-No production Satpy satellite reader, compositor, enhancement, or writer behavior has been ported yet. Current reader/resampler work is limited to early, testable vertical slices.
+The writers crate now has the first real image-output vertical slice:
+
+- `PgmWriter` writes single-band `DataGrid` datasets to binary PGM (`P5`) grayscale image files.
+- It supports explicit linear scaling, autoscaling over finite values, and fill values for non-finite pixels.
+- This is a real image output path, but not Satpy's production `simple_image`, PNG, GeoTIFF, or CF writer parity yet.
+
+No production Satpy satellite reader, compositor, enhancement, PNG, GeoTIFF, or CF writer behavior has been ported yet. Current reader/resampler/writer work is limited to early, testable vertical slices.
 
 ## High-Risk Reference Areas
 
