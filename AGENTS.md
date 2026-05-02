@@ -69,7 +69,7 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 6d: remaining initial trollsift edge-case parity for partial compose and conversion errors.
 - `[~]` Step 7: area definitions and YAML area loading.
   - `[x]` Step 7a: `AreaDefinition` metadata, shape/extent validation, and common Satpy/Pyresample YAML area loading.
-  - `[ ]` Step 7b: dynamic area definitions, resolution-derived extents, and richer pyresample compatibility.
+  - `[x]` Step 7b: projection-unit resolution-derived shapes/extents for common Pyresample `create_area_def` inputs.
   - `[ ]` Step 7c: swath definition coordinate storage/loading foundations.
 - `[ ]` Step 8: first real reader.
 - `[ ]` Step 9: nearest resampling.
@@ -149,6 +149,7 @@ The resample crate now has a focused `area` module based on inspected Pyresample
 
 - `AreaDefinition` with id, description, projection id, projection parameters, shape, area extent, and pixel-size helpers.
 - YAML loading for common Satpy/Pyresample area definitions with mapping projections, PROJ strings, `shape.height`/`shape.width`, flat `area_extent`, and `lower_left_xy`/`upper_right_xy`.
+- Projection-unit resolution helpers for deterministic Pyresample-style derivations: `area_extent + resolution` derives shape, and `center + radius + resolution` derives extent and shape. Unit conversion, pyproj CRS validation, and lon/lat-driven dynamic freezing are still future work.
 - Validation for empty ids, zero-sized shapes, invalid extents, missing area ids, and malformed YAML.
 
 No real Satpy reader, resampler, compositor, enhancement, or writer behavior has been ported yet.

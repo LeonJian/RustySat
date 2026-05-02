@@ -2,7 +2,9 @@
 
 pub mod area;
 
-pub use area::{load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition};
+pub use area::{
+    load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition, PixelResolution,
+};
 
 use rusty_sat_core::{Dataset, Result, RustySatError};
 

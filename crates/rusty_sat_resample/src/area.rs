@@ -22,6 +22,35 @@ pub struct AreaDefinition {
     area_extent: [f64; 4],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PixelResolution {
+    x: f64,
+    y: f64,
+}
+
+impl PixelResolution {
+    pub fn new(x: f64, y: f64) -> Result<Self> {
+        if x <= 0.0 || y <= 0.0 {
+            return Err(RustySatError::invalid_input(
+                "resolution values must be positive",
+            ));
+        }
+        Ok(Self { x, y })
+    }
+
+    pub fn square(value: f64) -> Result<Self> {
+        Self::new(value, value)
+    }
+
+    pub fn x(&self) -> f64 {
+        self.x
+    }
+
+    pub fn y(&self) -> f64 {
+        self.y
+    }
+}
+
 impl AreaDefinition {
     pub fn new(id: impl Into<String>, height: usize, width: usize) -> Result<Self> {
         Self::from_parts(
@@ -79,6 +108,56 @@ impl AreaDefinition {
         })
     }
 
+    pub fn from_extent_and_resolution(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        proj_id: impl Into<String>,
+        projection: BTreeMap<String, String>,
+        area_extent: [f64; 4],
+        resolution: PixelResolution,
+    ) -> Result<Self> {
+        let (height, width) = shape_from_extent_and_resolution(area_extent, resolution)?;
+        Self::from_parts(
+            id,
+            description,
+            proj_id,
+            projection,
+            height,
+            width,
+            area_extent,
+        )
+    }
+
+    pub fn from_center_radius_resolution(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        proj_id: impl Into<String>,
+        projection: BTreeMap<String, String>,
+        center: [f64; 2],
+        radius: [f64; 2],
+        resolution: PixelResolution,
+    ) -> Result<Self> {
+        if radius[0] <= 0.0 || radius[1] <= 0.0 {
+            return Err(RustySatError::invalid_input(
+                "radius values must be positive",
+            ));
+        }
+        let area_extent = [
+            center[0] - radius[0],
+            center[1] - radius[1],
+            center[0] + radius[0],
+            center[1] + radius[1],
+        ];
+        Self::from_extent_and_resolution(
+            id,
+            description,
+            proj_id,
+            projection,
+            area_extent,
+            resolution,
+        )
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -109,6 +188,35 @@ impl AreaDefinition {
             (self.area_extent[3] - self.area_extent[1]) / self.height as f64,
         )
     }
+}
+
+fn shape_from_extent_and_resolution(
+    area_extent: [f64; 4],
+    resolution: PixelResolution,
+) -> Result<(usize, usize)> {
+    if area_extent[0] >= area_extent[2] || area_extent[1] >= area_extent[3] {
+        return Err(RustySatError::invalid_input(
+            "area_extent must be [lower_left_x, lower_left_y, upper_right_x, upper_right_y]",
+        ));
+    }
+    let width = round_dimension((area_extent[2] - area_extent[0]) / resolution.x, "width")?;
+    let height = round_dimension((area_extent[3] - area_extent[1]) / resolution.y, "height")?;
+    Ok((height, width))
+}
+
+fn round_dimension(value: f64, name: &str) -> Result<usize> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(RustySatError::invalid_input(format!(
+            "{name} derived from extent and resolution must be positive"
+        )));
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() > 1e-8 && value - value.floor() >= 0.01 {
+        return usize::try_from(value.ceil() as u64)
+            .map_err(|err| RustySatError::invalid_input(format!("{name} out of range: {err}")));
+    }
+    usize::try_from(rounded as u64)
+        .map_err(|err| RustySatError::invalid_input(format!("{name} out of range: {err}")))
 }
 
 pub fn load_area_from_file(path: impl AsRef<Path>, area_id: &str) -> Result<AreaDefinition> {
@@ -149,23 +257,65 @@ fn parse_area(area_id: &str, value: &Value) -> Result<AreaDefinition> {
         optional_string(mapping, "description")?.unwrap_or_else(|| area_id.to_string());
     let proj_id = optional_string(mapping, "proj_id")?.unwrap_or_else(|| area_id.to_string());
     let projection = parse_projection(required_value(mapping, "projection", area_id)?)?;
-    let (height, width) = parse_shape(required_value(mapping, "shape", area_id)?)?;
-    let area_extent = parse_area_extent(required_value(mapping, "area_extent", area_id)?)?;
-    AreaDefinition::from_parts(
-        area_id.to_string(),
-        description,
-        proj_id,
-        projection,
-        height,
-        width,
-        area_extent,
-    )
+    let shape = optional_value(mapping, "shape")
+        .map(parse_shape)
+        .transpose()?;
+    let area_extent = optional_value(mapping, "area_extent")
+        .map(parse_area_extent)
+        .transpose()?;
+    let resolution = optional_value(mapping, "resolution")
+        .map(parse_resolution)
+        .transpose()?;
+    let center = optional_value(mapping, "center")
+        .map(|value| parse_xy(value, "center"))
+        .transpose()?;
+    let radius = optional_value(mapping, "radius")
+        .map(|value| parse_xy(value, "radius"))
+        .transpose()?;
+
+    match (shape, area_extent, resolution, center, radius) {
+        (Some((height, width)), Some(area_extent), _, _, _) => AreaDefinition::from_parts(
+            area_id.to_string(),
+            description,
+            proj_id,
+            projection,
+            height,
+            width,
+            area_extent,
+        ),
+        (None, Some(area_extent), Some(resolution), _, _) => AreaDefinition::from_extent_and_resolution(
+            area_id.to_string(),
+            description,
+            proj_id,
+            projection,
+            area_extent,
+            resolution,
+        ),
+        (None, None, Some(resolution), Some(center), Some(radius)) => {
+            AreaDefinition::from_center_radius_resolution(
+                area_id.to_string(),
+                description,
+                proj_id,
+                projection,
+                center,
+                radius,
+                resolution,
+            )
+        }
+        _ => Err(RustySatError::invalid_input(format!(
+            "area '{area_id}' requires shape and area_extent, area_extent and resolution, or center/radius/resolution"
+        ))),
+    }
 }
 
 fn required_value<'a>(mapping: &'a Mapping, key: &str, area_id: &str) -> Result<&'a Value> {
     mapping
         .get(Value::String(key.to_string()))
         .ok_or_else(|| RustySatError::invalid_input(format!("area '{area_id}' missing '{key}'")))
+}
+
+fn optional_value<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+    mapping.get(Value::String(key.to_string()))
 }
 
 fn optional_string(mapping: &Mapping, key: &str) -> Result<Option<String>> {
@@ -223,6 +373,64 @@ fn parse_area_extent(value: &Value) -> Result<[f64; 4]> {
         "upper_right_xy",
     )?;
     Ok([lower_left[0], lower_left[1], upper_right[0], upper_right[1]])
+}
+
+fn parse_resolution(value: &Value) -> Result<PixelResolution> {
+    match value {
+        Value::Number(_) => PixelResolution::square(parse_f64(value, "resolution")?),
+        Value::Sequence(values) => {
+            let values = parse_f64_pair(values, "resolution")?;
+            PixelResolution::new(values[0], values[1])
+        }
+        Value::Mapping(mapping) => {
+            if let Some(value) = optional_value(mapping, "resolution") {
+                return parse_resolution(value);
+            }
+            let dx = parse_f64(
+                required_value(mapping, "dx", "resolution")?,
+                "resolution.dx",
+            )?;
+            let dy = parse_f64(
+                required_value(mapping, "dy", "resolution")?,
+                "resolution.dy",
+            )?;
+            PixelResolution::new(dx, dy)
+        }
+        _ => Err(RustySatError::invalid_input(
+            "resolution must be a number, list, or mapping",
+        )),
+    }
+}
+
+fn parse_xy(value: &Value, name: &str) -> Result<[f64; 2]> {
+    match value {
+        Value::Sequence(values) => parse_f64_pair(values, name),
+        Value::Mapping(mapping) => {
+            if let Some(value) = optional_value(mapping, name) {
+                return parse_xy(value, name);
+            }
+            if let (Some(x_value), Some(y_value)) =
+                (optional_value(mapping, "x"), optional_value(mapping, "y"))
+            {
+                let x = parse_f64(x_value, &format!("{name}.x"))?;
+                let y = parse_f64(y_value, &format!("{name}.y"))?;
+                return Ok([x, y]);
+            }
+            if let (Some(dx_value), Some(dy_value)) =
+                (optional_value(mapping, "dx"), optional_value(mapping, "dy"))
+            {
+                let dx = parse_f64(dx_value, &format!("{name}.dx"))?;
+                let dy = parse_f64(dy_value, &format!("{name}.dy"))?;
+                return Ok([dx, dy]);
+            }
+            Err(RustySatError::invalid_input(format!(
+                "{name} must provide x/y, dx/dy, or {name}"
+            )))
+        }
+        _ => Err(RustySatError::invalid_input(format!(
+            "{name} must be a list or mapping"
+        ))),
+    }
 }
 
 fn parse_f64_pair(values: &[Value], name: &str) -> Result<[f64; 2]> {
@@ -345,6 +553,62 @@ simple:
         assert_eq!(area.projection().get("proj4").unwrap(), "+proj=latlong");
         assert_eq!(area.shape(), (2, 3));
         assert_eq!(area.area_extent(), [-10.0, -5.0, 10.0, 5.0]);
+    }
+
+    #[test]
+    fn derives_shape_from_extent_and_resolution() {
+        let area = AreaDefinition::from_extent_and_resolution(
+            "derived",
+            "Derived",
+            "derived_proj",
+            BTreeMap::from([("proj".to_string(), "latlong".to_string())]),
+            [-10.0, -5.0, 10.0, 5.0],
+            PixelResolution::new(2.0, 5.0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(area.shape(), (2, 10));
+        assert_eq!(area.pixel_size(), (2.0, 5.0));
+    }
+
+    #[test]
+    fn derives_extent_and_shape_from_center_radius_resolution_yaml() {
+        let yaml = r#"
+centered:
+  projection:
+    proj: laea
+  center:
+    x: 100.0
+    y: 200.0
+  radius:
+    dx: 40.0
+    dy: 20.0
+  resolution:
+    dx: 10.0
+    dy: 5.0
+"#;
+
+        let area = load_area_from_str(yaml, "centered").unwrap();
+
+        assert_eq!(area.area_extent(), [60.0, 180.0, 140.0, 220.0]);
+        assert_eq!(area.shape(), (8, 8));
+        assert_eq!(area.pixel_size(), (10.0, 5.0));
+    }
+
+    #[test]
+    fn derives_shape_from_yaml_extent_and_scalar_resolution() {
+        let yaml = r#"
+dynamic_like:
+  projection:
+    proj: latlong
+  area_extent: [-20.0, -10.0, 20.0, 10.0]
+  resolution: 10.0
+"#;
+
+        let area = load_area_from_str(yaml, "dynamic_like").unwrap();
+
+        assert_eq!(area.shape(), (2, 4));
+        assert_eq!(area.pixel_size(), (10.0, 10.0));
     }
 
     #[test]
