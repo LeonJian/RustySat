@@ -101,6 +101,15 @@ impl ChunkShape {
     pub fn as_slice(&self) -> &[usize] {
         &self.0
     }
+
+    pub fn validate_for_shape(&self, shape: &[usize]) -> Result<()> {
+        validate_chunks(shape, self)
+    }
+
+    pub fn chunk_count_for_shape(&self, shape: &[usize]) -> Result<usize> {
+        validate_chunks(shape, self)?;
+        Ok(chunk_count(shape, self))
+    }
 }
 
 /// Packed mask where a set bit means the corresponding data value is invalid.

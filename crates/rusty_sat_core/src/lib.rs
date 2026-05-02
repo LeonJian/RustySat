@@ -10,8 +10,10 @@ use std::error::Error;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 
+mod chunked_array;
 mod data_array;
 
+pub use chunked_array::{ChunkRegion, ChunkSource, LazyDataArray};
 pub use data_array::{
     AnyDataArray, ChunkShape, DataArray, DataGrid, DataType, NumericElement, ValidityMask,
 };
