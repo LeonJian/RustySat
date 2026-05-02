@@ -75,10 +75,10 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 8a: Satpy-style reader YAML metadata parsing and dataset inventory generation.
   - `[x]` Step 8b: YAML-backed filename matching and file grouping using the existing filename pattern parser.
   - `[x]` Step 8c: first small file handler that loads real array values from an openly documented simple format.
-- `[~]` Step 9: nearest resampling.
+- `[x]` Step 9: nearest resampling.
   - `[x]` Step 9a: projection-coordinate nearest resampling from one `AreaDefinition` grid to another.
   - `[x]` Step 9b: radius/fill behavior parity tests against representative Pyresample cases.
-  - `[ ]` Step 9c: swath-to-area nearest foundations.
+  - `[x]` Step 9c: swath-to-area nearest foundations.
 - `[ ]` Step 10: first writer.
 - `[ ]` Step 11: first composite.
 - `[ ]` Step 12+: expand Satpy parity feature by feature.
@@ -182,7 +182,8 @@ The resample crate now has a first `nearest` module based on inspected Pyresampl
 
 - `NearestAreaResampler` resamples 2D `DataGrid` datasets from a source `AreaDefinition` to a destination `AreaDefinition` using projection-coordinate pixel centers.
 - It supports an optional radius of influence and configurable fill value, including edge-pixel nearest behavior for target pixels just outside the source extent.
-- It requires matching projection metadata and does not yet implement Pyresample's kd-tree, swath nearest, CRS transforms, masks, or multi-band handling.
+- `resample_swath_nearest` can resample coordinate-backed `SwathDefinition` data to lon/lat `AreaDefinition` grids with brute-force nearest lookup for small/test cases.
+- It does not yet implement Pyresample's kd-tree acceleration, CRS transforms, masks, anti-meridian handling, geocentric distances, or multi-band handling.
 
 No production Satpy satellite reader, compositor, enhancement, or writer behavior has been ported yet. Current reader/resampler work is limited to early, testable vertical slices.
 

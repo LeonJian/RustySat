@@ -9,7 +9,7 @@
 //! uses pixel centers and an optional radius of influence like Pyresample, but
 //! does not yet implement kd-tree lookup, swaths, CRS transforms, or masks.
 
-use crate::{AreaDefinition, Resampler};
+use crate::{AreaDefinition, Resampler, SwathDefinition};
 use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError};
 
 #[derive(Debug, Clone)]
@@ -129,6 +129,47 @@ pub fn resample_area_nearest(
     DataGrid::new(dst_height, dst_width, values)
 }
 
+pub fn resample_swath_nearest(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+) -> Result<DataGrid> {
+    if source_grid.shape() != source.shape() {
+        return Err(RustySatError::invalid_input(format!(
+            "source grid shape {:?} does not match source swath shape {:?}",
+            source_grid.shape(),
+            source.shape()
+        )));
+    }
+    require_lonlat_area(destination)?;
+    let lons = source.lons().ok_or_else(|| {
+        RustySatError::invalid_input("swath nearest resampling requires longitude coordinates")
+    })?;
+    let lats = source.lats().ok_or_else(|| {
+        RustySatError::invalid_input("swath nearest resampling requires latitude coordinates")
+    })?;
+    let (dst_height, dst_width) = destination.shape();
+    let mut values = Vec::with_capacity(dst_height * dst_width);
+    for y in 0..dst_height {
+        for x in 0..dst_width {
+            let (dst_x, dst_y) = pixel_center(destination, y, x);
+            let Some((source_index, distance)) = nearest_swath_point(lons, lats, dst_x, dst_y)
+            else {
+                values.push(fill_value);
+                continue;
+            };
+            if radius_of_influence.is_some_and(|radius| distance > radius) {
+                values.push(fill_value);
+                continue;
+            }
+            values.push(source_grid.values()[source_index]);
+        }
+    }
+    DataGrid::new(dst_height, dst_width, values)
+}
+
 fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, usize, f64)> {
     let extent = source.area_extent();
     let (pixel_size_x, pixel_size_y) = source.pixel_size();
@@ -138,6 +179,35 @@ fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usiz
     let (nearest_x, nearest_y) = pixel_center(source, src_y, src_x);
     let distance = ((nearest_x - x).powi(2) + (nearest_y - y).powi(2)).sqrt();
     Some((src_y, src_x, distance))
+}
+
+fn nearest_swath_point(lons: &[f64], lats: &[f64], x: f64, y: f64) -> Option<(usize, f64)> {
+    lons.iter()
+        .zip(lats)
+        .enumerate()
+        .filter_map(|(idx, (lon, lat))| {
+            if !lon.is_finite() || !lat.is_finite() {
+                return None;
+            }
+            let distance = ((*lon - x).powi(2) + (*lat - y).powi(2)).sqrt();
+            Some((idx, distance))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+}
+
+fn require_lonlat_area(area: &AreaDefinition) -> Result<()> {
+    let projection = area.projection();
+    let Some(proj) = projection.get("proj").or_else(|| projection.get("proj4")) else {
+        return Err(RustySatError::unsupported(
+            "swath nearest resampling without lon/lat destination projection metadata",
+        ));
+    };
+    if proj.contains("latlong") || proj.contains("longlat") {
+        return Ok(());
+    }
+    Err(RustySatError::unsupported(
+        "swath nearest resampling to non-lon/lat destination area",
+    ))
 }
 
 fn clamp_pixel_index(value: f64, size: usize) -> Option<usize> {
@@ -275,6 +345,44 @@ mod tests {
         assert!(matches!(
             resampler.resample(&dataset, &destination).unwrap_err(),
             RustySatError::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn nearest_resamples_swath_points_to_lonlat_area() {
+        let swath =
+            SwathDefinition::from_lonlats(2, 2, vec![0.5, 1.5, 0.5, 1.5], vec![1.5, 1.5, 0.5, 0.5])
+                .unwrap();
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+
+        let result =
+            resample_swath_nearest(&source_grid, &swath, &destination, Some(0.0), -999.0).unwrap();
+
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn nearest_swath_uses_fill_value_when_outside_radius() {
+        let swath = SwathDefinition::from_lonlats(1, 1, vec![0.5], vec![0.5]).unwrap();
+        let source_grid = DataGrid::new(1, 1, vec![7.0]).unwrap();
+        let destination = area("destination", 1, 1, [1.0, 1.0, 2.0, 2.0]);
+
+        let result =
+            resample_swath_nearest(&source_grid, &swath, &destination, Some(0.25), -999.0).unwrap();
+
+        assert_eq!(result.values(), &[-999.0]);
+    }
+
+    #[test]
+    fn nearest_swath_requires_coordinates() {
+        let swath = SwathDefinition::new(1, 1).unwrap();
+        let source_grid = DataGrid::new(1, 1, vec![7.0]).unwrap();
+        let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        assert!(matches!(
+            resample_swath_nearest(&source_grid, &swath, &destination, None, -999.0).unwrap_err(),
+            RustySatError::InvalidInput { .. }
         ));
     }
 
