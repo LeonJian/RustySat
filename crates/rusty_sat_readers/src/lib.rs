@@ -4,7 +4,7 @@ pub mod filename_pattern;
 pub mod yaml_reader;
 
 pub use yaml_reader::{
-    DatasetConfig, FileTypeConfig, ReaderInfo, YamlMetadataReader, YamlReaderConfig,
+    DatasetConfig, FileMatch, FileTypeConfig, ReaderInfo, YamlMetadataReader, YamlReaderConfig,
 };
 
 use rusty_sat_core::{DataId, Dataset, ReaderInventory, Result, RustySatError};

@@ -5,12 +5,14 @@
 //! - `satpy/satpy/readers/core/yaml_reader.py`
 //! - `satpy/satpy/etc/readers/seviri_l1b_nc.yaml`
 
+use crate::filename_pattern::{FilenamePattern, PatternValue};
 use crate::Reader;
 use rusty_sat_core::{
     DataId, Dataset, ModifierTuple, ReaderInventory, Result, RustySatError, WavelengthRange,
 };
 use serde_yaml::{Mapping, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReaderInfo {
@@ -61,6 +63,32 @@ impl FileTypeConfig {
 
     pub fn requires(&self) -> &[String] {
         &self.requires
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileMatch {
+    filename: String,
+    file_type: String,
+    pattern: String,
+    filename_info: BTreeMap<String, PatternValue>,
+}
+
+impl FileMatch {
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn file_type(&self) -> &str {
+        &self.file_type
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    pub fn filename_info(&self) -> &BTreeMap<String, PatternValue> {
+        &self.filename_info
     }
 }
 
@@ -132,6 +160,69 @@ impl YamlReaderConfig {
             .flat_map(|dataset| dataset.data_ids.iter().cloned())
             .collect()
     }
+
+    pub fn sorted_file_type_names(&self) -> Result<Vec<String>> {
+        let mut sorted = Vec::new();
+        let mut remaining = self.file_types.keys().cloned().collect::<Vec<_>>();
+        while !remaining.is_empty() {
+            let before_len = remaining.len();
+            let mut idx = 0;
+            while idx < remaining.len() {
+                let name = &remaining[idx];
+                let file_type = self.file_types.get(name).ok_or_else(|| {
+                    RustySatError::not_found(format!("file type '{name}' in reader config"))
+                })?;
+                if file_type
+                    .requires()
+                    .iter()
+                    .all(|requirement| sorted.contains(requirement))
+                {
+                    sorted.push(remaining.remove(idx));
+                } else {
+                    idx += 1;
+                }
+            }
+            if remaining.len() == before_len {
+                return Err(RustySatError::invalid_input(format!(
+                    "file type requirements could not be resolved: {}",
+                    remaining.join(", ")
+                )));
+            }
+        }
+        Ok(sorted)
+    }
+
+    pub fn match_filenames(
+        &self,
+        filenames: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Vec<FileMatch>> {
+        let filenames = filenames
+            .into_iter()
+            .map(|filename| filename.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let mut matches = Vec::new();
+        for file_type_name in self.sorted_file_type_names()? {
+            let file_type = self.file_types.get(&file_type_name).ok_or_else(|| {
+                RustySatError::not_found(format!("file type '{file_type_name}' in reader config"))
+            })?;
+            matches.extend(match_filenames_for_file_type(&filenames, file_type)?);
+        }
+        Ok(matches)
+    }
+
+    pub fn filter_selected_filenames(
+        &self,
+        filenames: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Vec<String>> {
+        let mut seen = BTreeSet::new();
+        let mut selected = Vec::new();
+        for file_match in self.match_filenames(filenames)? {
+            if seen.insert(file_match.filename.clone()) {
+                selected.push(file_match.filename);
+            }
+        }
+        Ok(selected)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +245,20 @@ impl YamlMetadataReader {
 
     pub fn inventory(&self) -> Result<ReaderInventory> {
         ReaderInventory::new(self.name().to_string(), self.available_dataset_ids())
+    }
+
+    pub fn match_filenames(
+        &self,
+        filenames: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Vec<FileMatch>> {
+        self.config.match_filenames(filenames)
+    }
+
+    pub fn filter_selected_filenames(
+        &self,
+        filenames: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Vec<String>> {
+        self.config.filter_selected_filenames(filenames)
     }
 }
 
@@ -284,6 +389,63 @@ fn parse_dataset(config_key: &str, value: &Value) -> Result<DatasetConfig> {
         file_type,
         coordinates,
     })
+}
+
+fn match_filenames_for_file_type(
+    filenames: &[String],
+    file_type: &FileTypeConfig,
+) -> Result<Vec<FileMatch>> {
+    let mut remaining = filenames.iter().collect::<BTreeSet<_>>();
+    let mut matches = Vec::new();
+    for pattern in file_type.file_patterns() {
+        let parser = FilenamePattern::new(pattern)?;
+        let mut matched_for_pattern = Vec::new();
+        for filename in &remaining {
+            let filebase = filebase_for_pattern(filename, pattern);
+            let Ok(filename_info) = parser.parse(&filebase) else {
+                continue;
+            };
+            matches.push(FileMatch {
+                filename: (*filename).clone(),
+                file_type: file_type.name().to_string(),
+                pattern: pattern.clone(),
+                filename_info,
+            });
+            matched_for_pattern.push(*filename);
+        }
+        for filename in matched_for_pattern {
+            remaining.remove(filename);
+        }
+    }
+    Ok(matches)
+}
+
+fn filebase_for_pattern(filename: &str, pattern: &str) -> String {
+    let pattern_component_count = path_component_count(pattern);
+    if pattern_component_count <= 1 {
+        return Path::new(filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(filename)
+            .to_string();
+    }
+    let components = path_components(filename);
+    let start = components.len().saturating_sub(pattern_component_count);
+    components[start..].join("/")
+}
+
+fn path_component_count(path: &str) -> usize {
+    path_components(path).len()
+}
+
+fn path_components(path: &str) -> Vec<String> {
+    Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str().map(ToString::to_string),
+            _ => None,
+        })
+        .collect()
 }
 
 fn parse_calibrations(value: Option<&Value>) -> Result<Vec<Option<String>>> {
@@ -472,5 +634,81 @@ datasets:
             reader.load(&ids[0]).unwrap_err(),
             RustySatError::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn sorts_file_types_after_requirements() {
+        let yaml = r#"
+reader:
+  name: required_files
+file_types:
+  image:
+    requires: [header]
+    file_patterns: ['IMG_{start_time:%Y%m%d%H%M%S}.dat']
+  header:
+    file_patterns: ['HDR_{start_time:%Y%m%d%H%M%S}.dat']
+"#;
+        let config = YamlReaderConfig::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.sorted_file_type_names().unwrap(),
+            vec!["header".to_string(), "image".to_string()]
+        );
+    }
+
+    #[test]
+    fn matches_filenames_with_file_type_and_parsed_info() {
+        let reader = YamlMetadataReader::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let matches = reader
+            .match_filenames([
+                "/data/W_XX,MSG4_20200102030405.nc",
+                "/data/does_not_match.txt",
+            ])
+            .unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].filename(), "/data/W_XX,MSG4_20200102030405.nc");
+        assert_eq!(matches[0].file_type(), "seviri_l1b_nc");
+        assert_eq!(
+            matches[0].filename_info().get("satid"),
+            Some(&PatternValue::Text("MSG4".to_string()))
+        );
+        assert!(matches[0].filename_info().contains_key("start_time"));
+    }
+
+    #[test]
+    fn matches_pattern_relative_to_filename_tail() {
+        let yaml = r#"
+reader:
+  name: path_reader
+file_types:
+  nested:
+    file_patterns: ['GRANULE/{platform:4s}_{start_time:%Y%m%d%H%M%S}.dat']
+"#;
+        let reader = YamlMetadataReader::from_str(yaml).unwrap();
+        let matches = reader
+            .match_filenames(["/tmp/input/GRANULE/NOAA_20200102030405.dat"])
+            .unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file_type(), "nested");
+        assert_eq!(
+            matches[0].filename_info().get("platform"),
+            Some(&PatternValue::Text("NOAA".to_string()))
+        );
+    }
+
+    #[test]
+    fn filters_selected_filenames_without_duplicates() {
+        let reader = YamlMetadataReader::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let selected = reader
+            .filter_selected_filenames([
+                "/data/W_XX,MSG4_20200102030405.nc",
+                "/data/W_XX,MSG4_20200102030405.nc",
+                "/data/not_me.nc",
+            ])
+            .unwrap();
+
+        assert_eq!(selected, vec!["/data/W_XX,MSG4_20200102030405.nc"]);
     }
 }

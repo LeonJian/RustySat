@@ -73,7 +73,7 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 7c: swath definition coordinate storage/loading foundations.
 - `[~]` Step 8: first real reader.
   - `[x]` Step 8a: Satpy-style reader YAML metadata parsing and dataset inventory generation.
-  - `[ ]` Step 8b: YAML-backed filename matching and file grouping using the existing filename pattern parser.
+  - `[x]` Step 8b: YAML-backed filename matching and file grouping using the existing filename pattern parser.
   - `[ ]` Step 8c: first small file handler that loads real array values from an openly documented simple format.
 - `[ ]` Step 9: nearest resampling.
 - `[ ]` Step 10: first writer.
@@ -145,6 +145,7 @@ The readers crate now has a metadata-only `yaml_reader` module based on inspecte
 
 - Parses Satpy-style `reader`, `file_types`, and `datasets` YAML sections, including YAML Python tags as metadata values.
 - Builds `DataId` inventory entries from dataset names, scalar resolutions, wavelength triplets, polarization, modifiers, and calibration variants.
+- Matches configured file type patterns against filename tails, parses filename metadata with `FilenamePattern`, filters selected filenames, and sorts file types after their `requires` dependencies.
 - Exposes `YamlMetadataReader` through the common `Reader` trait, but dataset array loading is intentionally unsupported until a real file handler substep.
 
 The config crate now has the first real foundation:
