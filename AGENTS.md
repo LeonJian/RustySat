@@ -62,11 +62,11 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 4c: dependency graph population for composites and modifiers.
 - `[x]` Step 5: fake reader vertical slice.
   - `[x]` Step 5a: in-memory fake reader inventory and dataset loading.
-- `[~]` Step 6: filename pattern parser compatible with `trollsift`.
+- `[x]` Step 6: filename pattern parser compatible with `trollsift`.
   - `[x]` Step 6a: basic parser keys, parse, validate, compose, and globify for common Satpy filename patterns.
   - `[x]` Step 6b: trollsift custom compose conversions plus richer integer and fixed-point parsing.
   - `[x]` Step 6c: typed datetime values for common numeric strftime filename fields.
-  - `[ ]` Step 6d: remaining trollsift edge-case parity.
+  - `[x]` Step 6d: remaining initial trollsift edge-case parity for partial compose and conversion errors.
 - `[ ]` Step 7: area definitions and YAML area loading.
 - `[ ]` Step 8: first real reader.
 - `[ ]` Step 9: nearest resampling.
@@ -133,7 +133,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 
 The readers crate now has an in-memory `FakeReader` that can expose an inventory, load cloned datasets, and drive a `Scene` planning/insertion vertical slice in tests.
 
-The readers crate also has `filename_pattern::FilenamePattern`, a focused trollsift-compatible starter parser. It supports keys, full-match parsing, non-greedy string fields, integer/float conversion, repeated-field equality checks, strict/partial compose, trollsift string conversions, typed datetime-like values for common numeric strftime fields, validation, and globify for common Satpy filename patterns. Remaining trollsift edge cases are still pending.
+The readers crate also has `filename_pattern::FilenamePattern`, a focused trollsift-compatible starter parser. It supports keys, full-match parsing, non-greedy string fields, integer/float conversion, repeated-field equality checks, strict/partial compose, trollsift string conversions, typed datetime-like values for common numeric strftime fields, validation, and globify for common Satpy filename patterns. It is not a byte-for-byte trollsift clone, but it now covers the core filename behavior expected by early YAML reader work.
 
 The config crate now has the first real foundation:
 

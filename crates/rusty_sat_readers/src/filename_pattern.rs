@@ -354,27 +354,11 @@ fn assign_capture_names(tokens: &mut [Token]) {
 }
 
 fn regex_body(tokens: &[Token]) -> Result<String> {
-    let mut seen = BTreeMap::<String, String>::new();
     let mut body = String::new();
     for token in tokens {
         match token {
             Token::Literal(literal) => body.push_str(&regex::escape(literal)),
             Token::Field(field) => {
-                if let Some(existing_spec) = seen.get(&field.name) {
-                    if existing_spec != &field.spec {
-                        return Err(RustySatError::invalid_input(format!(
-                            "field '{}' is repeated with different formats",
-                            field.name
-                        )));
-                    }
-                    body.push_str(&format!(
-                        r"(?P<{}>{})",
-                        field.capture_name,
-                        regex_for_spec(&field.spec)?
-                    ));
-                    continue;
-                }
-                seen.insert(field.name.clone(), field.spec.clone());
                 body.push_str(&format!(
                     r"(?P<{}>{})",
                     field.capture_name,
@@ -985,5 +969,37 @@ mod tests {
             parser.compose(&values, false).unwrap(),
             "20260502_123456_2026123"
         );
+    }
+
+    #[test]
+    fn partial_compose_handles_similarly_named_fields() {
+        let parser = FilenamePattern::new("{foo}{afooo}{fooo}.{bar}/{baz:%Y}/{bar:d}").unwrap();
+        let values = BTreeMap::from([("afooo".to_string(), PatternValue::from("qux"))]);
+
+        assert_eq!(
+            parser.compose(&values, true).unwrap(),
+            "{foo}qux{fooo}.{bar}/{baz:%Y}/{bar:d}"
+        );
+    }
+
+    #[test]
+    fn partial_compose_allows_repeated_fields_with_different_formats() {
+        let parser =
+            FilenamePattern::new("/foo/{start_time:%Y%m}/bar/{start_time:%Y%m%d_%H%M}.{format}")
+                .unwrap();
+        let values = BTreeMap::from([("format".to_string(), PatternValue::from("qux"))]);
+
+        assert_eq!(
+            parser.compose(&values, true).unwrap(),
+            "/foo/{start_time:%Y%m}/bar/{start_time:%Y%m%d_%H%M}.qux"
+        );
+    }
+
+    #[test]
+    fn compose_rejects_unsupported_conversion() {
+        let parser = FilenamePattern::new("{a!X}").unwrap();
+        let values = BTreeMap::from([("a".to_string(), PatternValue::from("value"))]);
+
+        assert!(parser.compose(&values, false).is_err());
     }
 }
