@@ -9,9 +9,9 @@
 //! - `deps/pyresample/README.md` notes that Pyresample works with numpy,
 //!   masked arrays, xarray objects, and dask-backed data.
 //!
-//! This first foundation step only adds an owned, eager, typed array model.
-//! Masks, lazy chunks, coordinates, and nested attrs are separate roadmap
-//! items and should not be silently faked here.
+//! This foundation still stores values eagerly. Masks and chunk metadata are
+//! explicit, but lazy chunk loading, coordinates, and nested attrs are separate
+//! roadmap items and should not be silently faked here.
 
 use crate::{Result, RustySatError};
 use std::collections::BTreeSet;
@@ -72,10 +72,36 @@ pub struct DataArray<T: NumericElement> {
     dims: Vec<String>,
     values: Vec<T>,
     mask: Option<ValidityMask>,
+    chunks: Option<ChunkShape>,
 }
 
 /// Backwards-compatible name for the early 2D f64 grid vertical slices.
 pub type DataGrid = DataArray<f64>;
+
+/// Desired chunk size per dimension for future lazy/chunked execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkShape(Vec<usize>);
+
+impl ChunkShape {
+    pub fn new(chunks: impl Into<Vec<usize>>) -> Result<Self> {
+        let chunks = chunks.into();
+        if chunks.is_empty() {
+            return Err(RustySatError::invalid_input(
+                "chunk shape must have at least one dimension",
+            ));
+        }
+        if chunks.iter().any(|chunk| *chunk == 0) {
+            return Err(RustySatError::invalid_input(
+                "chunk dimensions must be non-zero",
+            ));
+        }
+        Ok(Self(chunks))
+    }
+
+    pub fn as_slice(&self) -> &[usize] {
+        &self.0
+    }
+}
 
 /// Packed mask where a set bit means the corresponding data value is invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +178,7 @@ impl<T: NumericElement> DataArray<T> {
             dims,
             values,
             mask: None,
+            chunks: None,
         })
     }
 
@@ -169,11 +196,17 @@ impl<T: NumericElement> DataArray<T> {
             dims,
             values,
             mask: None,
+            chunks: None,
         })
     }
 
     pub fn with_mask(mut self, mask: ValidityMask) -> Result<Self> {
         self.set_mask(mask)?;
+        Ok(self)
+    }
+
+    pub fn with_chunks(mut self, chunks: ChunkShape) -> Result<Self> {
+        self.set_chunks(chunks)?;
         Ok(self)
     }
 
@@ -259,6 +292,26 @@ impl<T: NumericElement> DataArray<T> {
 
     pub fn clear_mask(&mut self) {
         self.mask = None;
+    }
+
+    pub fn chunks(&self) -> Option<&ChunkShape> {
+        self.chunks.as_ref()
+    }
+
+    pub fn set_chunks(&mut self, chunks: ChunkShape) -> Result<()> {
+        validate_chunks(&self.shape, &chunks)?;
+        self.chunks = Some(chunks);
+        Ok(())
+    }
+
+    pub fn clear_chunks(&mut self) {
+        self.chunks = None;
+    }
+
+    pub fn chunk_count(&self) -> Option<usize> {
+        self.chunks
+            .as_ref()
+            .map(|chunks| chunk_count(&self.shape, chunks))
     }
 
     pub fn is_masked(&self, index: usize) -> Option<bool> {
@@ -350,6 +403,26 @@ impl AnyDataArray {
             Self::U8(array) => array.mask(),
             Self::U16(array) => array.mask(),
             Self::I16(array) => array.mask(),
+        }
+    }
+
+    pub fn chunks(&self) -> Option<&ChunkShape> {
+        match self {
+            Self::F32(array) => array.chunks(),
+            Self::F64(array) => array.chunks(),
+            Self::U8(array) => array.chunks(),
+            Self::U16(array) => array.chunks(),
+            Self::I16(array) => array.chunks(),
+        }
+    }
+
+    pub fn chunk_count(&self) -> Option<usize> {
+        match self {
+            Self::F32(array) => array.chunk_count(),
+            Self::F64(array) => array.chunk_count(),
+            Self::U8(array) => array.chunk_count(),
+            Self::U16(array) => array.chunk_count(),
+            Self::I16(array) => array.chunk_count(),
         }
     }
 
@@ -517,6 +590,32 @@ fn validate_mask_len(values_len: usize, mask: &ValidityMask) -> Result<()> {
     Ok(())
 }
 
+fn validate_chunks(shape: &[usize], chunks: &ChunkShape) -> Result<()> {
+    if chunks.as_slice().len() != shape.len() {
+        return Err(RustySatError::invalid_input(format!(
+            "chunk shape has {} dimensions but data has {}",
+            chunks.as_slice().len(),
+            shape.len()
+        )));
+    }
+    for (dim, chunk) in shape.iter().zip(chunks.as_slice()) {
+        if chunk > dim {
+            return Err(RustySatError::invalid_input(format!(
+                "chunk dimension {chunk} cannot exceed data dimension {dim}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn chunk_count(shape: &[usize], chunks: &ChunkShape) -> usize {
+    shape
+        .iter()
+        .zip(chunks.as_slice())
+        .map(|(dim, chunk)| dim.div_ceil(*chunk))
+        .product()
+}
+
 fn validate_dims(shape: &[usize], dims: &[String]) -> Result<()> {
     if dims.len() != shape.len() {
         return Err(RustySatError::invalid_input(format!(
@@ -659,6 +758,35 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("mask has 2 values"));
+    }
+
+    #[test]
+    fn stores_chunk_shape_metadata() {
+        let array = DataArray::<u8>::from_vec(vec![5, 6], vec![0; 30])
+            .unwrap()
+            .with_chunks(ChunkShape::new(vec![2, 3]).unwrap())
+            .unwrap();
+
+        assert_eq!(array.chunks().unwrap().as_slice(), &[2, 3]);
+        assert_eq!(array.chunk_count(), Some(6));
+    }
+
+    #[test]
+    fn validates_chunk_shape_metadata() {
+        assert!(ChunkShape::new(Vec::<usize>::new()).is_err());
+        assert!(ChunkShape::new(vec![2, 0]).is_err());
+
+        let err = DataArray::<u8>::from_vec(vec![5, 6], vec![0; 30])
+            .unwrap()
+            .with_chunks(ChunkShape::new(vec![2]).unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("chunk shape has 1 dimensions"));
+
+        let err = DataArray::<u8>::from_vec(vec![5, 6], vec![0; 30])
+            .unwrap()
+            .with_chunks(ChunkShape::new(vec![6, 2]).unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot exceed"));
     }
 
     #[test]

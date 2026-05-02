@@ -129,7 +129,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.3a: Add packed `ValidityMask` storage to `DataArray` and make PGM output fill masked pixels while ignoring them for autoscale.
     - `[x]` P0.1.3b: Propagate source masks through current nearest area/swath resampling; outside-radius pixels still use fill values until a broader policy is added.
     - `[x]` P0.1.3c: Define current nearest fill-vs-mask policy with default fill-value behavior and opt-in masked-missing output.
-  - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
+  - `[~]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
+    - `[x]` P0.1.4a: Add validated chunk-shape metadata to `DataArray` and runtime typed arrays without introducing lazy IO yet.
+    - `[ ]` P0.1.4b: Add a lazy chunk source abstraction for deferred file-backed array loading.
+    - `[ ]` P0.1.4c: Teach readers/resamplers/writers to preserve or consume chunked arrays incrementally.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
 - `[ ]` P0-2: CRS and projection system.
@@ -294,6 +297,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - validated `DataArray` dimension names with Satpy/xarray-style defaults for 1D through 4D data
 - dimension-aware helpers for named dimension lookup, `y,x` shape extraction, and exact-dimension validation
 - `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
+- `ChunkShape` metadata on `DataArray`/`AnyDataArray`, including validation and chunk-count helpers; actual lazy chunk loading is not implemented yet
 - `AnyDataArray` runtime dtype wrapper and `DataType` markers
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
