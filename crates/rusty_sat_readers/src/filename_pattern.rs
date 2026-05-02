@@ -15,6 +15,7 @@ pub enum PatternValue {
     Text(String),
     Integer(i64),
     Float(f64),
+    DateTime(PatternDateTime),
 }
 
 impl PatternValue {
@@ -23,7 +24,71 @@ impl PatternValue {
             Self::Text(value) => value.clone(),
             Self::Integer(value) => value.to_string(),
             Self::Float(value) => value.to_string(),
+            Self::DateTime(value) => value.to_compact_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternDateTime {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    pub ordinal_day: Option<u16>,
+}
+
+impl PatternDateTime {
+    pub fn new(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Result<Self> {
+        if !(1..=12).contains(&month) {
+            return Err(RustySatError::invalid_input(
+                "datetime month must be in 1..=12",
+            ));
+        }
+        if !(1..=31).contains(&day) {
+            return Err(RustySatError::invalid_input(
+                "datetime day must be in 1..=31",
+            ));
+        }
+        if hour > 23 || minute > 59 || second > 59 {
+            return Err(RustySatError::invalid_input(
+                "datetime time must be within 24-hour clock bounds",
+            ));
+        }
+        Ok(Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            ordinal_day: None,
+        })
+    }
+
+    fn with_ordinal_day(mut self, ordinal_day: u16) -> Result<Self> {
+        if !(1..=366).contains(&ordinal_day) {
+            return Err(RustySatError::invalid_input(
+                "datetime ordinal day must be in 1..=366",
+            ));
+        }
+        self.ordinal_day = Some(ordinal_day);
+        Ok(self)
+    }
+
+    fn to_compact_string(&self) -> String {
+        format!(
+            "{:04}{:02}{:02}{:02}{:02}{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
+}
+
+impl From<PatternDateTime> for PatternValue {
+    fn from(value: PatternDateTime) -> Self {
+        Self::DateTime(value)
     }
 }
 
@@ -400,7 +465,12 @@ fn convert_value(raw: &str, field: &Field) -> Result<PatternValue> {
     let spec = field.spec.as_str();
     let parsed = ParsedSpec::new(spec);
     let kind = parsed.kind;
-    if spec.contains('%') || spec.is_empty() || matches!(kind, 's' | 'c') {
+    if spec.contains('%') {
+        return Ok(parse_datetime_value(raw, spec)
+            .map(PatternValue::DateTime)
+            .unwrap_or_else(|| PatternValue::Text(raw.to_string())));
+    }
+    if spec.is_empty() || matches!(kind, 's' | 'c') {
         return Ok(PatternValue::Text(raw.to_string()));
     }
     if matches!(kind, 'd' | 'i') {
@@ -427,6 +497,11 @@ fn convert_value(raw: &str, field: &Field) -> Result<PatternValue> {
 }
 
 fn format_value(value: &PatternValue, field: &Field) -> Result<String> {
+    if field.spec.contains('%') {
+        if let PatternValue::DateTime(datetime) = value {
+            return format_datetime_value(datetime, &field.spec);
+        }
+    }
     let converted = apply_conversion(value.as_compose_text(), field.conversion)?;
     let parsed = ParsedSpec::new(&field.spec);
     if let Some(width) = parsed.width {
@@ -437,6 +512,105 @@ fn format_value(value: &PatternValue, field: &Field) -> Result<String> {
         }
     }
     Ok(converted)
+}
+
+fn parse_datetime_value(raw: &str, spec: &str) -> Option<PatternDateTime> {
+    let mut raw_pos = 0;
+    let mut year = 1900_i32;
+    let mut month = 1_u8;
+    let mut day = 1_u8;
+    let mut hour = 0_u8;
+    let mut minute = 0_u8;
+    let mut second = 0_u8;
+    let mut ordinal_day = None;
+    let mut chars = spec.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            if raw[raw_pos..].chars().next()? != ch {
+                return None;
+            }
+            raw_pos += ch.len_utf8();
+            continue;
+        }
+        let directive = chars.next()?;
+        match directive {
+            'Y' => year = read_fixed_i32(raw, &mut raw_pos, 4)?,
+            'y' => year = 2000 + read_fixed_i32(raw, &mut raw_pos, 2)?,
+            'm' => month = read_fixed_u8(raw, &mut raw_pos, 2)?,
+            'd' => day = read_fixed_u8(raw, &mut raw_pos, 2)?,
+            'H' => hour = read_fixed_u8(raw, &mut raw_pos, 2)?,
+            'M' => minute = read_fixed_u8(raw, &mut raw_pos, 2)?,
+            'S' => second = read_fixed_u8(raw, &mut raw_pos, 2)?,
+            'j' => ordinal_day = Some(read_fixed_u16(raw, &mut raw_pos, 3)?),
+            '%' => {
+                if raw[raw_pos..].chars().next()? != '%' {
+                    return None;
+                }
+                raw_pos += 1;
+            }
+            _ => return None,
+        }
+    }
+    if raw_pos != raw.len() {
+        return None;
+    }
+    let datetime = PatternDateTime::new(year, month, day, hour, minute, second).ok()?;
+    match ordinal_day {
+        Some(day) => datetime.with_ordinal_day(day).ok(),
+        None => Some(datetime),
+    }
+}
+
+fn format_datetime_value(datetime: &PatternDateTime, spec: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut chars = spec.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        let directive = chars
+            .next()
+            .ok_or_else(|| RustySatError::invalid_input("dangling datetime format '%'"))?;
+        match directive {
+            'Y' => out.push_str(&format!("{:04}", datetime.year)),
+            'y' => out.push_str(&format!("{:02}", datetime.year.rem_euclid(100))),
+            'm' => out.push_str(&format!("{:02}", datetime.month)),
+            'd' => out.push_str(&format!("{:02}", datetime.day)),
+            'H' => out.push_str(&format!("{:02}", datetime.hour)),
+            'M' => out.push_str(&format!("{:02}", datetime.minute)),
+            'S' => out.push_str(&format!("{:02}", datetime.second)),
+            'j' => out.push_str(&format!("{:03}", datetime.ordinal_day.unwrap_or(1))),
+            '%' => out.push('%'),
+            other => {
+                return Err(RustySatError::unsupported(format!(
+                    "datetime format '%{other}'"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn read_fixed_i32(raw: &str, raw_pos: &mut usize, width: usize) -> Option<i32> {
+    read_fixed(raw, raw_pos, width)?.parse().ok()
+}
+
+fn read_fixed_u8(raw: &str, raw_pos: &mut usize, width: usize) -> Option<u8> {
+    read_fixed(raw, raw_pos, width)?.parse().ok()
+}
+
+fn read_fixed_u16(raw: &str, raw_pos: &mut usize, width: usize) -> Option<u16> {
+    read_fixed(raw, raw_pos, width)?.parse().ok()
+}
+
+fn read_fixed<'a>(raw: &'a str, raw_pos: &mut usize, width: usize) -> Option<&'a str> {
+    let end = *raw_pos + width;
+    let value = raw.get(*raw_pos..end)?;
+    value.chars().all(|ch| ch.is_ascii_digit()).then_some(())?;
+    *raw_pos = end;
+    Some(value)
 }
 
 fn parse_integer(raw: &str, radix: u32, field: &Field) -> Result<PatternValue> {
@@ -638,7 +812,7 @@ mod tests {
         );
         assert_eq!(
             values["start_time"],
-            PatternValue::Text("20140210_1004".to_string())
+            PatternValue::DateTime(PatternDateTime::new(2014, 2, 10, 10, 4, 0).unwrap())
         );
         assert_eq!(values["orbit"], PatternValue::Integer(69022));
     }
@@ -786,5 +960,30 @@ mod tests {
                 PatternValue::Float(expected)
             );
         }
+    }
+
+    #[test]
+    fn parses_and_composes_common_datetime_fields() {
+        let parser = FilenamePattern::new("{start_time:%Y%m%d_%H%M%S}_{day:%Y%j}").unwrap();
+        let values = parser.parse("20260502_123456_2026123").unwrap();
+
+        assert_eq!(
+            values["start_time"],
+            PatternValue::DateTime(PatternDateTime::new(2026, 5, 2, 12, 34, 56).unwrap())
+        );
+        assert_eq!(
+            values["day"],
+            PatternValue::DateTime(
+                PatternDateTime::new(2026, 1, 1, 0, 0, 0)
+                    .unwrap()
+                    .with_ordinal_day(123)
+                    .unwrap()
+            )
+        );
+
+        assert_eq!(
+            parser.compose(&values, false).unwrap(),
+            "20260502_123456_2026123"
+        );
     }
 }
