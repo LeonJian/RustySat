@@ -11,7 +11,7 @@
 //! format.
 
 use crate::Writer;
-use rusty_sat_core::{AnyDataArray, DataGrid, Dataset, Result, RustySatError};
+use rusty_sat_core::{AnyDataArray, DataGrid, Dataset, Result, RustySatError, ValidityMask};
 use std::fs;
 use std::path::Path;
 
@@ -119,6 +119,7 @@ pub fn encode_pgm(grid: &DataGrid, scale: Option<LinearScale>, fill_value: u8) -
     encode_pgm_values(
         grid.shape(),
         grid.values().iter().copied(),
+        grid.mask(),
         scale,
         fill_value,
     )
@@ -131,34 +132,50 @@ pub fn encode_pgm_array(
 ) -> Result<Vec<u8>> {
     array.require_dims_exact(&["y", "x"])?;
     let shape = array.shape_yx()?;
-    encode_pgm_values(shape, array.values_as_f64(), scale, fill_value)
+    encode_pgm_values(
+        shape,
+        array.values_as_f64(),
+        array.mask(),
+        scale,
+        fill_value,
+    )
 }
 
 fn encode_pgm_values(
     shape: (usize, usize),
     values: impl IntoIterator<Item = f64>,
+    mask: Option<&ValidityMask>,
     scale: Option<LinearScale>,
     fill_value: u8,
 ) -> Result<Vec<u8>> {
     let values: Vec<_> = values.into_iter().collect();
     let scale = match scale {
         Some(scale) => scale,
-        None => autoscale_values(&values, fill_value)?,
+        None => autoscale_values(&values, mask, fill_value)?,
     };
     let (height, width) = shape;
     let mut out = format!("P5\n{width} {height}\n255\n").into_bytes();
-    out.extend(
-        values
-            .into_iter()
-            .map(|value| scale_value(value, scale, fill_value)),
-    );
+    out.extend(values.into_iter().enumerate().map(|(idx, value)| {
+        if mask.is_some_and(|mask| mask.is_masked(idx).unwrap_or(false)) {
+            fill_value
+        } else {
+            scale_value(value, scale, fill_value)
+        }
+    }));
     Ok(out)
 }
 
-fn autoscale_values(values: &[f64], fill_value: u8) -> Result<LinearScale> {
+fn autoscale_values(
+    values: &[f64],
+    mask: Option<&ValidityMask>,
+    fill_value: u8,
+) -> Result<LinearScale> {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
-    for value in values.iter().copied().filter(|value| value.is_finite()) {
+    for (idx, value) in values.iter().copied().enumerate() {
+        if mask.is_some_and(|mask| mask.is_masked(idx).unwrap_or(false)) || !value.is_finite() {
+            continue;
+        }
         min = min.min(value);
         max = max.max(value);
     }
@@ -186,7 +203,7 @@ fn scale_value(value: f64, scale: LinearScale, fill_value: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::{DataArray, DataId};
+    use rusty_sat_core::{DataArray, DataId, ValidityMask};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -196,6 +213,18 @@ mod tests {
 
         assert_eq!(&bytes[..11], b"P5\n2 2\n255\n");
         assert_eq!(&bytes[11..], &[0, 128, 255, 7]);
+    }
+
+    #[test]
+    fn masked_pixels_use_fill_value_and_do_not_affect_autoscale() {
+        let grid = DataGrid::new(1, 3, vec![10.0, 9999.0, 20.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true, false]))
+            .unwrap();
+        let bytes = encode_pgm(&grid, None, 7).unwrap();
+
+        assert_eq!(&bytes[..11], b"P5\n3 1\n255\n");
+        assert_eq!(&bytes[11..], &[0, 7, 255]);
     }
 
     #[test]

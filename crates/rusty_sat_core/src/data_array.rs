@@ -71,10 +71,76 @@ pub struct DataArray<T: NumericElement> {
     shape: Vec<usize>,
     dims: Vec<String>,
     values: Vec<T>,
+    mask: Option<ValidityMask>,
 }
 
 /// Backwards-compatible name for the early 2D f64 grid vertical slices.
 pub type DataGrid = DataArray<f64>;
+
+/// Packed mask where a set bit means the corresponding data value is invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidityMask {
+    len: usize,
+    bits: Vec<u8>,
+}
+
+impl ValidityMask {
+    pub fn all_valid(len: usize) -> Self {
+        Self {
+            len,
+            bits: vec![0; len.div_ceil(8)],
+        }
+    }
+
+    pub fn from_masked_flags(flags: impl IntoIterator<Item = bool>) -> Self {
+        let flags = flags.into_iter().collect::<Vec<_>>();
+        let mut mask = Self::all_valid(flags.len());
+        for (idx, masked) in flags.into_iter().enumerate() {
+            if masked {
+                mask.set_masked(idx, true);
+            }
+        }
+        mask
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn is_masked(&self, index: usize) -> Option<bool> {
+        if index >= self.len {
+            return None;
+        }
+        let byte = self.bits[index / 8];
+        let bit = index % 8;
+        Some(byte & (1 << bit) != 0)
+    }
+
+    pub fn set_masked(&mut self, index: usize, masked: bool) {
+        assert!(index < self.len, "mask index out of bounds");
+        let byte = &mut self.bits[index / 8];
+        let bit = index % 8;
+        if masked {
+            *byte |= 1 << bit;
+        } else {
+            *byte &= !(1 << bit);
+        }
+    }
+
+    pub fn masked_count(&self) -> usize {
+        (0..self.len)
+            .filter(|idx| self.is_masked(*idx).unwrap_or(false))
+            .count()
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bits
+    }
+}
 
 impl<T: NumericElement> DataArray<T> {
     pub fn from_vec(shape: impl Into<Vec<usize>>, values: Vec<T>) -> Result<Self> {
@@ -85,6 +151,7 @@ impl<T: NumericElement> DataArray<T> {
             shape,
             dims,
             values,
+            mask: None,
         })
     }
 
@@ -101,7 +168,13 @@ impl<T: NumericElement> DataArray<T> {
             shape,
             dims,
             values,
+            mask: None,
         })
+    }
+
+    pub fn with_mask(mut self, mask: ValidityMask) -> Result<Self> {
+        self.set_mask(mask)?;
+        Ok(self)
     }
 
     pub fn dtype(&self) -> DataType {
@@ -174,6 +247,32 @@ impl<T: NumericElement> DataArray<T> {
         &self.values
     }
 
+    pub fn mask(&self) -> Option<&ValidityMask> {
+        self.mask.as_ref()
+    }
+
+    pub fn set_mask(&mut self, mask: ValidityMask) -> Result<()> {
+        validate_mask_len(self.values.len(), &mask)?;
+        self.mask = Some(mask);
+        Ok(())
+    }
+
+    pub fn clear_mask(&mut self) {
+        self.mask = None;
+    }
+
+    pub fn is_masked(&self, index: usize) -> Option<bool> {
+        if index >= self.values.len() {
+            return None;
+        }
+        Some(
+            self.mask
+                .as_ref()
+                .and_then(|mask| mask.is_masked(index))
+                .unwrap_or(false),
+        )
+    }
+
     pub fn get_nd(&self, indexes: &[usize]) -> Option<T> {
         let offset = row_major_offset(&self.shape, indexes)?;
         self.values.get(offset).copied()
@@ -241,6 +340,16 @@ impl AnyDataArray {
             Self::U8(array) => array.dims(),
             Self::U16(array) => array.dims(),
             Self::I16(array) => array.dims(),
+        }
+    }
+
+    pub fn mask(&self) -> Option<&ValidityMask> {
+        match self {
+            Self::F32(array) => array.mask(),
+            Self::F64(array) => array.mask(),
+            Self::U8(array) => array.mask(),
+            Self::U16(array) => array.mask(),
+            Self::I16(array) => array.mask(),
         }
     }
 
@@ -397,6 +506,17 @@ fn validate_shape_and_len(shape: &[usize], actual_len: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_mask_len(values_len: usize, mask: &ValidityMask) -> Result<()> {
+    if values_len != mask.len() {
+        return Err(RustySatError::invalid_input(format!(
+            "data array mask has {} values but data has {}",
+            mask.len(),
+            values_len
+        )));
+    }
+    Ok(())
+}
+
 fn validate_dims(shape: &[usize], dims: &[String]) -> Result<()> {
     if dims.len() != shape.len() {
         return Err(RustySatError::invalid_input(format!(
@@ -464,6 +584,7 @@ mod tests {
         assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
         assert_eq!(array.get_nd(&[1, 0]), Some(3));
         assert_eq!(array.get_nd(&[2, 0]), None);
+        assert_eq!(array.mask(), None);
     }
 
     #[test]
@@ -511,6 +632,33 @@ mod tests {
         assert!(DataArray::<u8>::from_vec_named(vec![2, 2], ["y"], vec![0; 4]).is_err());
         assert!(DataArray::<u8>::from_vec_named(vec![2, 2], ["y", "y"], vec![0; 4]).is_err());
         assert!(DataArray::<u8>::from_vec_named(vec![2, 2], ["y", ""], vec![0; 4]).is_err());
+    }
+
+    #[test]
+    fn stores_independent_validity_mask() {
+        let mask = ValidityMask::from_masked_flags([false, true, false, true]);
+        let array = DataArray::<u8>::from_vec(vec![2, 2], vec![1, 2, 3, 4])
+            .unwrap()
+            .with_mask(mask)
+            .unwrap();
+
+        assert_eq!(array.mask().unwrap().len(), 4);
+        assert_eq!(array.mask().unwrap().masked_count(), 2);
+        assert_eq!(array.is_masked(0), Some(false));
+        assert_eq!(array.is_masked(1), Some(true));
+        assert_eq!(array.is_masked(4), None);
+        assert_eq!(array.mask().unwrap().bytes().len(), 1);
+    }
+
+    #[test]
+    fn validates_mask_length() {
+        let mask = ValidityMask::from_masked_flags([true, false]);
+        let err = DataArray::<u8>::from_vec(vec![2, 2], vec![1, 2, 3, 4])
+            .unwrap()
+            .with_mask(mask)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("mask has 2 values"));
     }
 
     #[test]

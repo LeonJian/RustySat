@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 
 mod data_array;
 
-pub use data_array::{AnyDataArray, DataArray, DataGrid, DataType, NumericElement};
+pub use data_array::{AnyDataArray, DataArray, DataGrid, DataType, NumericElement, ValidityMask};
 
 pub type Result<T> = std::result::Result<T, RustySatError>;
 

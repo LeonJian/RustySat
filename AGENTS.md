@@ -124,8 +124,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[~]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
     - `[x]` P0.1.2a: Add validated dimension names to `DataArray`; default 1D to `y`, 2D to `y,x`, 3D to `bands,y,x`, and 4D to `time,bands,y,x`.
     - `[x]` P0.1.2b: Add dimension-aware shape helpers and enforce image writer dimensional expectations through `y,x` names.
-    - `[ ]` P0.1.2c: Decide how dimension-name enforcement should apply to resampling once masks/chunks are available.
-  - `[ ]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
+    - `[x]` P0.1.2c: Keep nearest resampling shape-based until mask/chunk semantics are implemented.
+  - `[~]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
+    - `[x]` P0.1.3a: Add packed `ValidityMask` storage to `DataArray` and make PGM output fill masked pixels while ignoring them for autoscale.
+    - `[ ]` P0.1.3b: Propagate masks through nearest resampling and define fill-vs-mask output behavior.
   - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
@@ -290,6 +292,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `DataArray<T>` with owned n-dimensional numeric data for `f32`, `f64`, `u8`, `u16`, and `i16`
 - validated `DataArray` dimension names with Satpy/xarray-style defaults for 1D through 4D data
 - dimension-aware helpers for named dimension lookup, `y,x` shape extraction, and exact-dimension validation
+- `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
 - `AnyDataArray` runtime dtype wrapper and `DataType` markers
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
@@ -349,6 +352,7 @@ The writers crate now has the first real image-output vertical slice:
 - `PgmWriter` writes single-band numeric datasets to binary PGM (`P5`) grayscale image files.
 - It now accepts runtime-typed `AnyDataArray` values for supported numeric dtypes, not only f64 `DataGrid` values.
 - It requires image-like `y,x` dimensions for runtime-typed arrays.
+- It treats masked pixels as fill pixels and excludes them from autoscaling.
 - It supports explicit linear scaling, autoscaling over finite values, and fill values for non-finite pixels.
 - This is a real image output path, but not Satpy's production `simple_image`, PNG, GeoTIFF, or CF writer parity yet.
 
