@@ -1,6 +1,11 @@
 //! Reader framework foundations.
 
 pub mod filename_pattern;
+pub mod yaml_reader;
+
+pub use yaml_reader::{
+    DatasetConfig, FileTypeConfig, ReaderInfo, YamlMetadataReader, YamlReaderConfig,
+};
 
 use rusty_sat_core::{DataId, Dataset, ReaderInventory, Result, RustySatError};
 use std::collections::BTreeMap;

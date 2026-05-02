@@ -71,7 +71,10 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 7a: `AreaDefinition` metadata, shape/extent validation, and common Satpy/Pyresample YAML area loading.
   - `[x]` Step 7b: projection-unit resolution-derived shapes/extents for common Pyresample `create_area_def` inputs.
   - `[x]` Step 7c: swath definition coordinate storage/loading foundations.
-- `[ ]` Step 8: first real reader.
+- `[~]` Step 8: first real reader.
+  - `[x]` Step 8a: Satpy-style reader YAML metadata parsing and dataset inventory generation.
+  - `[ ]` Step 8b: YAML-backed filename matching and file grouping using the existing filename pattern parser.
+  - `[ ]` Step 8c: first small file handler that loads real array values from an openly documented simple format.
 - `[ ]` Step 9: nearest resampling.
 - `[ ]` Step 10: first writer.
 - `[ ]` Step 11: first composite.
@@ -137,6 +140,12 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 The readers crate now has an in-memory `FakeReader` that can expose an inventory, load cloned datasets, and drive a `Scene` planning/insertion vertical slice in tests.
 
 The readers crate also has `filename_pattern::FilenamePattern`, a focused trollsift-compatible starter parser. It supports keys, full-match parsing, non-greedy string fields, integer/float conversion, repeated-field equality checks, strict/partial compose, trollsift string conversions, typed datetime-like values for common numeric strftime fields, validation, and globify for common Satpy filename patterns. It is not a byte-for-byte trollsift clone, but it now covers the core filename behavior expected by early YAML reader work.
+
+The readers crate now has a metadata-only `yaml_reader` module based on inspected Satpy reader docs and `satpy.readers.core.yaml_reader`:
+
+- Parses Satpy-style `reader`, `file_types`, and `datasets` YAML sections, including YAML Python tags as metadata values.
+- Builds `DataId` inventory entries from dataset names, scalar resolutions, wavelength triplets, polarization, modifiers, and calibration variants.
+- Exposes `YamlMetadataReader` through the common `Reader` trait, but dataset array loading is intentionally unsupported until a real file handler substep.
 
 The config crate now has the first real foundation:
 
