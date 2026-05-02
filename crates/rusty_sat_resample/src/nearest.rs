@@ -132,20 +132,20 @@ pub fn resample_area_nearest(
 fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, usize, f64)> {
     let extent = source.area_extent();
     let (pixel_size_x, pixel_size_y) = source.pixel_size();
-    let src_x = ((x - extent[0]) / pixel_size_x - 0.5).round();
-    let src_y = ((extent[3] - y) / pixel_size_y - 0.5).round();
-    if src_x < 0.0 || src_y < 0.0 {
-        return None;
-    }
-    let src_x = src_x as usize;
-    let src_y = src_y as usize;
     let (height, width) = source.shape();
-    if src_x >= width || src_y >= height {
-        return None;
-    }
+    let src_x = clamp_pixel_index((x - extent[0]) / pixel_size_x - 0.5, width)?;
+    let src_y = clamp_pixel_index((extent[3] - y) / pixel_size_y - 0.5, height)?;
     let (nearest_x, nearest_y) = pixel_center(source, src_y, src_x);
     let distance = ((nearest_x - x).powi(2) + (nearest_y - y).powi(2)).sqrt();
     Some((src_y, src_x, distance))
+}
+
+fn clamp_pixel_index(value: f64, size: usize) -> Option<usize> {
+    if !value.is_finite() || size == 0 {
+        return None;
+    }
+    let max_index = (size - 1) as f64;
+    Some(value.round().clamp(0.0, max_index) as usize)
 }
 
 fn pixel_center(area: &AreaDefinition, y: usize, x: usize) -> (f64, f64) {
@@ -206,6 +206,76 @@ mod tests {
             resample_area_nearest(&source_grid, &source, &destination, Some(0.25), -999.0).unwrap();
 
         assert_eq!(result.values(), &[-999.0]);
+    }
+
+    #[test]
+    fn nearest_uses_edge_pixel_outside_extent_when_inside_radius() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = area("destination", 1, 1, [1.0, 0.0, 2.0, 1.0]);
+        let source_grid = DataGrid::new(1, 1, vec![5.0]).unwrap();
+
+        let result =
+            resample_area_nearest(&source_grid, &source, &destination, Some(1.0), -999.0).unwrap();
+
+        assert_eq!(result.values(), &[5.0]);
+    }
+
+    #[test]
+    fn nearest_without_radius_uses_nearest_edge_pixel_for_outside_target() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [2.0, 1.0, 3.0, 2.0]);
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+
+        let result =
+            resample_area_nearest(&source_grid, &source, &destination, None, -999.0).unwrap();
+
+        assert_eq!(result.values(), &[2.0]);
+    }
+
+    #[test]
+    fn nearest_zero_radius_only_accepts_exact_pixel_center_matches() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let exact_destination = area("exact", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let shifted_destination = area("shifted", 1, 1, [0.1, 0.0, 1.1, 1.0]);
+        let source_grid = DataGrid::new(1, 1, vec![5.0]).unwrap();
+
+        let exact =
+            resample_area_nearest(&source_grid, &source, &exact_destination, Some(0.0), -999.0)
+                .unwrap();
+        let shifted = resample_area_nearest(
+            &source_grid,
+            &source,
+            &shifted_destination,
+            Some(0.0),
+            -999.0,
+        )
+        .unwrap();
+
+        assert_eq!(exact.values(), &[5.0]);
+        assert_eq!(shifted.values(), &[-999.0]);
+    }
+
+    #[test]
+    fn resampler_rejects_different_projection_metadata() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = AreaDefinition::from_parts(
+            "destination",
+            "destination",
+            "destination",
+            BTreeMap::from([("proj".to_string(), "merc".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let id = rusty_sat_core::DataId::new("image").unwrap();
+        let dataset = Dataset::new(id).with_data(DataGrid::new(1, 1, vec![5.0]).unwrap());
+        let resampler = NearestAreaResampler::new(source);
+
+        assert!(matches!(
+            resampler.resample(&dataset, &destination).unwrap_err(),
+            RustySatError::Unsupported { .. }
+        ));
     }
 
     #[test]
