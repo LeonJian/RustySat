@@ -119,7 +119,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[~]` P0.1.1: Replace f64-only 2D `DataGrid` with a Rust-native `DataArray`/`ArrayD<T>` style model supporting numeric dtypes such as `f32`, `f64`, `u8`, `u16`, and `i16`.
     - `[x]` P0.1.1a: Add owned generic `DataArray<T>`, runtime `AnyDataArray`, dtype markers, and keep `DataGrid = DataArray<f64>` compatibility for existing vertical slices.
     - `[x]` P0.1.1b: Migrate `Dataset` storage from f64-only `DataGrid` to runtime typed arrays while preserving f64 grid helpers for resampling/writer code.
-    - `[ ]` P0.1.1c: Audit reader/resampler/writer APIs for places that should accept typed arrays directly instead of f64-only `DataGrid`.
+    - `[x]` P0.1.1c: Audit reader/resampler/writer APIs and extend the first image writer to accept runtime-typed numeric arrays directly.
+    - `[ ]` P0.1.1d: Decide whether nearest resampling should become generic over numeric arrays now or wait for mask/chunk foundations.
   - `[ ]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
   - `[ ]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
   - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
@@ -340,7 +341,8 @@ The resample crate now has a first `nearest` module based on inspected Pyresampl
 
 The writers crate now has the first real image-output vertical slice:
 
-- `PgmWriter` writes single-band `DataGrid` datasets to binary PGM (`P5`) grayscale image files.
+- `PgmWriter` writes single-band numeric datasets to binary PGM (`P5`) grayscale image files.
+- It now accepts runtime-typed `AnyDataArray` values for supported numeric dtypes, not only f64 `DataGrid` values.
 - It supports explicit linear scaling, autoscaling over finite values, and fill values for non-finite pixels.
 - This is a real image output path, but not Satpy's production `simple_image`, PNG, GeoTIFF, or CF writer parity yet.
 

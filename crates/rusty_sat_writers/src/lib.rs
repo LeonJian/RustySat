@@ -4,7 +4,7 @@ use std::path::Path;
 
 pub mod pgm;
 
-pub use pgm::{encode_pgm, write_pgm, LinearScale, PgmWriter};
+pub use pgm::{encode_pgm, encode_pgm_array, write_pgm, write_pgm_array, LinearScale, PgmWriter};
 
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use rusty_sat_image::Image;

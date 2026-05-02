@@ -185,6 +185,43 @@ impl AnyDataArray {
             _ => None,
         }
     }
+
+    pub fn shape_2d(&self) -> Result<(usize, usize)> {
+        let shape = self.shape();
+        if shape.len() != 2 {
+            return Err(RustySatError::invalid_input(format!(
+                "expected 2D array shape, got {:?}",
+                shape
+            )));
+        }
+        Ok((shape[0], shape[1]))
+    }
+
+    pub fn values_as_f64(&self) -> Vec<f64> {
+        match self {
+            Self::F32(array) => array
+                .values()
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            Self::F64(array) => array.values().to_vec(),
+            Self::U8(array) => array
+                .values()
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            Self::U16(array) => array
+                .values()
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            Self::I16(array) => array
+                .values()
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+        }
+    }
 }
 
 impl From<DataArray<f32>> for AnyDataArray {
@@ -299,5 +336,15 @@ mod tests {
         assert_eq!(array.shape(), &[3]);
         assert_eq!(array.len(), 3);
         assert!(array.as_f64().is_none());
+        assert_eq!(array.values_as_f64(), vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn reports_2d_shape_for_runtime_typed_arrays() {
+        let array = AnyDataArray::from(DataArray::<u8>::from_vec(vec![2, 3], vec![0; 6]).unwrap());
+        let vector = AnyDataArray::from(DataArray::<u8>::from_vec(vec![6], vec![0; 6]).unwrap());
+
+        assert_eq!(array.shape_2d().unwrap(), (2, 3));
+        assert!(vector.shape_2d().is_err());
     }
 }

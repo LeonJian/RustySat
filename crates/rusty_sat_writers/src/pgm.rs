@@ -7,10 +7,11 @@
 //!
 //! Satpy's simple image writer delegates enhanced image objects to Pillow.
 //! Rusty Sat does not have the enhancement pipeline yet, so this first writer
-//! writes a single-band `DataGrid` to the simple, documented PGM image format.
+//! writes a single-band numeric data array to the simple, documented PGM image
+//! format.
 
 use crate::Writer;
-use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError};
+use rusty_sat_core::{AnyDataArray, DataGrid, Dataset, Result, RustySatError};
 use std::fs;
 use std::path::Path;
 
@@ -61,10 +62,10 @@ impl PgmWriter {
     }
 
     pub fn save_dataset(&self, dataset: &Dataset, path: impl AsRef<Path>) -> Result<()> {
-        let grid = dataset
-            .data()
-            .ok_or_else(|| RustySatError::invalid_input("PGM writer requires dataset grid data"))?;
-        write_pgm(grid, path, self.scale, self.fill_value)
+        let array = dataset.array().ok_or_else(|| {
+            RustySatError::invalid_input("PGM writer requires dataset array data")
+        })?;
+        write_pgm_array(array, path, self.scale, self.fill_value)
     }
 }
 
@@ -99,30 +100,64 @@ pub fn write_pgm(
     })
 }
 
+pub fn write_pgm_array(
+    array: &AnyDataArray,
+    path: impl AsRef<Path>,
+    scale: Option<LinearScale>,
+    fill_value: u8,
+) -> Result<()> {
+    let bytes = encode_pgm_array(array, scale, fill_value)?;
+    fs::write(path.as_ref(), bytes).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to write PGM '{}': {err}",
+            path.as_ref().display()
+        ))
+    })
+}
+
 pub fn encode_pgm(grid: &DataGrid, scale: Option<LinearScale>, fill_value: u8) -> Result<Vec<u8>> {
+    encode_pgm_values(
+        grid.shape(),
+        grid.values().iter().copied(),
+        scale,
+        fill_value,
+    )
+}
+
+pub fn encode_pgm_array(
+    array: &AnyDataArray,
+    scale: Option<LinearScale>,
+    fill_value: u8,
+) -> Result<Vec<u8>> {
+    let shape = array.shape_2d()?;
+    encode_pgm_values(shape, array.values_as_f64(), scale, fill_value)
+}
+
+fn encode_pgm_values(
+    shape: (usize, usize),
+    values: impl IntoIterator<Item = f64>,
+    scale: Option<LinearScale>,
+    fill_value: u8,
+) -> Result<Vec<u8>> {
+    let values: Vec<_> = values.into_iter().collect();
     let scale = match scale {
         Some(scale) => scale,
-        None => autoscale(grid, fill_value)?,
+        None => autoscale_values(&values, fill_value)?,
     };
-    let (height, width) = grid.shape();
+    let (height, width) = shape;
     let mut out = format!("P5\n{width} {height}\n255\n").into_bytes();
     out.extend(
-        grid.values()
-            .iter()
-            .map(|value| scale_value(*value, scale, fill_value)),
+        values
+            .into_iter()
+            .map(|value| scale_value(value, scale, fill_value)),
     );
     Ok(out)
 }
 
-fn autoscale(grid: &DataGrid, fill_value: u8) -> Result<LinearScale> {
+fn autoscale_values(values: &[f64], fill_value: u8) -> Result<LinearScale> {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
-    for value in grid
-        .values()
-        .iter()
-        .copied()
-        .filter(|value| value.is_finite())
-    {
+    for value in values.iter().copied().filter(|value| value.is_finite()) {
         min = min.min(value);
         max = max.max(value);
     }
@@ -150,7 +185,7 @@ fn scale_value(value: f64, scale: LinearScale, fill_value: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::DataId;
+    use rusty_sat_core::{DataArray, DataId};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -172,6 +207,25 @@ mod tests {
     }
 
     #[test]
+    fn encodes_runtime_typed_integer_array_as_binary_pgm() {
+        let array =
+            AnyDataArray::from(DataArray::<u16>::from_vec(vec![1, 3], vec![0, 128, 255]).unwrap());
+        let bytes =
+            encode_pgm_array(&array, Some(LinearScale::new(0.0, 255.0).unwrap()), 0).unwrap();
+
+        assert_eq!(&bytes[..11], b"P5\n3 1\n255\n");
+        assert_eq!(&bytes[11..], &[0, 128, 255]);
+    }
+
+    #[test]
+    fn rejects_non_2d_runtime_typed_array() {
+        let array = AnyDataArray::from(DataArray::<u8>::from_vec(vec![3], vec![0, 1, 2]).unwrap());
+        let err = encode_pgm_array(&array, None, 0).unwrap_err();
+
+        assert!(err.to_string().contains("expected 2D array"));
+    }
+
+    #[test]
     fn writer_saves_dataset_to_image_file() {
         let id = DataId::new("image").unwrap();
         let dataset = Dataset::new(id).with_data(DataGrid::new(1, 2, vec![0.0, 1.0]).unwrap());
@@ -186,6 +240,25 @@ mod tests {
             .unwrap()
             .save_dataset(&dataset, &path)
             .unwrap();
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(&bytes[..11], b"P5\n2 1\n255\n");
+        assert_eq!(&bytes[11..], &[0, 255]);
+    }
+
+    #[test]
+    fn writer_saves_runtime_typed_dataset_to_image_file() {
+        let id = DataId::new("image").unwrap();
+        let dataset = Dataset::new(id)
+            .with_array(DataArray::<u8>::from_vec(vec![1, 2], vec![0, 255]).unwrap());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("rusty_sat_typed_{nonce}.pgm"));
+
+        PgmWriter::new().save_dataset(&dataset, &path).unwrap();
         let bytes = fs::read(&path).unwrap();
         fs::remove_file(path).unwrap();
 
