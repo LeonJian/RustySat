@@ -47,7 +47,34 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 - `[x]` done
 - `[!]` blocked
 
-## Roadmap
+## Roadmap Rules
+
+The roadmap below has two layers:
+
+- The completed early `Step` roadmap records what this repository already implemented.
+- The long-term `P/R/S/I/C/M/W/O/SC/CLI/Y/T` roadmap tracks the full Satpy-compatible rewrite.
+
+Always prefer the next unfinished foundation item before building more high-level features. Do not jump to a real satellite reader, RGB composite, PNG/GeoTIFF writer, or full Scene pipeline if the required data model, CRS, mask, metadata, and lazy-loading foundations are missing.
+
+When a step is too large, split it into smaller lettered substeps in this file first. Implement one substep, test it, update this file, and commit before continuing.
+
+## Plan Review Notes
+
+The user-provided long-term plan matches the project mission: a full Rust-native Satpy-compatible implementation with YAML compatibility, efficient compute, real readers, resampling, corrections/enhancements, composites, writers, CLI, and parity testing.
+
+Required corrections to the plan:
+
+- Treat all line counts as rough planning estimates, not targets. Rust modules should be sized by clarity and tests, not by matching Python line counts.
+- `P0` foundation work must come before milestone `M2`. The current `DataGrid` is still 2D `f64`; building RGB PNG/composites on that would cause avoidable rewrites.
+- CRS/projection support is a prerequisite for real Satpy/Pyresample-compatible resampling and GeoTIFF output.
+- NetCDF/HDF5/HDF4/HDF-EOS support may require native libraries or carefully chosen pure-Rust crates. Add dependencies only when the corresponding substep starts, and record build assumptions.
+- HDF4 and HDF-EOS are high risk. Prefer a tiny, well-tested common file-handler abstraction before porting format-specific behavior.
+- Python YAML tags must be represented safely in Rust. Do not execute Python-like tags; parse them as typed symbolic references or configuration values.
+- Dask-like chunking should be Rust-native lazy/chunked data access, not a Python-shaped clone. Prefer explicit chunk readers, `Arc`-backed arrays, and parallel iteration when needed.
+- Parity must be behavioral: same supported inputs should produce the same dataset choices, geometry decisions, scaling, masks, and output values as Satpy/Pyresample/Trollimage.
+- The repository already can output a grayscale PGM image. Production image output still requires image model/enhancement work plus PNG/GeoTIFF/CF writers.
+
+## Completed Early Roadmap
 
 - `[x]` Step 0: Repository orientation and rules.
 - `[x]` Step 1: Rust workspace skeleton.
@@ -81,8 +108,127 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
   - `[x]` Step 9c: swath-to-area nearest foundations.
 - `[x]` Step 10: first writer.
   - `[x]` Step 10a: first grayscale image writer using binary PGM output from `DataGrid`.
-- `[ ]` Step 11: first composite.
-- `[ ]` Step 12+: expand Satpy parity feature by feature.
+
+## Long-Term Roadmap
+
+### P0: Foundation Completion
+
+Highest priority. Complete these before major reader/composite/writer expansion.
+
+- `[~]` P0-1: DataArray/DataGrid foundation.
+  - `[ ]` P0.1.1: Replace f64-only 2D `DataGrid` with a Rust-native `DataArray`/`ArrayD<T>` style model supporting numeric dtypes such as `f32`, `f64`, `u8`, `u16`, and `i16`.
+  - `[ ]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
+  - `[ ]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
+  - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
+  - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
+  - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
+- `[ ]` P0-2: CRS and projection system.
+  - `[ ]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
+  - `[ ]` P0.2.2: Add forward/inverse coordinate transformation APIs.
+  - `[ ]` P0.2.3: Parse, validate, and normalize proj4 strings beyond the current string-map metadata.
+- `[ ]` P0-3: `DataId`/`DataQuery` completion.
+  - `[ ]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
+  - `[ ]` P0.3.2: Add `ancillary_variables` query/filter support based on Satpy `anc_vars.py` behavior.
+
+### R: Readers
+
+- `[ ]` R0: Reader core framework.
+  - `[ ]` R0.1: `BaseFileHandler` trait, lifecycle fields, registration, and file-handler errors.
+  - `[ ]` R0.2: NetCDF common base: metadata collection, groups/variables/global attrs, scale/offset, and xarray-like variable access.
+  - `[ ]` R0.3: HDF5 common base including object/region reference handling.
+  - `[ ]` R0.4: HDF4 common base for MODIS and other legacy products.
+  - `[ ]` R0.5: HDF-EOS base.
+  - `[ ]` R0.6: HRIT headers, image navigation, prologue/epilogue parsing.
+  - `[ ]` R0.7: Instrument/product base modules for EUMETSAT, VII/VIIRS, SEVIRI, ABI, FCI, FY-4, LI, Landsat, HRIT JMA, and VIIRS/ATMS SDR.
+  - `[ ]` R0.8: YAML reader completion: safe Python-tag representation, FileHandler instantiation, composite IDs, groups/bound groups, and delayed loading.
+  - `[ ]` R0.9: Filename matching and grouping: `group_files`, multi-time grouping, and advanced matching.
+- `[ ]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
+- `[ ]` R2: LEO L1B readers, including VIIRS, MODIS, AVHRR, EPS, AAPP, OLCI, SLSTR, FY-3, ATMS, MetOp-SG, EarthCARE, PACE, MAIA, SCMI, and Satpy CF re-read.
+- `[ ]` R3: L2 product readers, including VIIRS L2/EDR, CLAVR-x, CMSAF, MIRS, NUCAPS, ACSPO, AMSR2, CALIOP, NWC SAF, IASI, TROPOMI, SeaDAS, Sentinel SAFE/SAR/MSI, GeoCAT, MERIS, OLCI, and SLSTR.
+- `[ ]` R4: Microwave, radio, lightning, and auxiliary readers.
+- `[ ]` R5: Special format readers, including GRIB, BUFR, generic image, ISCCP-NG, GMS VISSR, XML, and microwave channel definitions.
+
+### S: Resampling
+
+- `[ ]` S1: Pyresample core geometry completion: `BaseDefinition`, coordinate/grid/projection definitions, full `AreaDefinition`, stacked/dynamic areas, full `SwathDefinition`, spherical coordinates, polygons/arcs, overlap utilities, grid filters, and spherical area math.
+- `[ ]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
+- `[ ]` S3: Bilinear, cubic, and spline interpolation.
+- `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
+- `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
+- `[ ]` S6: Native resampler: repeat, aggregate, and native-resolution pipelines.
+- `[ ]` S7: Resampling pipeline helpers: `resample_dataset`, resampler preparation, data reduction, slicers, image containers, cropping, and CRS cross-projection resampling.
+
+### I: Image And Enhancement
+
+- `[ ]` I1: Trollimage-like `XRImage` core: construction, dimension correction, stretch modes, gamma, invert, finalize, alpha, mode conversion, colorize, stack/merge, scaling history, and save helpers.
+- `[ ]` I2: Colormap system: validation, colorize/palettize, RGB/RGBA conversion, merging, reversing/ranging, export, and YAML loading.
+- `[ ]` I3: Legacy `Image` compatibility where needed.
+- `[ ]` I4: Color-space conversion and utility ramps.
+- `[ ]` I5: Satpy enhancer framework and YAML enhancement chains.
+- `[ ]` I6: Instrument enhancements for ABI, AHI, VIIRS, MIMIC, and enhancement YAML data.
+- `[ ]` I7: Convolution filters and overlays.
+
+### C: Composites
+
+- `[ ]` C0: Composite core: `CompositeBase`, generic/single-band/RGB compositors, enhance-to-dataset helpers, band handling, and mode checks.
+- `[ ]` C1: Arithmetic composites such as NDVI/EVI/diff/ratio/sum and channel-operation compositors.
+- `[ ]` C2: Spectral composites, weighted blends, and band replacement/mapping.
+- `[ ]` C3: SEVIRI composites and YAML parity.
+- `[ ]` C4: ABI, AHI, AMI, AGRI, and VIIRS composites plus YAML data.
+- `[ ]` C5: Advanced composites: masks, resolution-aware composites, lookup tables, fill, auxiliary data, cloud products, lightning overlays, SAR, and config loading.
+
+### M: Modifiers
+
+- `[ ]` M1: Modifier base and spectral modifiers.
+- `[ ]` M2: Atmospheric modifiers: Rayleigh reflectance, atmospheric correction, and CO2 correction.
+- `[ ]` M3: Geometry modifiers: sun-zenith correction/reduction, solar path length, angles, and parallax.
+- `[ ]` M4: CREFL algorithms and helpers.
+- `[ ]` M5: Spatial filters: Gaussian, median, sharpen/blur/edge, and morphology.
+
+### W: Writers
+
+- `[ ]` W1: Writer framework completion: writer trait, image-writer base, extension-based factory, and writer YAML config.
+- `[ ]` W2: Simple image writer: PNG/JPEG output, format detection, transparency/fill/mode handling, and PNG metadata.
+- `[ ]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
+- `[ ]` W4: NINJO, MI, and AWIPS writers.
+- `[ ]` W5: CF NetCDF writer: dataset saving, CF dimensions/variables/global attrs, geolocation coordinates, `da2cf`, encoding, compression, and chunks.
+
+### O: Orbit And Astronomy
+
+- `[ ]` O1: TLE parsing, SGP4 binding strategy, TLE fetching, and cache management.
+- `[ ]` O2: Orbital propagation and observer look geometry.
+- `[ ]` O3: Astronomy functions: Julian days, GMST/LMST, solar position, alt/az/SZA, sun-earth distance correction, and observer position.
+- `[ ]` O4: Scan geometry geolocation, pixel computation, quaternion rotation, and Earth intersection.
+- `[ ]` O5: AVHRR GCP geolocation.
+- `[ ]` O6: Instrument scan geometry definitions and pyorbital config helpers.
+
+### SC: Scene Integration
+
+- `[ ]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
+- `[ ]` SC2: Scene spatial operations: finest/coarsest area, crop, aggregate, slice, copy, same-area/proj checks, and area iteration.
+- `[ ]` SC3: Scene resampling pipeline and integration with all resamplers.
+- `[ ]` SC4: Scene save/show/to-xarray APIs.
+- `[ ]` SC5: Composite/modifier Scene integration and dependency execution.
+- `[ ]` SC6: Multi-scene support and optional animation output.
+
+### CLI, YAML, And Tests
+
+- `[ ]` CLI: `info`, list commands, image generation, batch processing, optional serve mode, help/logging, and error messages.
+- `[ ]` Y: Full YAML system: reader/composite/enhancement config conversion, safe Python-tag handling, search-path merging, and complete `areas.yaml`.
+- `[ ]` T: Test infrastructure: Python Satpy golden-output generation, minimal fixtures, end-to-end tests, Criterion benchmarks, property tests, and CI.
+
+## Milestones
+
+- `[x]` M1: Early vertical slice: text grid data can become a grayscale PGM image.
+- `[~]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
+- `[ ]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
+- `[ ]` M3-reader: NetCDF base plus ABI L1B reader and Scene load path sufficient for a GOES ABI sample to output a basic image.
+- `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
+- `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
+- `[ ]` M6-resampling-full: Complete major resampler families and performance work.
+- `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
+- `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
+- `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
 
 ## Workspace Architecture
 
