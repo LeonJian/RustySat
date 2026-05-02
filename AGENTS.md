@@ -125,10 +125,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.2a: Add validated dimension names to `DataArray`; default 1D to `y`, 2D to `y,x`, 3D to `bands,y,x`, and 4D to `time,bands,y,x`.
     - `[x]` P0.1.2b: Add dimension-aware shape helpers and enforce image writer dimensional expectations through `y,x` names.
     - `[x]` P0.1.2c: Keep nearest resampling shape-based until mask/chunk semantics are implemented.
-  - `[~]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
+  - `[x]` P0.1.3: Add an independent mask model; represent fill/missing values separately from `NaN`, with efficient bitmask storage where practical.
     - `[x]` P0.1.3a: Add packed `ValidityMask` storage to `DataArray` and make PGM output fill masked pixels while ignoring them for autoscale.
     - `[x]` P0.1.3b: Propagate source masks through current nearest area/swath resampling; outside-radius pixels still use fill values until a broader policy is added.
-    - `[ ]` P0.1.3c: Define final fill-vs-mask output policy for resamplers, including whether no-neighbor pixels should be masked when fill value is absent.
+    - `[x]` P0.1.3c: Define current nearest fill-vs-mask policy with default fill-value behavior and opt-in masked-missing output.
   - `[ ]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
@@ -347,7 +347,8 @@ The resample crate now has a first `nearest` module based on inspected Pyresampl
 - It supports an optional radius of influence and configurable fill value, including edge-pixel nearest behavior for target pixels just outside the source extent.
 - `resample_swath_nearest` can resample coordinate-backed `SwathDefinition` data to lon/lat `AreaDefinition` grids with brute-force nearest lookup for small/test cases.
 - Current nearest area/swath resampling propagates source mask bits to destination pixels selected from masked source pixels.
-- It does not yet implement Pyresample's kd-tree acceleration, CRS transforms, no-neighbor masked output policy, anti-meridian handling, geocentric distances, or multi-band handling.
+- Current nearest area/swath resampling uses fill values for missing pixels by default and supports opt-in masked-missing output.
+- It does not yet implement Pyresample's kd-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, or multi-band handling.
 
 The writers crate now has the first real image-output vertical slice:
 

@@ -13,11 +13,24 @@
 use crate::{AreaDefinition, Resampler, SwathDefinition};
 use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError, ValidityMask};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingValuePolicy {
+    FillValue,
+    Mask,
+}
+
+impl MissingValuePolicy {
+    fn masks_missing(self) -> bool {
+        matches!(self, Self::Mask)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NearestAreaResampler {
     source: AreaDefinition,
     radius_of_influence: Option<f64>,
     fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
 }
 
 impl NearestAreaResampler {
@@ -26,6 +39,7 @@ impl NearestAreaResampler {
             source,
             radius_of_influence: None,
             fill_value: f64::NAN,
+            missing_value_policy: MissingValuePolicy::FillValue,
         }
     }
 
@@ -41,6 +55,12 @@ impl NearestAreaResampler {
 
     pub fn with_fill_value(mut self, fill_value: f64) -> Self {
         self.fill_value = fill_value;
+        self.missing_value_policy = MissingValuePolicy::FillValue;
+        self
+    }
+
+    pub fn with_masked_missing(mut self) -> Self {
+        self.missing_value_policy = MissingValuePolicy::Mask;
         self
     }
 
@@ -70,12 +90,13 @@ impl Resampler for NearestAreaResampler {
                 "nearest area resampling between different projections",
             ));
         }
-        let resampled = resample_area_nearest(
+        let resampled = resample_area_nearest_with_policy(
             source_grid,
             &self.source,
             destination,
             self.radius_of_influence,
             self.fill_value,
+            self.missing_value_policy,
         )?;
         let metadata = dataset_metadata_pairs(dataset.metadata());
         let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
@@ -104,6 +125,40 @@ pub fn resample_area_nearest(
     radius_of_influence: Option<f64>,
     fill_value: f64,
 ) -> Result<DataGrid> {
+    resample_area_nearest_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        fill_value,
+        MissingValuePolicy::FillValue,
+    )
+}
+
+pub fn resample_area_nearest_masked_missing(
+    source_grid: &DataGrid,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+) -> Result<DataGrid> {
+    resample_area_nearest_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        f64::NAN,
+        MissingValuePolicy::Mask,
+    )
+}
+
+fn resample_area_nearest_with_policy(
+    source_grid: &DataGrid,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
+) -> Result<DataGrid> {
     if source_grid.shape() != source.shape() {
         return Err(RustySatError::invalid_input(format!(
             "source grid shape {:?} does not match source area shape {:?}",
@@ -119,12 +174,12 @@ pub fn resample_area_nearest(
             let (dst_x, dst_y) = pixel_center(destination, y, x);
             let Some((src_y, src_x, distance)) = nearest_source_pixel(source, dst_x, dst_y) else {
                 values.push(fill_value);
-                mask_flags.push(false);
+                mask_flags.push(missing_value_policy.masks_missing());
                 continue;
             };
             if radius_of_influence.is_some_and(|radius| distance > radius) {
                 values.push(fill_value);
-                mask_flags.push(false);
+                mask_flags.push(missing_value_policy.masks_missing());
                 continue;
             }
             let source_index = src_y * source.shape().1 + src_x;
@@ -142,6 +197,40 @@ pub fn resample_swath_nearest(
     destination: &AreaDefinition,
     radius_of_influence: Option<f64>,
     fill_value: f64,
+) -> Result<DataGrid> {
+    resample_swath_nearest_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        fill_value,
+        MissingValuePolicy::FillValue,
+    )
+}
+
+pub fn resample_swath_nearest_masked_missing(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+) -> Result<DataGrid> {
+    resample_swath_nearest_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        f64::NAN,
+        MissingValuePolicy::Mask,
+    )
+}
+
+fn resample_swath_nearest_with_policy(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
 ) -> Result<DataGrid> {
     if source_grid.shape() != source.shape() {
         return Err(RustySatError::invalid_input(format!(
@@ -166,12 +255,12 @@ pub fn resample_swath_nearest(
             let Some((source_index, distance)) = nearest_swath_point(lons, lats, dst_x, dst_y)
             else {
                 values.push(fill_value);
-                mask_flags.push(false);
+                mask_flags.push(missing_value_policy.masks_missing());
                 continue;
             };
             if radius_of_influence.is_some_and(|radius| distance > radius) {
                 values.push(fill_value);
-                mask_flags.push(false);
+                mask_flags.push(missing_value_policy.masks_missing());
                 continue;
             }
             let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
@@ -322,6 +411,21 @@ mod tests {
     }
 
     #[test]
+    fn nearest_can_mask_missing_area_pixels() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = area("destination", 1, 1, [1.0, 1.0, 2.0, 2.0]);
+        let source_grid = DataGrid::new(1, 1, vec![5.0]).unwrap();
+
+        let result =
+            resample_area_nearest_masked_missing(&source_grid, &source, &destination, Some(0.25))
+                .unwrap();
+
+        assert!(result.values()[0].is_nan());
+        assert_eq!(result.mask().unwrap().masked_count(), 1);
+        assert_eq!(result.is_masked(0), Some(true));
+    }
+
+    #[test]
     fn nearest_uses_edge_pixel_outside_extent_when_inside_radius() {
         let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
         let destination = area("destination", 1, 1, [1.0, 0.0, 2.0, 1.0]);
@@ -437,6 +541,21 @@ mod tests {
     }
 
     #[test]
+    fn nearest_can_mask_missing_swath_pixels() {
+        let swath = SwathDefinition::from_lonlats(1, 1, vec![0.5], vec![0.5]).unwrap();
+        let source_grid = DataGrid::new(1, 1, vec![7.0]).unwrap();
+        let destination = area("destination", 1, 1, [1.0, 1.0, 2.0, 2.0]);
+
+        let result =
+            resample_swath_nearest_masked_missing(&source_grid, &swath, &destination, Some(0.25))
+                .unwrap();
+
+        assert!(result.values()[0].is_nan());
+        assert_eq!(result.mask().unwrap().masked_count(), 1);
+        assert_eq!(result.is_masked(0), Some(true));
+    }
+
+    #[test]
     fn nearest_swath_requires_coordinates() {
         let swath = SwathDefinition::new(1, 1).unwrap();
         let source_grid = DataGrid::new(1, 1, vec![7.0]).unwrap();
@@ -468,5 +587,22 @@ mod tests {
             result.metadata().get("resampler"),
             Some(&"nearest_area".to_string())
         );
+    }
+
+    #[test]
+    fn resampler_trait_can_mask_missing_area_pixels() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = area("destination", 1, 1, [1.0, 1.0, 2.0, 2.0]);
+        let id = rusty_sat_core::DataId::new("image").unwrap();
+        let dataset = Dataset::new(id).with_data(DataGrid::new(1, 1, vec![5.0]).unwrap());
+        let resampler = NearestAreaResampler::new(source)
+            .with_radius_of_influence(0.25)
+            .unwrap()
+            .with_masked_missing();
+
+        let result = resampler.resample(&dataset, &destination).unwrap();
+
+        assert!(result.data().unwrap().values()[0].is_nan());
+        assert_eq!(result.data().unwrap().mask().unwrap().masked_count(), 1);
     }
 }
