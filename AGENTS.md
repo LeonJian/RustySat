@@ -27,7 +27,7 @@ This project must move slowly and deliberately. Do not attempt to rewrite all of
 
 Do not bundle unrelated roadmap items together. If a Satpy update introduces new behavior, track it as a separate task and implement it separately.
 
-If a roadmap step is too large, split it into smaller lettered substeps before implementation. Complete one substep at a time, update this file after each substep, and leave the next substep clear for future work.
+If a roadmap step is too large, split it into smaller lettered substeps before implementation. Complete the current lettered substep fully, including any needed `a/b/c/d...` internal pieces, update this file after that completed substep, and leave the next substep clear for future work. Do not leave a lettered substep half-done unless it is explicitly marked blocked with the reason.
 
 Every rewrite step must aim for Satpy-compatible results, not only similar-looking APIs. For behavior copied from Satpy or a dependency, cite the inspected reference paths in the implementation notes or tests when practical, and add parity tests that use representative inputs from the Python docs or tests.
 
@@ -56,7 +56,7 @@ The roadmap below has two layers:
 
 Always prefer the next unfinished foundation item before building more high-level features. Do not jump to a real satellite reader, RGB composite, PNG/GeoTIFF writer, or full Scene pipeline if the required data model, CRS, mask, metadata, and lazy-loading foundations are missing.
 
-When a step is too large, split it into smaller lettered substeps in this file first. Implement one substep, test it, update this file, and commit before continuing.
+When a step is too large, split it into smaller lettered substeps in this file first. Implement the current substep to a quality stopping point, including its small internal pieces, test it, update this file, and commit before continuing.
 
 ## Plan Review Notes
 
@@ -138,7 +138,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
       - `[x]` P0.1.4c3: Add resampler-side lazy input consumption for current f64 nearest area resampling. Chunk-preserving lazy output remains future work once generic numeric resampling is ready.
   - `[~]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
     - `[x]` P0.1.5a: Add nested `MetadataValue` attrs to `Dataset` while preserving legacy flat string metadata helpers.
-    - `[ ]` P0.1.5b: Migrate readers/resamplers/writers to preserve nested attrs where they currently copy flat metadata.
+    - `[x]` P0.1.5b: Migrate current reader/resampler/writer vertical slices to preserve nested attrs where they currently copy flat metadata.
     - `[ ]` P0.1.5c: Add YAML/NetCDF-style metadata value parsing for lists, maps, booleans, numbers, and fill values.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
 - `[ ]` P0-2: CRS and projection system.

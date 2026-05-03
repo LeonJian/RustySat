@@ -11,7 +11,9 @@
 //! policy.
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
-use rusty_sat_core::{DataGrid, Dataset, LazyDataArray, Result, RustySatError, ValidityMask};
+use rusty_sat_core::{
+    DataGrid, Dataset, LazyDataArray, MetadataValue, Result, RustySatError, ValidityMask,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,10 +101,12 @@ impl Resampler for NearestAreaResampler {
             self.fill_value,
             self.missing_value_policy,
         )?;
-        let metadata = dataset_metadata_pairs(dataset.metadata());
         let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
-        for (key, value) in metadata {
+        for (key, value) in dataset_metadata_pairs(dataset.metadata()) {
             resampled_dataset.insert_metadata(key, value)?;
+        }
+        for (key, value) in dataset_attr_pairs(dataset.attrs()) {
+            resampled_dataset.insert_attr(key, value)?;
         }
         resampled_dataset.insert_metadata("area", destination.id())?;
         resampled_dataset.insert_metadata("resampler", self.name())?;
@@ -114,6 +118,15 @@ fn dataset_metadata_pairs(
     metadata: &std::collections::BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
     metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn dataset_attr_pairs(
+    attrs: &std::collections::BTreeMap<String, MetadataValue>,
+) -> Vec<(String, MetadataValue)> {
+    attrs
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
@@ -772,13 +785,34 @@ mod tests {
         let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
         let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
         let id = rusty_sat_core::DataId::new("image").unwrap();
-        let dataset =
+        let mut dataset =
             Dataset::new(id).with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        dataset.insert_metadata("units", "K").unwrap();
+        dataset
+            .insert_attr(
+                "orbital_parameters",
+                MetadataValue::map([(
+                    "satellite_nominal_longitude",
+                    MetadataValue::float(140.7).unwrap(),
+                )]),
+            )
+            .unwrap();
         let resampler = NearestAreaResampler::new(source).with_fill_value(-999.0);
 
         let result = resampler.resample(&dataset, &destination).unwrap();
 
         assert_eq!(result.data().unwrap().values(), &[1.0]);
+        assert_eq!(result.metadata().get("units"), Some(&"K".to_string()));
+        assert_eq!(
+            result.attr("units").and_then(MetadataValue::as_str),
+            Some("K")
+        );
+        assert_eq!(
+            result
+                .attr("orbital_parameters")
+                .and_then(|value| { value.get_path(&["satellite_nominal_longitude"]) }),
+            Some(&MetadataValue::float(140.7).unwrap())
+        );
         assert_eq!(
             result.metadata().get("area"),
             Some(&"destination".to_string())
