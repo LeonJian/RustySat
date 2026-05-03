@@ -203,6 +203,32 @@ impl ModifierTuple {
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn is_prefix_of(&self, requested: &Self) -> bool {
+        self.len() <= requested.len()
+            && self
+                .as_slice()
+                .iter()
+                .zip(requested.as_slice())
+                .all(|(left, right)| left == right)
+    }
+
+    pub fn missing_suffix_from<'a>(&'a self, requested: &'a Self) -> Option<&'a [String]> {
+        self.is_prefix_of(requested)
+            .then(|| &requested.as_slice()[self.len()..])
+    }
+
+    pub fn without_last(&self) -> Self {
+        Self(self.0[..self.0.len().saturating_sub(1)].to_vec())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -224,6 +250,9 @@ impl DataValue {
 
     fn matches_data_value(&self, requested: &DataValue) -> bool {
         match (self, requested) {
+            (DataValue::Modifiers(candidate), DataValue::Modifiers(requested)) => {
+                candidate.is_prefix_of(requested)
+            }
             (DataValue::Wavelength(range), DataValue::Number(number)) => {
                 range.contains_number(number.get())
             }
@@ -243,7 +272,7 @@ impl DataValue {
             Self::Text(_) => 0.0,
             Self::Number(value) => value.get(),
             Self::Wavelength(_) => 0.0,
-            Self::Modifiers(modifiers) => modifiers.as_slice().len() as f64,
+            Self::Modifiers(modifiers) => modifiers.len() as f64,
         }
     }
 
@@ -260,6 +289,10 @@ impl DataValue {
 
     fn distance_from_data_value(&self, requested: &DataValue) -> f64 {
         match (self, requested) {
+            (DataValue::Modifiers(candidate), DataValue::Modifiers(requested)) => candidate
+                .missing_suffix_from(requested)
+                .map(|suffix| suffix.len() as f64)
+                .unwrap_or(f64::INFINITY),
             (DataValue::Wavelength(range), DataValue::Number(number)) => {
                 range.distance_to_number(number.get())
             }
@@ -443,6 +476,39 @@ impl DataId {
         self.qualifiers.get(key)
     }
 
+    pub fn modifiers(&self) -> Option<&ModifierTuple> {
+        match self.qualifier("modifiers") {
+            Some(DataValue::Modifiers(modifiers)) => Some(modifiers),
+            _ => None,
+        }
+    }
+
+    pub fn is_modified(&self) -> bool {
+        self.modifiers()
+            .map(|modifiers| !modifiers.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn create_less_modified_query(&self) -> DataQuery {
+        let mut query = DataQuery::named(self.name.clone()).expect("existing DataId name is valid");
+        for (key, value) in &self.qualifiers {
+            let value = if key == "modifiers" {
+                match value {
+                    DataValue::Modifiers(modifiers) => {
+                        DataValue::Modifiers(modifiers.without_last())
+                    }
+                    value => value.clone(),
+                }
+            } else {
+                value.clone()
+            };
+            query = query
+                .with_filter(key.clone(), value)
+                .expect("existing DataId qualifier key is valid");
+        }
+        query
+    }
+
     fn sort_keys(&self) -> BTreeSet<String> {
         let mut keys = BTreeSet::new();
         keys.insert("name".to_string());
@@ -496,6 +562,40 @@ impl DataQuery {
 
     pub fn filters(&self) -> &BTreeMap<String, QueryValue> {
         &self.filters
+    }
+
+    pub fn modifiers(&self) -> Option<&ModifierTuple> {
+        match self.filters.get("modifiers") {
+            Some(QueryValue::One(DataValue::Modifiers(modifiers))) => Some(modifiers),
+            _ => None,
+        }
+    }
+
+    pub fn is_modified(&self) -> bool {
+        self.modifiers()
+            .map(|modifiers| !modifiers.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn create_less_modified_query(&self) -> Self {
+        let mut query = Self {
+            name: self.name.clone(),
+            filters: BTreeMap::new(),
+        };
+        for (key, value) in &self.filters {
+            let value = if key == "modifiers" {
+                match value {
+                    QueryValue::One(DataValue::Modifiers(modifiers)) => {
+                        QueryValue::One(DataValue::Modifiers(modifiers.without_last()))
+                    }
+                    value => value.clone(),
+                }
+            } else {
+                value.clone()
+            };
+            query.filters.insert(key.clone(), value);
+        }
+        query
     }
 
     pub fn matches(&self, data_id: &DataId) -> bool {
@@ -1653,6 +1753,105 @@ mod tests {
         assert_eq!(
             data_id.qualifier("modifiers"),
             Some(&DataValue::Modifiers(modifiers))
+        );
+    }
+
+    #[test]
+    fn modifier_tuple_tracks_prefix_and_missing_suffix() {
+        let unmodified = ModifierTuple::new(Vec::<String>::new()).unwrap();
+        let sunz = ModifierTuple::new(["sunz_corrected"]).unwrap();
+        let sunz_rayleigh = ModifierTuple::new(["sunz_corrected", "rayleigh_corrected"]).unwrap();
+        let rayleigh_sunz = ModifierTuple::new(["rayleigh_corrected", "sunz_corrected"]).unwrap();
+
+        assert!(unmodified.is_prefix_of(&sunz_rayleigh));
+        assert!(sunz.is_prefix_of(&sunz_rayleigh));
+        assert!(!rayleigh_sunz.is_prefix_of(&sunz_rayleigh));
+        assert_eq!(
+            sunz.missing_suffix_from(&sunz_rayleigh).unwrap(),
+            &["rayleigh_corrected".to_string()]
+        );
+        assert_eq!(sunz_rayleigh.without_last(), sunz);
+        assert_eq!(unmodified.without_last(), unmodified);
+    }
+
+    #[test]
+    fn modifier_query_matches_shortest_dependency_path_prefix() {
+        let unmodified = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier(
+                "modifiers",
+                ModifierTuple::new(Vec::<String>::new()).unwrap(),
+            )
+            .unwrap();
+        let sunz = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("modifiers", ModifierTuple::new(["sunz_corrected"]).unwrap())
+            .unwrap();
+        let wrong_order = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier(
+                "modifiers",
+                ModifierTuple::new(["rayleigh_corrected", "sunz_corrected"]).unwrap(),
+            )
+            .unwrap();
+        let requested = DataQuery::named("VIS006")
+            .unwrap()
+            .with_filter(
+                "modifiers",
+                ModifierTuple::new(["sunz_corrected", "rayleigh_corrected"]).unwrap(),
+            )
+            .unwrap();
+
+        assert!(requested.matches(&sunz));
+        assert!(requested.matches(&unmodified));
+        assert!(!requested.matches(&wrong_order));
+        assert_eq!(
+            requested
+                .sort_data_ids([&unmodified, &sunz])
+                .into_iter()
+                .map(|score| score.distance)
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.0]
+        );
+        assert_eq!(requested.best_match([&unmodified, &sunz]).unwrap(), &sunz);
+    }
+
+    #[test]
+    fn data_id_and_query_create_less_modified_queries() {
+        let data_id = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap()
+            .with_qualifier(
+                "modifiers",
+                ModifierTuple::new(["sunz_corrected", "rayleigh_corrected"]).unwrap(),
+            )
+            .unwrap();
+        let query = DataQuery::named("VIS006")
+            .unwrap()
+            .with_filter(
+                "modifiers",
+                ModifierTuple::new(["sunz_corrected", "rayleigh_corrected"]).unwrap(),
+            )
+            .unwrap();
+
+        assert!(data_id.is_modified());
+        assert!(query.is_modified());
+
+        let less_modified_from_id = data_id.create_less_modified_query();
+        let less_modified_from_query = query.create_less_modified_query();
+
+        assert_eq!(
+            less_modified_from_id.modifiers().unwrap().as_slice(),
+            &["sunz_corrected".to_string()]
+        );
+        assert_eq!(
+            less_modified_from_query.modifiers().unwrap().as_slice(),
+            &["sunz_corrected".to_string()]
+        );
+        assert_eq!(
+            less_modified_from_id.filters().get("calibration"),
+            Some(&QueryValue::one("reflectance"))
         );
     }
 

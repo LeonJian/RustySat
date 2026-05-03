@@ -138,8 +138,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
   - `[x]` P0.2.2: Add forward/inverse coordinate transformation APIs.
   - `[x]` P0.2.3: Parse, validate, and normalize proj4 strings beyond the current string-map metadata.
-- `[ ]` P0-3: `DataId`/`DataQuery` completion.
-  - `[ ]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
+- `[~]` P0-3: `DataId`/`DataQuery` completion.
+  - `[x]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
   - `[ ]` P0.3.2: Add `ancillary_variables` query/filter support based on Satpy `anc_vars.py` behavior.
 
 ### R: Readers
@@ -298,7 +298,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Store owned nD arrays (`f32`/`f64`/`u8`/`u16`/`i16`) via `DataArray<T>` | Zero-copy from file memory maps; all data is owned `Vec<T>` |
 | Runtime-typed `AnyDataArray` with method dispatch across 5 variants | In-place mutation of array values (no `&mut self` transform API) |
 | Named dimensions (1D–4D defaults), coordinates (1D/2D/scalar), packed `ValidityMask`, `ChunkShape` | Real lazy loading; `LazyDataArray` is contract-only, no file-backed source |
-| `DataId`/`DataQuery` matching, scoring, best-match, ambiguity detection | Modifier-chain matching, `ancillary_variables` queries |
+| `DataId`/`DataQuery` matching, scoring, best-match, ambiguity detection, ordered modifier-chain prefix matching, and less-modified query creation | `ancillary_variables` queries |
 | `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs) | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
 | `Scene` insert/remove datasets, plan reader loads, register composites/modifiers | Actual composite/modifier execution, resampling delegation, save/show |
 
