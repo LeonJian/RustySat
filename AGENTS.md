@@ -136,7 +136,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
       - `[x]` P0.1.4c1: Teach the first PGM writer to consume 2D lazy arrays by reading chunks into one y-stripe at a time.
       - `[x]` P0.1.4c2: Add reader-side lazy chunk source fixtures before production NetCDF/HDF handlers.
       - `[x]` P0.1.4c3: Add resampler-side lazy input consumption for current f64 nearest area resampling. Chunk-preserving lazy output remains future work once generic numeric resampling is ready.
-  - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
+  - `[~]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
+    - `[x]` P0.1.5a: Add nested `MetadataValue` attrs to `Dataset` while preserving legacy flat string metadata helpers.
+    - `[ ]` P0.1.5b: Migrate readers/resamplers/writers to preserve nested attrs where they currently copy flat metadata.
+    - `[ ]` P0.1.5c: Add YAML/NetCDF-style metadata value parsing for lists, maps, booleans, numbers, and fill values.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
 - `[ ]` P0-2: CRS and projection system.
   - `[ ]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
@@ -305,6 +308,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `AnyDataArray` runtime dtype wrapper and `DataType` markers
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
+- `MetadataValue` and nested `Dataset::attrs` for Satpy/xarray-style metadata dictionaries; the legacy flat string `metadata()` API still exists for current vertical slices
 - `DependencyGraph` with node sources, dependency edges, leaves, dependents, and Scene integration for user-provided datasets.
 - `ReaderInventory` and `SceneLoadPlan` for planning reader-backed dataset loads without reading data yet.
 - `CompositeRecipe` and `ModifierRecipe` for populating dependency graph edges before real generation exists.

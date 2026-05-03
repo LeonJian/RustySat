@@ -618,10 +618,83 @@ pub struct ScoredDataId<'a> {
     pub distance: f64,
 }
 
+/// Satpy/xarray-style metadata value for dataset attrs dictionaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataValue {
+    String(String),
+    Bool(bool),
+    Integer(i64),
+    Float(FloatValue),
+    List(Vec<MetadataValue>),
+    Map(BTreeMap<String, MetadataValue>),
+}
+
+impl MetadataValue {
+    pub fn string(value: impl Into<String>) -> Self {
+        Self::String(value.into())
+    }
+
+    pub fn float(value: f64) -> Result<Self> {
+        Ok(Self::Float(FloatValue::new(value)?))
+    }
+
+    pub fn map(entries: impl IntoIterator<Item = (impl Into<String>, MetadataValue)>) -> Self {
+        Self::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.into(), value))
+                .collect(),
+        )
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn get_path<'a>(&'a self, path: &[&str]) -> Option<&'a MetadataValue> {
+        let mut current = self;
+        for key in path {
+            let Self::Map(map) = current else {
+                return None;
+            };
+            current = map.get(*key)?;
+        }
+        Some(current)
+    }
+}
+
+impl From<String> for MetadataValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for MetadataValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl From<bool> for MetadataValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for MetadataValue {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dataset {
     id: DataId,
     metadata: BTreeMap<String, String>,
+    attrs: BTreeMap<String, MetadataValue>,
     data: Option<AnyDataArray>,
 }
 
@@ -630,6 +703,7 @@ impl Dataset {
         Self {
             id,
             metadata: BTreeMap::new(),
+            attrs: BTreeMap::new(),
             data: None,
         }
     }
@@ -668,6 +742,14 @@ impl Dataset {
         &self.metadata
     }
 
+    pub fn attrs(&self) -> &BTreeMap<String, MetadataValue> {
+        &self.attrs
+    }
+
+    pub fn attr(&self, key: &str) -> Option<&MetadataValue> {
+        self.attrs.get(key)
+    }
+
     pub fn insert_metadata(
         &mut self,
         key: impl Into<String>,
@@ -677,7 +759,22 @@ impl Dataset {
         if key.trim().is_empty() {
             return Err(RustySatError::invalid_input("metadata key cannot be empty"));
         }
-        self.metadata.insert(key, value.into());
+        let value = value.into();
+        self.metadata.insert(key.clone(), value.clone());
+        self.attrs.insert(key, MetadataValue::String(value));
+        Ok(())
+    }
+
+    pub fn insert_attr(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<MetadataValue>,
+    ) -> Result<()> {
+        let key = key.into();
+        if key.trim().is_empty() {
+            return Err(RustySatError::invalid_input("metadata key cannot be empty"));
+        }
+        self.attrs.insert(key, value.into());
         Ok(())
     }
 }
@@ -1219,6 +1316,42 @@ mod tests {
         dataset.set_array(DataArray::<i16>::from_vec(vec![3], vec![-1, 0, 1]).unwrap());
         assert_eq!(dataset.array().unwrap().dtype(), DataType::I16);
         assert_eq!(dataset.array().unwrap().shape(), &[3]);
+    }
+
+    #[test]
+    fn dataset_can_store_nested_metadata_attrs() {
+        let data_id = DataId::new("VIS006").unwrap();
+        let mut dataset = Dataset::new(data_id);
+
+        dataset.insert_metadata("units", "K").unwrap();
+        dataset
+            .insert_attr(
+                "orbital_parameters",
+                MetadataValue::map([
+                    (
+                        "satellite_nominal_longitude",
+                        MetadataValue::float(140.7).unwrap(),
+                    ),
+                    (
+                        "platform",
+                        MetadataValue::map([("name", MetadataValue::string("Himawari-9"))]),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(dataset.metadata().get("units"), Some(&"K".to_string()));
+        assert_eq!(
+            dataset.attr("units").and_then(MetadataValue::as_str),
+            Some("K")
+        );
+        assert_eq!(
+            dataset
+                .attr("orbital_parameters")
+                .and_then(|value| value.get_path(&["platform", "name"]))
+                .and_then(MetadataValue::as_str),
+            Some("Himawari-9")
+        );
     }
 
     #[test]
