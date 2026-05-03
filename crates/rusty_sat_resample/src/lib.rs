@@ -10,7 +10,8 @@ pub use area::{
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
 pub use nearest::{
-    resample_area_nearest, resample_area_nearest_lazy, resample_swath_nearest, NearestAreaResampler,
+    resample_area_nearest, resample_area_nearest_lazy, resample_area_nearest_owned,
+    resample_swath_nearest, NearestAreaResampler,
 };
 pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};
 
