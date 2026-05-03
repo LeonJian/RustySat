@@ -4,14 +4,31 @@
 
 Rusty Sat is a Rust-native, Satpy-compatible rewrite. The long-term goal is full Satpy capability: YAML-driven readers, composites, modifiers, resampling, corrections/enhancements, and writers that can produce corrected and resampled imagery efficiently.
 
+Satpy compatibility has two layers:
+
+1. **Behavior contract**: For the same supported input, Rusty Sat must produce the same dataset choices, metadata interpretation, dependency decisions, geometry, imagery, and writer output as Satpy. This is the correctness guarantee.
+2. **API contract**: Public APIs must be idiomatic Rust — ownership/borrowing, zero-copy where possible, explicit mutation, and type-safe generics. Do not clone Python method signatures or xarray semantics literally. Translate Satpy concepts into Rust-native patterns.
+
+Performance and memory efficiency are first-class requirements, not afterthoughts. Every implementation step should evaluate whether it can operate in-place, avoid unnecessary allocations, and use cache-friendly data layouts.
+
 This project must move slowly and deliberately. Do not attempt to rewrite all of Satpy in one change. Every implementation step should be small, tested, and easy for the next agent to continue.
 
-## Reference Trees
+## Reference Code & High-Risk Areas
 
 - `satpy/` is the Python Satpy reference implementation.
 - `deps/` contains local reference dependencies: `pyorbital`, `pyresample`, `trollimage`, and `trollsift`.
 - Treat these folders as read-only references unless the user explicitly asks otherwise.
 - Before implementing each roadmap item, check the relevant Satpy and dependency source/docs first. Use `satpy/doc`, `deps/*/doc` or `deps/*/docs`, and the implementation modules as the behavior reference.
+
+The following reference areas require especially careful parity work — do not rewrite blindly:
+
+- Satpy `Scene`, `DataId`, `DataQuery`, dependency tree, YAML readers, composites, and resampling flow.
+- Pyresample geometry and resampling algorithms.
+- Trollsift filename parser and formatter.
+- Trollimage `XRImage`, colormaps, alpha handling, and writer paths.
+- Pyorbital TLE, orbital, astronomy, and scan geolocation math.
+
+**Build risks**: HDF4 and HDF-EOS may require native libraries. Prefer a tiny, well-tested common file-handler abstraction before porting format-specific behavior. Add dependencies only when the corresponding substep starts, and record build assumptions. Python YAML tags must be parsed safely — never execute Python-like tags.
 
 ## Incremental Workflow
 
@@ -27,7 +44,7 @@ This project must move slowly and deliberately. Do not attempt to rewrite all of
 
 Do not bundle unrelated roadmap items together. If a Satpy update introduces new behavior, track it as a separate task and implement it separately.
 
-If a roadmap step is too large, split it into smaller lettered substeps before implementation. Complete the current lettered substep fully, including any needed `a/b/c/d...` internal pieces, update this file after that completed substep, and leave the next substep clear for future work. Do not leave a lettered substep half-done unless it is explicitly marked blocked with the reason.
+When a step is too large, split it into smaller lettered substeps **in this file first**. Implement the current substep to a quality stopping point, test it, update this file, and commit before continuing. Do not leave a lettered substep half-done unless it is explicitly marked blocked with the reason.
 
 Every rewrite step must aim for Satpy-compatible results, not only similar-looking APIs. For behavior copied from Satpy or a dependency, cite the inspected reference paths in the implementation notes or tests when practical, and add parity tests that use representative inputs from the Python docs or tests.
 
@@ -46,33 +63,6 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 - `[~]` in progress
 - `[x]` done
 - `[!]` blocked
-
-## Roadmap Rules
-
-The roadmap below has two layers:
-
-- The completed early `Step` roadmap records what this repository already implemented.
-- The long-term `P/R/S/I/C/M/W/O/SC/CLI/Y/T` roadmap tracks the full Satpy-compatible rewrite.
-
-Always prefer the next unfinished foundation item before building more high-level features. Do not jump to a real satellite reader, RGB composite, PNG/GeoTIFF writer, or full Scene pipeline if the required data model, CRS, mask, metadata, and lazy-loading foundations are missing.
-
-When a step is too large, split it into smaller lettered substeps in this file first. Implement the current substep to a quality stopping point, including its small internal pieces, test it, update this file, and commit before continuing.
-
-## Plan Review Notes
-
-The user-provided long-term plan matches the project mission: a full Rust-native Satpy-compatible implementation with YAML compatibility, efficient compute, real readers, resampling, corrections/enhancements, composites, writers, CLI, and parity testing.
-
-Required corrections to the plan:
-
-- Treat all line counts as rough planning estimates, not targets. Rust modules should be sized by clarity and tests, not by matching Python line counts.
-- `P0` foundation work must come before milestone `M2`. The current `DataGrid` is still 2D `f64`; building RGB PNG/composites on that would cause avoidable rewrites.
-- CRS/projection support is a prerequisite for real Satpy/Pyresample-compatible resampling and GeoTIFF output.
-- NetCDF/HDF5/HDF4/HDF-EOS support may require native libraries or carefully chosen pure-Rust crates. Add dependencies only when the corresponding substep starts, and record build assumptions.
-- HDF4 and HDF-EOS are high risk. Prefer a tiny, well-tested common file-handler abstraction before porting format-specific behavior.
-- Python YAML tags must be represented safely in Rust. Do not execute Python-like tags; parse them as typed symbolic references or configuration values.
-- Dask-like chunking should be Rust-native lazy/chunked data access, not a Python-shaped clone. Prefer explicit chunk readers, `Arc`-backed arrays, and parallel iteration when needed.
-- Parity must be behavioral: same supported inputs should produce the same dataset choices, geometry decisions, scaling, masks, and output values as Satpy/Pyresample/Trollimage.
-- The repository already can output a grayscale PGM image. Production image output still requires image model/enhancement work plus PNG/GeoTIFF/CF writers.
 
 ## Completed Early Roadmap
 
@@ -265,15 +255,12 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ## Coding Rules
 
-- Prefer Rust-native APIs over Python-shaped clones.
-- Preserve Satpy YAML compatibility as the main compatibility contract.
-- Preserve Satpy behavior as the result contract: for the same supported input, Rusty Sat should produce the same dataset choices, metadata interpretation, dependency decisions, geometry, imagery, or writer output as Satpy.
 - Use explicit `Result<T, RustySatError>` returns for fallible operations.
 - Keep incomplete behavior explicit with placeholder errors, not silent defaults.
 - Keep public types documented enough for future agents to understand intent.
 - Avoid adding heavy dependencies until the relevant roadmap step needs them.
-- Split growing modules into focused files before they become hard to review. Avoid letting one source file become the dumping ground for unrelated core, reader, parser, resampling, or writer behavior.
-- Keep tests close to the module they validate, but move larger fixtures or broad parity suites into separate test files when they would make a source file hard to scan.
+- Split growing modules into focused files before they become hard to review.
+- Keep tests close to the module they validate; move larger fixtures or broad parity suites into separate test files.
 
 ## Upstream Satpy Tracking
 
@@ -298,106 +285,78 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 ## Current Implementation State
 
-The initial Rust workspace exists. It contains compile-only crate skeletons and minimal core stubs for:
+> **UPDATE RULE: After completing any roadmap item, update this section immediately.**
+> Only list each crate's **capability boundaries** — what it CAN and CANNOT do right now.
+> Do NOT re-describe completed roadmap steps (those are already tracked in the roadmap above).
+> Keep each entry to 2-4 lines max. Focus on: data types handled, operations supported, and the hard limit that blocks the next step.
 
-- `Scene`
-- `Dataset`
-- `DataArray<T>` with owned n-dimensional numeric data for `f32`, `f64`, `u8`, `u16`, and `i16`
-- validated `DataArray` dimension names with Satpy/xarray-style defaults for 1D through 4D data
-- dimension-aware helpers for named dimension lookup, `y,x` shape extraction, and exact-dimension validation
-- numeric `Coordinate` axes on `DataArray`/`AnyDataArray`, including validated 1D axis coordinates and 2D coordinates over named dimensions
-- scalar coordinates for metadata-like coordinate values that do not depend on data dimensions
-- `Dataset::coordinate_names` for reader-driven links to coordinate datasets declared by Satpy-style YAML `coordinates`
-- `ProjCrs` CRS metadata wrapper in `rusty_sat_resample`, with WGS84 longlat defaults, symbolic EPSG support, PROJ map/string ingestion, and an explicit metadata-only backend strategy.
-- Current CRS parsing normalizes simple PROJ metadata deterministically: numeric string values are canonicalized, `latlong`/`lonlat` projection aliases become `longlat`, deprecated `+init=EPSG:...` is represented as symbolic EPSG metadata, duplicate parameters are rejected, and malformed EPSG/init values return explicit errors. This is still not pyproj CRS normalization.
-- `Coordinate2D` and CRS transform APIs for forward/inverse and source-to-target transforms. Current transform behavior is intentionally limited to safe identity cases: geographic forward/inverse identity and same-CRS source-to-target identity. Cross-CRS or projected forward/inverse transforms return explicit unsupported errors until a real backend is selected. Do not add a native PROJ dependency without documenting build assumptions and parity tests.
-- `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
-- `ChunkShape` metadata on `DataArray`/`AnyDataArray`, including validation and chunk-count helpers; actual lazy chunk loading is not implemented yet
-- `LazyDataArray`, `ChunkRegion`, and `ChunkSource` foundations for deferred chunk reads. This is only the contract layer: no production file-backed source, scheduler, cache, or parallel chunk execution exists yet.
-- `AnyDataArray` runtime dtype wrapper and `DataType` markers
-- `DataId` with typed qualifier values
-- `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
-- `MetadataValue` and nested `Dataset::attrs` for Satpy/xarray-style metadata dictionaries; the legacy flat string `metadata()` API still exists for current vertical slices
-- YAML reader metadata conversion for nested maps, lists, booleans, integers, floats, strings, nulls, and tagged values into `MetadataValue`
-- `DependencyGraph` with node sources, dependency edges, leaves, dependents, and Scene integration for user-provided datasets.
-- `ReaderInventory` and `SceneLoadPlan` for planning reader-backed dataset loads without reading data yet.
-- `CompositeRecipe` and `ModifierRecipe` for populating dependency graph edges before real generation exists.
-- shared `RustySatError`
+### rusty_sat_core
 
-The readers crate now has an in-memory `FakeReader` that can expose an inventory, load cloned datasets, and drive a `Scene` planning/insertion vertical slice in tests.
+| Can | Cannot |
+|-----|--------|
+| Store owned nD arrays (`f32`/`f64`/`u8`/`u16`/`i16`) via `DataArray<T>` | Zero-copy from file memory maps; all data is owned `Vec<T>` |
+| Runtime-typed `AnyDataArray` with method dispatch across 5 variants | In-place mutation of array values (no `&mut self` transform API) |
+| Named dimensions (1D–4D defaults), coordinates (1D/2D/scalar), packed `ValidityMask`, `ChunkShape` | Real lazy loading; `LazyDataArray` is contract-only, no file-backed source |
+| `DataId`/`DataQuery` matching, scoring, best-match, ambiguity detection | Modifier-chain matching, `ancillary_variables` queries |
+| `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs) | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
+| `Scene` insert/remove datasets, plan reader loads, register composites/modifiers | Actual composite/modifier execution, resampling delegation, save/show |
 
-The readers crate also has `filename_pattern::FilenamePattern`, a focused trollsift-compatible starter parser. It supports keys, full-match parsing, non-greedy string fields, integer/float conversion, repeated-field equality checks, strict/partial compose, trollsift string conversions, typed datetime-like values for common numeric strftime fields, validation, and globify for common Satpy filename patterns. It is not a byte-for-byte trollsift clone, but it now covers the core filename behavior expected by early YAML reader work.
+### rusty_sat_config
 
-The readers crate now has a metadata-only `yaml_reader` module based on inspected Satpy reader docs and `satpy.readers.core.yaml_reader`:
+| Can | Cannot |
+|-----|--------|
+| Load Satpy default config path (`satpy/satpy/etc`) | Format-specific config (reader YAML, composite YAML, enhancement YAML) |
+| Support `RUSTY_SAT_CONFIG_PATH` / `SATPY_CONFIG_PATH` env vars | Config search path merging, YAML recursive merge beyond basics |
+| Component config lookup (readers, writers, composites, enhancements) | |
 
-- Parses Satpy-style `reader`, `file_types`, and `datasets` YAML sections, including YAML Python tags as metadata values.
-- Builds `DataId` inventory entries from dataset names, scalar resolutions, wavelength triplets, polarization, modifiers, and calibration variants.
-- Matches configured file type patterns against filename tails, parses filename metadata with `FilenamePattern`, filters selected filenames, and sorts file types after their `requires` dependencies.
-- Exposes `YamlMetadataReader` through the common `Reader` trait, but dataset array loading is intentionally unsupported until a real file handler substep.
+### rusty_sat_readers
 
-The readers crate now has the first real array-loading vertical slice:
+| Can | Cannot |
+|-----|--------|
+| Parse filename patterns with `FilenamePattern` (trollsift-compatible: keys, parse, compose, globify, typed datetimes) | Full trollsift parity (every custom compose/conversion edge case) |
+| Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
+| `FakeReader` in-memory inventory + dataset loading for Scene planning tests | Real satellite file I/O (NetCDF/HDF/GeoTIFF/etc.) |
+| `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
 
-- `rusty_sat_core::Dataset` now stores runtime-typed `AnyDataArray` values.
-- `rusty_sat_core::DataGrid` is now a compatibility alias for `DataArray<f64>` and the `Dataset::data()` helper still exposes f64 grids for existing reader/resampler/writer code.
-- `text_grid::TextGridReader` combines Satpy-style YAML metadata, filename matching, and a tiny plain-text numeric grid file handler.
-- Loaded text-grid datasets now receive parsed dataset YAML attrs in addition to filename/file-type metadata.
-- `text_grid::TextGridChunkSource` and `TextGridReader::lazy_array` provide a reader-side lazy chunk fixture for testing deferred reads before production NetCDF/HDF chunk sources exist.
-- This proves the Reader trait can return real `Dataset` values. It is intentionally not a production satellite reader; NetCDF/HDF/GeoTIFF product handlers remain future work.
+### rusty_sat_resample
 
-The config crate now has the first real foundation:
+| Can | Cannot |
+|-----|--------|
+| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, YAML loading, projection-unit resolution derivation | Stacked/dynamic areas, spherical polygon math, overlap utilities |
+| `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, YAML loading | Real geocentric resolution, aggregation, boundary extraction |
+| `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
+| `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
+| `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
 
-- Satpy-reference default config path: `satpy/satpy/etc`.
-- `RUSTY_SAT_CONFIG_PATH` and `SATPY_CONFIG_PATH` environment path support.
-- Component config lookup for readers, writers, composites, and enhancements.
-- YAML file loading with recursive merge where later files override earlier files.
+### rusty_sat_composites
 
-The resample crate now has a focused `area` module based on inspected Pyresample/Satpy references:
+| Can | Cannot |
+|-----|--------|
+| Define `CompositeRecipe` and `ModifierRecipe` in `rusty_sat_core` | Execute composite/modifier recipes; no compositor trait or generation logic exists |
 
-- `AreaDefinition` with id, description, projection id, projection parameters, shape, area extent, and pixel-size helpers.
-- `AreaDefinition::crs()` converts existing projection metadata into the typed `ProjCrs` wrapper without performing pyproj-style CRS normalization yet.
-- YAML loading for common Satpy/Pyresample area definitions with mapping projections, PROJ strings, `shape.height`/`shape.width`, flat `area_extent`, and `lower_left_xy`/`upper_right_xy`.
-- Projection-unit resolution helpers for deterministic Pyresample-style derivations: `area_extent + resolution` derives shape, and `center + radius + resolution` derives extent and shape. Unit conversion, pyproj CRS validation, and lon/lat-driven dynamic freezing are still future work.
-- Validation for empty ids, zero-sized shapes, invalid extents, missing area ids, and malformed YAML.
+### rusty_sat_image
 
-The resample crate also has a focused `swath` module based on inspected Pyresample references:
+| Can | Cannot |
+|-----|--------|
+| Define `ImageMode` (Luma/Rgb/Rgba), `Image` shape/mode metadata, `Enhancer` trait | Store pixel data (Image has no data buffer), perform any enhancement, colorize, or mode conversion |
 
-- `SwathDefinition` can represent dimension-only swaths or validated longitude/latitude coordinate arrays.
-- It preserves Pyresample's default lon/lat WGS84 CRS convention as explicit metadata.
-- `SwathDefinition::crs_definition()` exposes the typed `ProjCrs` wrapper for the current WGS84 longlat/default or configured swath CRS metadata.
-- Coordinate-backed swaths can attach `longitude` and `latitude` 2D coordinates to matching `y,x` data arrays for future reader/geolocation integration.
-- YAML loading supports small 1D and 2D longitude/latitude fixtures for tests and future reader work.
-- Real geocentric resolution, aggregation, boundary extraction, CRS transforms, and resampling behavior are still future work.
+### rusty_sat_writers
 
-The resample crate now has a first `nearest` module based on inspected Pyresample nearest-neighbor docs/code:
+| Can | Cannot |
+|-----|--------|
+| `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | PNG/JPEG output, GeoTIFF, CF NetCDF, color image output |
+| Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
-- `NearestAreaResampler` resamples 2D `DataGrid` datasets from a source `AreaDefinition` to a destination `AreaDefinition` using projection-coordinate pixel centers.
-- `resample_area_nearest_lazy` can consume a 2D f64 `LazyDataArray` source by loading source chunks on demand and returning the current eager `DataGrid` result.
-- Current area/swath nearest resampling attaches destination x/y projection coordinate axes to the returned `DataGrid`.
-- Current eager nearest resampling preserves source coordinates that do not depend on old x/y/crs dimensions, then replaces x/y with destination projection axes.
-- It supports an optional radius of influence and configurable fill value, including edge-pixel nearest behavior for target pixels just outside the source extent.
-- `resample_swath_nearest` can resample coordinate-backed `SwathDefinition` data to lon/lat `AreaDefinition` grids with brute-force nearest lookup for small/test cases.
-- Current nearest area/swath resampling propagates source mask bits to destination pixels selected from masked source pixels.
-- Current nearest area/swath resampling uses fill values for missing pixels by default and supports opt-in masked-missing output.
-- It does not yet implement Pyresample's kd-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, or multi-band handling.
+### rusty_sat_cli
 
-The writers crate now has the first real image-output vertical slice:
+| Can | Cannot |
+|-----|--------|
+| (Skeleton only) | Any CLI commands; not yet implemented |
 
-- `PgmWriter` writes single-band numeric datasets to binary PGM (`P5`) grayscale image files.
-- It now accepts runtime-typed `AnyDataArray` values for supported numeric dtypes, not only f64 `DataGrid` values.
-- It can also write 2D `LazyDataArray<T>` inputs to PGM by reading chunks into one y-stripe at a time. This proves incremental writer consumption without requiring a full-image eager array, but it is still a PGM-only vertical slice and not the final Satpy `simple_image`/PNG writer path.
-- It requires image-like `y,x` dimensions for runtime-typed arrays.
-- It treats masked pixels as fill pixels and excludes them from autoscaling.
-- It supports explicit linear scaling, autoscaling over finite values, and fill values for non-finite pixels.
-- This is a real image output path, but not Satpy's production `simple_image`, PNG, GeoTIFF, or CF writer parity yet.
+### Known Inefficiencies (to address in future roadmap steps)
 
-No production Satpy satellite reader, compositor, enhancement, PNG, GeoTIFF, or CF writer behavior has been ported yet. Current reader/resampler/writer work is limited to early, testable vertical slices.
-
-## High-Risk Reference Areas
-
-Do not rewrite these blindly:
-
-- Satpy `Scene`, `DataId`, `DataQuery`, dependency tree, YAML readers, composites, and resampling flow.
-- Pyresample geometry and resampling algorithms.
-- Trollsift filename parser and formatter.
-- Trollimage `XRImage`, colormaps, alpha handling, and writer paths.
-- Pyorbital TLE, orbital, astronomy, and scan geolocation math.
+- `Dataset::insert_metadata()` writes to both `self.metadata` and `self.attrs` — transitional dual-write; plan to remove flat `metadata` map entirely.
+- Resampler allocates new `DataGrid` for every output — no consuming/in-place variant yet. When source data is no longer needed, the resampler should offer a `into_resampled(self, ...)` path that reuses capacity and moves metadata/coordinates.
+- `AnyDataArray` dispatch uses exhaustive 5-arm match on every method — correct but verbose; a macro could reduce boilerplate.
+- `SourceChunkCache` in nearest resampler has unbounded growth — should use LRU eviction or a fixed-size buffer.
+- `autoscale_lazy` in PGM writer reads all chunks twice (once for min/max, once for write) — should be single-pass with stripe-level caching.
