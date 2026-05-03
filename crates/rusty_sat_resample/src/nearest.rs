@@ -12,7 +12,8 @@
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
 use rusty_sat_core::{
-    DataGrid, Dataset, LazyDataArray, MetadataValue, Result, RustySatError, ValidityMask,
+    Coordinate, DataGrid, Dataset, LazyDataArray, MetadataValue, Result, RustySatError,
+    ValidityMask,
 };
 use std::collections::BTreeMap;
 
@@ -235,7 +236,10 @@ fn resample_area_nearest_with_policy(
             mask_flags.push(source_masked);
         }
     }
-    finish_resampled_grid(dst_height, dst_width, values, mask_flags)
+    add_area_xy_coords(
+        finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        destination,
+    )
 }
 
 fn resample_area_nearest_lazy_with_policy(
@@ -276,7 +280,10 @@ fn resample_area_nearest_lazy_with_policy(
             mask_flags.push(masked);
         }
     }
-    finish_resampled_grid(dst_height, dst_width, values, mask_flags)
+    add_area_xy_coords(
+        finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        destination,
+    )
 }
 
 struct SourceChunkCache<'a> {
@@ -394,7 +401,10 @@ fn resample_swath_nearest_with_policy(
             mask_flags.push(source_masked);
         }
     }
-    finish_resampled_grid(dst_height, dst_width, values, mask_flags)
+    add_area_xy_coords(
+        finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        destination,
+    )
 }
 
 fn finish_resampled_grid(
@@ -409,6 +419,12 @@ fn finish_resampled_grid(
     } else {
         Ok(grid)
     }
+}
+
+fn add_area_xy_coords(mut grid: DataGrid, area: &AreaDefinition) -> Result<DataGrid> {
+    grid.set_coordinate("x", Coordinate::axis("x", area.projection_x_coords())?)?;
+    grid.set_coordinate("y", Coordinate::axis("y", area.projection_y_coords())?)?;
+    Ok(grid)
 }
 
 fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, usize, f64)> {
@@ -544,6 +560,14 @@ mod tests {
                 3.0, 3.0, 4.0, 4.0,
             ]
         );
+        assert_eq!(
+            result.coord("x").unwrap().values(),
+            &[0.25, 0.75, 1.25, 1.75]
+        );
+        assert_eq!(
+            result.coord("y").unwrap().values(),
+            &[1.75, 1.25, 0.75, 0.25]
+        );
     }
 
     #[test]
@@ -580,6 +604,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(result.shape(), (4, 4));
+        assert_eq!(result.coord("x").unwrap().dims(), &["x".to_string()]);
+        assert_eq!(result.coord("y").unwrap().dims(), &["y".to_string()]);
         assert_eq!(
             result.values(),
             &[

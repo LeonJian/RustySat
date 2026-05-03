@@ -15,7 +15,8 @@ mod data_array;
 
 pub use chunked_array::{ChunkRegion, ChunkSource, LazyDataArray};
 pub use data_array::{
-    AnyDataArray, ChunkShape, DataArray, DataGrid, DataType, NumericElement, ValidityMask,
+    AnyDataArray, ChunkShape, Coordinate, DataArray, DataGrid, DataType, NumericElement,
+    ValidityMask,
 };
 
 pub type Result<T> = std::result::Result<T, RustySatError>;

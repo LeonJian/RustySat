@@ -9,12 +9,12 @@
 //! - `deps/pyresample/README.md` notes that Pyresample works with numpy,
 //!   masked arrays, xarray objects, and dask-backed data.
 //!
-//! This foundation still stores values eagerly. Masks and chunk metadata are
-//! explicit, but lazy chunk loading, coordinates, and nested attrs are separate
-//! roadmap items and should not be silently faked here.
+//! This foundation still stores values eagerly. Masks, chunk metadata, and
+//! coordinate axes are explicit. Lazy chunk loading and nested attrs live in
+//! their focused modules.
 
 use crate::{Result, RustySatError};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Numeric element types supported by the first Rusty Sat data-array layer.
 pub trait NumericElement:
@@ -92,6 +92,7 @@ impl DataType {
 pub struct DataArray<T: NumericElement> {
     shape: Vec<usize>,
     dims: Vec<String>,
+    coords: BTreeMap<String, Coordinate>,
     values: Vec<T>,
     mask: Option<ValidityMask>,
     chunks: Option<ChunkShape>,
@@ -99,6 +100,50 @@ pub struct DataArray<T: NumericElement> {
 
 /// Backwards-compatible name for the early 2D f64 grid vertical slices.
 pub type DataGrid = DataArray<f64>;
+
+/// Numeric coordinate attached to one or more named data dimensions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Coordinate {
+    dims: Vec<String>,
+    values: Vec<f64>,
+}
+
+impl Coordinate {
+    pub fn new(
+        dims: impl IntoIterator<Item = impl Into<String>>,
+        values: Vec<f64>,
+    ) -> Result<Self> {
+        let dims = dims.into_iter().map(Into::into).collect::<Vec<_>>();
+        if dims.is_empty() {
+            return Err(RustySatError::invalid_input(
+                "coordinate must have at least one dimension",
+            ));
+        }
+        if dims.iter().any(|dim| dim.trim().is_empty()) {
+            return Err(RustySatError::invalid_input(
+                "coordinate dimension name cannot be empty",
+            ));
+        }
+        if values.is_empty() {
+            return Err(RustySatError::invalid_input(
+                "coordinate must have at least one value",
+            ));
+        }
+        Ok(Self { dims, values })
+    }
+
+    pub fn axis(dim: impl Into<String>, values: Vec<f64>) -> Result<Self> {
+        Self::new([dim], values)
+    }
+
+    pub fn dims(&self) -> &[String] {
+        &self.dims
+    }
+
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+}
 
 /// Desired chunk size per dimension for future lazy/chunked execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +252,7 @@ impl<T: NumericElement> DataArray<T> {
         Ok(Self {
             shape,
             dims,
+            coords: BTreeMap::new(),
             values,
             mask: None,
             chunks: None,
@@ -225,6 +271,7 @@ impl<T: NumericElement> DataArray<T> {
         Ok(Self {
             shape,
             dims,
+            coords: BTreeMap::new(),
             values,
             mask: None,
             chunks: None,
@@ -238,6 +285,15 @@ impl<T: NumericElement> DataArray<T> {
 
     pub fn with_chunks(mut self, chunks: ChunkShape) -> Result<Self> {
         self.set_chunks(chunks)?;
+        Ok(self)
+    }
+
+    pub fn with_coordinate(
+        mut self,
+        name: impl Into<String>,
+        coordinate: Coordinate,
+    ) -> Result<Self> {
+        self.set_coordinate(name, coordinate)?;
         Ok(self)
     }
 
@@ -255,6 +311,34 @@ impl<T: NumericElement> DataArray<T> {
 
     pub fn dims(&self) -> &[String] {
         &self.dims
+    }
+
+    pub fn coords(&self) -> &BTreeMap<String, Coordinate> {
+        &self.coords
+    }
+
+    pub fn coord(&self, name: &str) -> Option<&Coordinate> {
+        self.coords.get(name)
+    }
+
+    pub fn set_coordinate(
+        &mut self,
+        name: impl Into<String>,
+        coordinate: Coordinate,
+    ) -> Result<()> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "coordinate name cannot be empty",
+            ));
+        }
+        validate_coordinate(&self.shape, &self.dims, &coordinate)?;
+        self.coords.insert(name, coordinate);
+        Ok(())
+    }
+
+    pub fn clear_coordinate(&mut self, name: &str) -> Option<Coordinate> {
+        self.coords.remove(name)
     }
 
     pub fn dim(&self, index: usize) -> Option<&str> {
@@ -424,6 +508,26 @@ impl AnyDataArray {
             Self::U8(array) => array.dims(),
             Self::U16(array) => array.dims(),
             Self::I16(array) => array.dims(),
+        }
+    }
+
+    pub fn coords(&self) -> &BTreeMap<String, Coordinate> {
+        match self {
+            Self::F32(array) => array.coords(),
+            Self::F64(array) => array.coords(),
+            Self::U8(array) => array.coords(),
+            Self::U16(array) => array.coords(),
+            Self::I16(array) => array.coords(),
+        }
+    }
+
+    pub fn coord(&self, name: &str) -> Option<&Coordinate> {
+        match self {
+            Self::F32(array) => array.coord(name),
+            Self::F64(array) => array.coord(name),
+            Self::U8(array) => array.coord(name),
+            Self::U16(array) => array.coord(name),
+            Self::I16(array) => array.coord(name),
         }
     }
 
@@ -623,6 +727,29 @@ fn validate_chunks(shape: &[usize], chunks: &ChunkShape) -> Result<()> {
     Ok(())
 }
 
+fn validate_coordinate(shape: &[usize], dims: &[String], coordinate: &Coordinate) -> Result<()> {
+    let mut expected_len = 1usize;
+    for dim in coordinate.dims() {
+        let Some(dim_index) = dims.iter().position(|candidate| candidate == dim) else {
+            return Err(RustySatError::invalid_input(format!(
+                "coordinate dimension '{dim}' is not a data dimension"
+            )));
+        };
+        expected_len = expected_len
+            .checked_mul(shape[dim_index])
+            .ok_or_else(|| RustySatError::invalid_input("coordinate shape is too large"))?;
+    }
+    if coordinate.values().len() != expected_len {
+        return Err(RustySatError::invalid_input(format!(
+            "coordinate has {} values but dimensions {:?} require {}",
+            coordinate.values().len(),
+            coordinate.dims(),
+            expected_len
+        )));
+    }
+    Ok(())
+}
+
 fn chunk_count(shape: &[usize], chunks: &ChunkShape) -> usize {
     shape
         .iter()
@@ -722,6 +849,49 @@ mod tests {
     }
 
     #[test]
+    fn stores_named_coordinate_axes() {
+        let array = DataArray::<u8>::from_vec(vec![2, 3], vec![0; 6])
+            .unwrap()
+            .with_coordinate("y", Coordinate::axis("y", vec![10.0, 20.0]).unwrap())
+            .unwrap()
+            .with_coordinate("x", Coordinate::axis("x", vec![1.0, 2.0, 3.0]).unwrap())
+            .unwrap();
+
+        assert_eq!(array.coords().len(), 2);
+        assert_eq!(array.coord("y").unwrap().dims(), &["y".to_string()]);
+        assert_eq!(array.coord("y").unwrap().values(), &[10.0, 20.0]);
+        assert_eq!(array.coord("x").unwrap().values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn stores_multidimensional_coordinates() {
+        let array = DataArray::<u8>::from_vec(vec![2, 3], vec![0; 6])
+            .unwrap()
+            .with_coordinate(
+                "longitude",
+                Coordinate::new(["y", "x"], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            array.coord("longitude").unwrap().dims(),
+            &["y".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn validates_coordinate_dimensions_and_length() {
+        let mut array = DataArray::<u8>::from_vec(vec![2, 3], vec![0; 6]).unwrap();
+
+        assert!(array
+            .set_coordinate("bad", Coordinate::axis("row", vec![1.0, 2.0]).unwrap())
+            .is_err());
+        assert!(array
+            .set_coordinate("x", Coordinate::axis("x", vec![1.0, 2.0]).unwrap())
+            .is_err());
+    }
+
+    #[test]
     fn keeps_data_grid_compatible_with_2d_f64_vertical_slices() {
         let grid = DataGrid::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
@@ -816,6 +986,18 @@ mod tests {
         assert_eq!(array.len(), 3);
         assert!(array.as_f64().is_none());
         assert_eq!(array.values_as_f64(), vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn exposes_coordinates_from_runtime_typed_arrays() {
+        let array = AnyDataArray::from(
+            DataArray::<u8>::from_vec(vec![2], vec![1, 2])
+                .unwrap()
+                .with_coordinate("y", Coordinate::axis("y", vec![0.5, 1.5]).unwrap())
+                .unwrap(),
+        );
+
+        assert_eq!(array.coord("y").unwrap().values(), &[0.5, 1.5]);
     }
 
     #[test]

@@ -188,6 +188,20 @@ impl AreaDefinition {
             (self.area_extent[3] - self.area_extent[1]) / self.height as f64,
         )
     }
+
+    pub fn projection_x_coords(&self) -> Vec<f64> {
+        let (pixel_size_x, _) = self.pixel_size();
+        (0..self.width)
+            .map(|x| self.area_extent[0] + (x as f64 + 0.5) * pixel_size_x)
+            .collect()
+    }
+
+    pub fn projection_y_coords(&self) -> Vec<f64> {
+        let (_, pixel_size_y) = self.pixel_size();
+        (0..self.height)
+            .map(|y| self.area_extent[3] - (y as f64 + 0.5) * pixel_size_y)
+            .collect()
+    }
 }
 
 fn shape_from_extent_and_resolution(
@@ -505,6 +519,8 @@ mod tests {
         assert_eq!(area.shape(), (10, 20));
         assert_eq!(area.area_extent(), [-100.0, -50.0, 100.0, 50.0]);
         assert_eq!(area.pixel_size(), (10.0, 10.0));
+        assert_eq!(area.projection_x_coords()[..3], [-95.0, -85.0, -75.0]);
+        assert_eq!(area.projection_y_coords()[..3], [45.0, 35.0, 25.0]);
     }
 
     #[test]
