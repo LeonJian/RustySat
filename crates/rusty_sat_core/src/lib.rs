@@ -521,6 +521,7 @@ impl DataId {
 pub struct DataQuery {
     name: Option<String>,
     filters: BTreeMap<String, QueryValue>,
+    ancillary_variables: BTreeSet<DataId>,
 }
 
 impl DataQuery {
@@ -538,6 +539,7 @@ impl DataQuery {
         Ok(Self {
             name: Some(name),
             filters: BTreeMap::new(),
+            ancillary_variables: BTreeSet::new(),
         })
     }
 
@@ -556,12 +558,26 @@ impl DataQuery {
         Ok(self)
     }
 
+    pub fn with_ancillary_variable(mut self, id: DataId) -> Self {
+        self.ancillary_variables.insert(id);
+        self
+    }
+
+    pub fn with_ancillary_variables(mut self, ids: impl IntoIterator<Item = DataId>) -> Self {
+        self.ancillary_variables.extend(ids);
+        self
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
     pub fn filters(&self) -> &BTreeMap<String, QueryValue> {
         &self.filters
+    }
+
+    pub fn ancillary_variables(&self) -> &BTreeSet<DataId> {
+        &self.ancillary_variables
     }
 
     pub fn modifiers(&self) -> Option<&ModifierTuple> {
@@ -581,6 +597,7 @@ impl DataQuery {
         let mut query = Self {
             name: self.name.clone(),
             filters: BTreeMap::new(),
+            ancillary_variables: self.ancillary_variables.clone(),
         };
         for (key, value) in &self.filters {
             let value = if key == "modifiers" {
@@ -618,6 +635,22 @@ impl DataQuery {
         shared_key_matched
     }
 
+    pub fn matches_dataset(&self, dataset: &Dataset) -> bool {
+        let identity_matches = if self.name.is_none()
+            && self.filters.is_empty()
+            && !self.ancillary_variables.is_empty()
+        {
+            true
+        } else {
+            self.matches(dataset.id())
+        };
+        identity_matches
+            && self
+                .ancillary_variables
+                .iter()
+                .all(|required| dataset.ancillary_variables().contains(required))
+    }
+
     pub fn filter_data_ids<'a>(
         &self,
         data_ids: impl IntoIterator<Item = &'a DataId>,
@@ -625,6 +658,16 @@ impl DataQuery {
         data_ids
             .into_iter()
             .filter(|data_id| self.matches(data_id))
+            .collect()
+    }
+
+    pub fn filter_datasets<'a>(
+        &self,
+        datasets: impl IntoIterator<Item = &'a Dataset>,
+    ) -> Vec<&'a Dataset> {
+        datasets
+            .into_iter()
+            .filter(|dataset| self.matches_dataset(dataset))
             .collect()
     }
 
@@ -798,6 +841,7 @@ pub struct Dataset {
     metadata: BTreeMap<String, String>,
     attrs: BTreeMap<String, MetadataValue>,
     coordinate_names: Vec<String>,
+    ancillary_variables: Vec<DataId>,
     data: Option<AnyDataArray>,
 }
 
@@ -808,6 +852,7 @@ impl Dataset {
             metadata: BTreeMap::new(),
             attrs: BTreeMap::new(),
             coordinate_names: Vec::new(),
+            ancillary_variables: Vec::new(),
             data: None,
         }
     }
@@ -858,6 +903,10 @@ impl Dataset {
         &self.coordinate_names
     }
 
+    pub fn ancillary_variables(&self) -> &[DataId] {
+        &self.ancillary_variables
+    }
+
     pub fn add_coordinate_name(&mut self, name: impl Into<String>) -> Result<()> {
         let name = name.into();
         if name.trim().is_empty() {
@@ -880,6 +929,49 @@ impl Dataset {
             self.add_coordinate_name(name)?;
         }
         Ok(())
+    }
+
+    pub fn add_ancillary_variable(&mut self, id: DataId) {
+        if !self.ancillary_variables.contains(&id) {
+            self.ancillary_variables.push(id);
+        }
+    }
+
+    pub fn set_ancillary_variables(&mut self, ids: impl IntoIterator<Item = DataId>) {
+        self.ancillary_variables.clear();
+        for id in ids {
+            self.add_ancillary_variable(id);
+        }
+    }
+
+    pub fn replace_ancillary_variable(&mut self, current: &DataId, replacement: DataId) -> bool {
+        for id in &mut self.ancillary_variables {
+            if id == current {
+                *id = replacement;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn find_ancillary_variable(&self, query: &DataQuery) -> Result<&DataId> {
+        let matches: Vec<_> = self
+            .ancillary_variables
+            .iter()
+            .filter(|id| query.matches(id))
+            .collect();
+        match matches.as_slice() {
+            [] => Err(RustySatError::not_found(format!(
+                "ancillary variable matching query for dataset '{}'",
+                self.id.name()
+            ))),
+            [id] => Ok(id),
+            _ => Err(RustySatError::ambiguous(format!(
+                "query matched {} ancillary variables for dataset '{}'",
+                matches.len(),
+                self.id.name()
+            ))),
+        }
     }
 
     pub fn insert_metadata(
@@ -1549,6 +1641,99 @@ mod tests {
             &["longitude".to_string(), "latitude".to_string()]
         );
         assert!(dataset.add_coordinate_name("").is_err());
+    }
+
+    #[test]
+    fn dataset_can_store_and_replace_ancillary_variable_links() {
+        let image = DataId::new("cloud_probability").unwrap();
+        let status = DataId::new("cpp_status_flag").unwrap();
+        let quality = DataId::new("cpp_quality").unwrap();
+        let replacement = DataId::new("cpp_quality")
+            .unwrap()
+            .with_qualifier("calibration", "flags")
+            .unwrap();
+        let mut dataset = Dataset::new(image);
+
+        dataset.add_ancillary_variable(status.clone());
+        dataset.add_ancillary_variable(status.clone());
+        dataset.add_ancillary_variable(quality.clone());
+
+        assert_eq!(
+            dataset.ancillary_variables(),
+            &[status.clone(), quality.clone()]
+        );
+        assert!(dataset.replace_ancillary_variable(&quality, replacement.clone()));
+        assert_eq!(dataset.ancillary_variables(), &[status, replacement]);
+    }
+
+    #[test]
+    fn data_query_filters_datasets_by_required_ancillary_variables() {
+        let image = DataId::new("cloud_probability").unwrap();
+        let status = DataId::new("cpp_status_flag").unwrap();
+        let quality = DataId::new("cpp_quality").unwrap();
+        let mut matching_dataset = Dataset::new(image.clone());
+        matching_dataset.set_ancillary_variables([status.clone(), quality.clone()]);
+        let mut missing_dataset = Dataset::new(image);
+        missing_dataset.add_ancillary_variable(status);
+        let query = DataQuery::named("cloud_probability")
+            .unwrap()
+            .with_ancillary_variable(quality.clone());
+
+        assert_eq!(query.ancillary_variables().len(), 1);
+        assert!(query.matches_dataset(&matching_dataset));
+        assert!(!query.matches_dataset(&missing_dataset));
+        assert_eq!(
+            query.filter_datasets([&matching_dataset, &missing_dataset]),
+            vec![&matching_dataset]
+        );
+
+        let ancillary_only_query = DataQuery::new().with_ancillary_variable(quality);
+        assert!(ancillary_only_query.matches_dataset(&matching_dataset));
+        assert!(!ancillary_only_query.matches_dataset(&missing_dataset));
+    }
+
+    #[test]
+    fn dataset_finds_one_ancillary_variable_by_data_query() {
+        let image = DataId::new("hand").unwrap();
+        let index_finger = DataId::new("index-finger").unwrap();
+        let ring_finger = DataId::new("ring-finger").unwrap();
+        let mut dataset = Dataset::new(image);
+        dataset.set_ancillary_variables([index_finger.clone(), ring_finger.clone()]);
+
+        assert_eq!(
+            dataset
+                .find_ancillary_variable(&DataQuery::named("ring-finger").unwrap())
+                .unwrap(),
+            &ring_finger
+        );
+        assert!(matches!(
+            dataset
+                .find_ancillary_variable(&DataQuery::named("thumb").unwrap())
+                .unwrap_err(),
+            RustySatError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn dataset_reports_ambiguous_ancillary_variable_query() {
+        let image = DataId::new("hand").unwrap();
+        let left = DataId::new("index-finger")
+            .unwrap()
+            .with_qualifier("side", "left")
+            .unwrap();
+        let right = DataId::new("index-finger")
+            .unwrap()
+            .with_qualifier("side", "right")
+            .unwrap();
+        let mut dataset = Dataset::new(image);
+        dataset.set_ancillary_variables([left, right]);
+
+        assert!(matches!(
+            dataset
+                .find_ancillary_variable(&DataQuery::named("index-finger").unwrap())
+                .unwrap_err(),
+            RustySatError::Ambiguous { .. }
+        ));
     }
 
     #[test]
