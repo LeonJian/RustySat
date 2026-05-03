@@ -456,6 +456,16 @@ impl<T: NumericElement> DataArray<T> {
     pub fn into_values(self) -> Vec<T> {
         self.values
     }
+
+    pub fn into_parts(self) -> (Vec<T>, BTreeMap<String, Coordinate>, Option<ValidityMask>) {
+        let Self {
+            values,
+            coords,
+            mask,
+            ..
+        } = self;
+        (values, coords, mask)
+    }
 }
 
 impl DataArray<f64> {
@@ -1026,5 +1036,22 @@ mod tests {
 
         assert_eq!(array.shape_2d().unwrap(), (2, 3));
         assert!(vector.shape_2d().is_err());
+    }
+
+    #[test]
+    fn into_parts_destructures_array() {
+        let array = DataArray::<u8>::from_vec(vec![2, 2], vec![1, 2, 3, 4])
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true, false, false]))
+            .unwrap();
+
+        let (values, coords, mask) = array.into_parts();
+
+        assert_eq!(values, vec![1, 2, 3, 4]);
+        assert_eq!(coords.len(), 1);
+        assert_eq!(coords.get("acq_time").unwrap().values(), &[123.0]);
+        assert_eq!(mask.unwrap().masked_count(), 1);
     }
 }
