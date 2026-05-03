@@ -129,13 +129,13 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.3a: Add packed `ValidityMask` storage to `DataArray` and make PGM output fill masked pixels while ignoring them for autoscale.
     - `[x]` P0.1.3b: Propagate source masks through current nearest area/swath resampling; outside-radius pixels still use fill values until a broader policy is added.
     - `[x]` P0.1.3c: Define current nearest fill-vs-mask policy with default fill-value behavior and opt-in masked-missing output.
-  - `[~]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
+  - `[x]` P0.1.4: Add lazy chunk foundations for Dask-like chunked loading without copying whole products into memory.
     - `[x]` P0.1.4a: Add validated chunk-shape metadata to `DataArray` and runtime typed arrays without introducing lazy IO yet.
     - `[x]` P0.1.4b: Add a lazy chunk source abstraction for deferred file-backed array loading.
-    - `[~]` P0.1.4c: Teach readers/resamplers/writers to preserve or consume chunked arrays incrementally.
+    - `[x]` P0.1.4c: Teach readers/resamplers/writers to preserve or consume chunked arrays incrementally.
       - `[x]` P0.1.4c1: Teach the first PGM writer to consume 2D lazy arrays by reading chunks into one y-stripe at a time.
       - `[x]` P0.1.4c2: Add reader-side lazy chunk source fixtures before production NetCDF/HDF handlers.
-      - `[ ]` P0.1.4c3: Add resampler-side chunk preservation once generic numeric resampling is ready.
+      - `[x]` P0.1.4c3: Add resampler-side lazy input consumption for current f64 nearest area resampling. Chunk-preserving lazy output remains future work once generic numeric resampling is ready.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
 - `[ ]` P0-2: CRS and projection system.
@@ -353,6 +353,7 @@ The resample crate also has a focused `swath` module based on inspected Pyresamp
 The resample crate now has a first `nearest` module based on inspected Pyresample nearest-neighbor docs/code:
 
 - `NearestAreaResampler` resamples 2D `DataGrid` datasets from a source `AreaDefinition` to a destination `AreaDefinition` using projection-coordinate pixel centers.
+- `resample_area_nearest_lazy` can consume a 2D f64 `LazyDataArray` source by loading source chunks on demand and returning the current eager `DataGrid` result.
 - It supports an optional radius of influence and configurable fill value, including edge-pixel nearest behavior for target pixels just outside the source extent.
 - `resample_swath_nearest` can resample coordinate-backed `SwathDefinition` data to lon/lat `AreaDefinition` grids with brute-force nearest lookup for small/test cases.
 - Current nearest area/swath resampling propagates source mask bits to destination pixels selected from masked source pixels.

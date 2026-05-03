@@ -11,7 +11,8 @@
 //! policy.
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
-use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError, ValidityMask};
+use rusty_sat_core::{DataGrid, Dataset, LazyDataArray, Result, RustySatError, ValidityMask};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingValuePolicy {
@@ -151,6 +152,39 @@ pub fn resample_area_nearest_masked_missing(
     )
 }
 
+pub fn resample_area_nearest_lazy(
+    source_grid: &LazyDataArray<f64>,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+) -> Result<DataGrid> {
+    resample_area_nearest_lazy_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        fill_value,
+        MissingValuePolicy::FillValue,
+    )
+}
+
+pub fn resample_area_nearest_lazy_masked_missing(
+    source_grid: &LazyDataArray<f64>,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+) -> Result<DataGrid> {
+    resample_area_nearest_lazy_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        f64::NAN,
+        MissingValuePolicy::Mask,
+    )
+}
+
 fn resample_area_nearest_with_policy(
     source_grid: &DataGrid,
     source: &AreaDefinition,
@@ -189,6 +223,85 @@ fn resample_area_nearest_with_policy(
         }
     }
     finish_resampled_grid(dst_height, dst_width, values, mask_flags)
+}
+
+fn resample_area_nearest_lazy_with_policy(
+    source_grid: &LazyDataArray<f64>,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
+) -> Result<DataGrid> {
+    if source_grid.shape_yx()? != source.shape() {
+        return Err(RustySatError::invalid_input(format!(
+            "lazy source grid shape {:?} does not match source area shape {:?}",
+            source_grid.shape_yx()?,
+            source.shape()
+        )));
+    }
+    source_grid.require_dims_exact(&["y", "x"])?;
+    let (dst_height, dst_width) = destination.shape();
+    let mut values = Vec::with_capacity(dst_height * dst_width);
+    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
+    let mut source_chunks = SourceChunkCache::new(source_grid);
+    for y in 0..dst_height {
+        for x in 0..dst_width {
+            let (dst_x, dst_y) = pixel_center(destination, y, x);
+            let Some((src_y, src_x, distance)) = nearest_source_pixel(source, dst_x, dst_y) else {
+                values.push(fill_value);
+                mask_flags.push(missing_value_policy.masks_missing());
+                continue;
+            };
+            if radius_of_influence.is_some_and(|radius| distance > radius) {
+                values.push(fill_value);
+                mask_flags.push(missing_value_policy.masks_missing());
+                continue;
+            }
+            let (value, masked) = source_chunks.value_at(src_y, src_x, fill_value)?;
+            values.push(value);
+            mask_flags.push(masked);
+        }
+    }
+    finish_resampled_grid(dst_height, dst_width, values, mask_flags)
+}
+
+struct SourceChunkCache<'a> {
+    source_grid: &'a LazyDataArray<f64>,
+    chunks: BTreeMap<(usize, usize), DataGrid>,
+}
+
+impl<'a> SourceChunkCache<'a> {
+    fn new(source_grid: &'a LazyDataArray<f64>) -> Self {
+        Self {
+            source_grid,
+            chunks: BTreeMap::new(),
+        }
+    }
+
+    fn value_at(&mut self, y: usize, x: usize, fill_value: f64) -> Result<(f64, bool)> {
+        let chunk_y = self.source_grid.chunks().as_slice()[0];
+        let chunk_x = self.source_grid.chunks().as_slice()[1];
+        let chunk_index = (y / chunk_y, x / chunk_x);
+        if !self.chunks.contains_key(&chunk_index) {
+            let chunk = self
+                .source_grid
+                .read_chunk(&[chunk_index.0, chunk_index.1])?;
+            self.chunks.insert(chunk_index, chunk);
+        }
+        let chunk = self
+            .chunks
+            .get(&chunk_index)
+            .expect("chunk inserted or existed");
+        let local_y = y % chunk_y;
+        let local_x = x % chunk_x;
+        let (_, width) = chunk.shape();
+        let local_index = local_y * width + local_x;
+        Ok((
+            chunk.get(local_y, local_x).unwrap_or(fill_value),
+            chunk.is_masked(local_index).unwrap_or(false),
+        ))
+    }
 }
 
 pub fn resample_swath_nearest(
@@ -345,7 +458,9 @@ fn pixel_center(area: &AreaDefinition, y: usize, x: usize) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataArray};
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     fn area(id: &str, height: usize, width: usize, area_extent: [f64; 4]) -> AreaDefinition {
         AreaDefinition::from_parts(
@@ -358,6 +473,43 @@ mod tests {
             area_extent,
         )
         .unwrap()
+    }
+
+    #[derive(Debug)]
+    struct MatrixSource {
+        width: usize,
+        values: Vec<f64>,
+        requests: Mutex<Vec<ChunkRegion>>,
+    }
+
+    impl MatrixSource {
+        fn new(width: usize, values: Vec<f64>) -> Self {
+            Self {
+                width,
+                values,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ChunkSource<f64> for MatrixSource {
+        fn read_chunk(&self, region: &ChunkRegion) -> Result<DataArray<f64>> {
+            self.requests.lock().unwrap().push(region.clone());
+            let [origin_y, origin_x] = region.origin() else {
+                panic!("test source only supports 2D regions");
+            };
+            let [height, width] = region.shape() else {
+                panic!("test source only supports 2D regions");
+            };
+            let mut values = Vec::with_capacity(height * width);
+            for y in 0..*height {
+                for x in 0..*width {
+                    let source_idx = (*origin_y + y) * self.width + *origin_x + x;
+                    values.push(self.values[source_idx]);
+                }
+            }
+            DataArray::from_vec_named(vec![*height, *width], ["y", "x"], values)
+        }
     }
 
     #[test]
@@ -396,6 +548,54 @@ mod tests {
         assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(result.mask().unwrap().masked_count(), 1);
         assert_eq!(result.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn nearest_resamples_lazy_area_source_by_loading_source_chunks() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 4, 4, [0.0, 0.0, 2.0, 2.0]);
+        let source_values = Arc::new(MatrixSource::new(2, vec![1.0, 2.0, 3.0, 4.0]));
+        let source_grid = LazyDataArray::from_shape(
+            vec![2, 2],
+            ChunkShape::new(vec![1, 1]).unwrap(),
+            source_values.clone(),
+        )
+        .unwrap();
+
+        let result =
+            resample_area_nearest_lazy(&source_grid, &source, &destination, None, f64::NAN)
+                .unwrap();
+
+        assert_eq!(result.shape(), (4, 4));
+        assert_eq!(
+            result.values(),
+            &[
+                1.0, 1.0, 2.0, 2.0, //
+                1.0, 1.0, 2.0, 2.0, //
+                3.0, 3.0, 4.0, 4.0, //
+                3.0, 3.0, 4.0, 4.0,
+            ]
+        );
+        assert_eq!(source_values.requests.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn nearest_lazy_area_source_uses_fill_value_outside_radius() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = area("destination", 1, 1, [1.0, 1.0, 2.0, 2.0]);
+        let source_values = Arc::new(MatrixSource::new(1, vec![5.0]));
+        let source_grid = LazyDataArray::from_shape(
+            vec![1, 1],
+            ChunkShape::new(vec![1, 1]).unwrap(),
+            source_values,
+        )
+        .unwrap();
+
+        let result =
+            resample_area_nearest_lazy(&source_grid, &source, &destination, Some(0.25), -999.0)
+                .unwrap();
+
+        assert_eq!(result.values(), &[-999.0]);
     }
 
     #[test]
