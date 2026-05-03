@@ -134,7 +134,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.4b: Add a lazy chunk source abstraction for deferred file-backed array loading.
     - `[~]` P0.1.4c: Teach readers/resamplers/writers to preserve or consume chunked arrays incrementally.
       - `[x]` P0.1.4c1: Teach the first PGM writer to consume 2D lazy arrays by reading chunks into one y-stripe at a time.
-      - `[ ]` P0.1.4c2: Add reader-side lazy chunk source fixtures before production NetCDF/HDF handlers.
+      - `[x]` P0.1.4c2: Add reader-side lazy chunk source fixtures before production NetCDF/HDF handlers.
       - `[ ]` P0.1.4c3: Add resampler-side chunk preservation once generic numeric resampling is ready.
   - `[ ]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
@@ -326,6 +326,7 @@ The readers crate now has the first real array-loading vertical slice:
 - `rusty_sat_core::Dataset` now stores runtime-typed `AnyDataArray` values.
 - `rusty_sat_core::DataGrid` is now a compatibility alias for `DataArray<f64>` and the `Dataset::data()` helper still exposes f64 grids for existing reader/resampler/writer code.
 - `text_grid::TextGridReader` combines Satpy-style YAML metadata, filename matching, and a tiny plain-text numeric grid file handler.
+- `text_grid::TextGridChunkSource` and `TextGridReader::lazy_array` provide a reader-side lazy chunk fixture for testing deferred reads before production NetCDF/HDF chunk sources exist.
 - This proves the Reader trait can return real `Dataset` values. It is intentionally not a production satellite reader; NetCDF/HDF/GeoTIFF product handlers remain future work.
 
 The config crate now has the first real foundation:

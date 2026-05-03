@@ -6,8 +6,12 @@
 //! handler loads array values from matched files.
 
 use crate::{FileMatch, Reader, YamlReaderConfig};
-use rusty_sat_core::{DataGrid, DataId, Dataset, Result, RustySatError};
+use rusty_sat_core::{
+    ChunkRegion, ChunkShape, ChunkSource, DataArray, DataGrid, DataId, Dataset, LazyDataArray,
+    Result, RustySatError,
+};
 use std::fs;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct TextGridReader {
@@ -46,6 +50,12 @@ impl TextGridReader {
             .find(|file_match| file_match.file_type() == file_type)
             .ok_or_else(|| RustySatError::not_found(format!("matched file for type '{file_type}'")))
     }
+
+    pub fn lazy_array(&self, id: &DataId, chunks: ChunkShape) -> Result<LazyDataArray<f64>> {
+        let file_type = self.dataset_file_type(id)?;
+        let file_match = self.first_file_for_type(file_type)?;
+        lazy_text_grid(file_match.filename(), chunks)
+    }
 }
 
 impl Reader for TextGridReader {
@@ -72,6 +82,117 @@ pub fn load_text_grid(filename: &str) -> Result<DataGrid> {
     let contents = fs::read_to_string(filename)
         .map_err(|err| RustySatError::not_found(format!("text grid file '{filename}': {err}")))?;
     parse_text_grid(&contents)
+}
+
+pub fn lazy_text_grid(filename: &str, chunks: ChunkShape) -> Result<LazyDataArray<f64>> {
+    let source = Arc::new(TextGridChunkSource::open(filename)?);
+    LazyDataArray::from_shape(
+        vec![source.shape.0, source.shape.1],
+        chunks,
+        source as Arc<dyn ChunkSource<f64>>,
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct TextGridChunkSource {
+    filename: String,
+    shape: (usize, usize),
+}
+
+impl TextGridChunkSource {
+    pub fn open(filename: impl Into<String>) -> Result<Self> {
+        let filename = filename.into();
+        let shape = scan_text_grid_shape(&filename)?;
+        Ok(Self { filename, shape })
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn shape(&self) -> (usize, usize) {
+        self.shape
+    }
+}
+
+impl ChunkSource<f64> for TextGridChunkSource {
+    fn read_chunk(&self, region: &ChunkRegion) -> Result<DataArray<f64>> {
+        let [origin_y, origin_x] = region.origin() else {
+            return Err(RustySatError::invalid_input(
+                "text grid chunk source requires 2D regions",
+            ));
+        };
+        let [height, width] = region.shape() else {
+            return Err(RustySatError::invalid_input(
+                "text grid chunk source requires 2D regions",
+            ));
+        };
+        let contents = fs::read_to_string(&self.filename).map_err(|err| {
+            RustySatError::not_found(format!("text grid file '{}': {err}", self.filename))
+        })?;
+        let mut values = Vec::with_capacity(*height * *width);
+        let y_end = *origin_y + *height;
+        let x_end = *origin_x + *width;
+        let mut data_row_idx = 0usize;
+        for (line_idx, line) in contents.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let row = parse_row(line, line_idx + 1)?;
+            if row.len() != self.shape.1 {
+                return Err(RustySatError::invalid_input(format!(
+                    "row {} has {} columns but text grid shape requires {}",
+                    line_idx + 1,
+                    row.len(),
+                    self.shape.1
+                )));
+            }
+            if (*origin_y..y_end).contains(&data_row_idx) {
+                values.extend_from_slice(&row[*origin_x..x_end]);
+            }
+            data_row_idx += 1;
+        }
+        if values.len() != *height * *width {
+            return Err(RustySatError::invalid_input(format!(
+                "text grid chunk {:?}+{:?} was not fully read from '{}'",
+                region.origin(),
+                region.shape(),
+                self.filename
+            )));
+        }
+        DataArray::from_vec_named(vec![*height, *width], ["y", "x"], values)
+    }
+}
+
+fn scan_text_grid_shape(filename: &str) -> Result<(usize, usize)> {
+    let contents = fs::read_to_string(filename)
+        .map_err(|err| RustySatError::not_found(format!("text grid file '{filename}': {err}")))?;
+    let mut width = None;
+    let mut height = 0usize;
+    for (line_idx, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let row = parse_row(line, line_idx + 1)?;
+        match width {
+            Some(width) if width != row.len() => {
+                return Err(RustySatError::invalid_input(format!(
+                    "row {} has {} columns but previous rows had {}",
+                    line_idx + 1,
+                    row.len(),
+                    width
+                )));
+            }
+            None => width = Some(row.len()),
+            _ => {}
+        }
+        height += 1;
+    }
+    let width =
+        width.ok_or_else(|| RustySatError::invalid_input("text grid contains no numeric rows"))?;
+    Ok((height, width))
 }
 
 pub fn parse_text_grid(contents: &str) -> Result<DataGrid> {
@@ -185,5 +306,50 @@ datasets:
             dataset.metadata().get("file_type"),
             Some(&"text_grid".to_string())
         );
+    }
+
+    #[test]
+    fn text_grid_chunk_source_reads_requested_region() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("rusty_sat_lazy_grid_{nonce}.txt"));
+        fs::write(&path, "# comment\n1 2 3 4\n5 6 7 8\n9 10 11 12\n").unwrap();
+
+        let source = TextGridChunkSource::open(path.to_string_lossy()).unwrap();
+        let chunk = source
+            .read_chunk(&ChunkRegion::new(&[3, 4], [1, 1], [2, 2]).unwrap())
+            .unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(source.shape(), (3, 4));
+        assert_eq!(chunk.shape(), (2, 2));
+        assert_eq!(chunk.values(), &[6.0, 7.0, 10.0, 11.0]);
+    }
+
+    #[test]
+    fn text_grid_reader_exposes_lazy_array_fixture() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("GRID_image_20200102030405_{nonce}.txt"));
+        fs::write(&path, "1 2 3\n4 5 6\n").unwrap();
+
+        let reader =
+            TextGridReader::from_yaml_and_filenames(TEXT_GRID_YAML, [path.to_string_lossy()])
+                .unwrap();
+        let id = reader.available_dataset_ids().remove(0);
+        let lazy = reader
+            .lazy_array(&id, ChunkShape::new(vec![1, 2]).unwrap())
+            .unwrap();
+        let chunk = lazy.read_chunk(&[1, 1]).unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(lazy.shape(), &[2, 3]);
+        assert_eq!(lazy.chunks().as_slice(), &[1, 2]);
+        assert_eq!(chunk.shape(), (1, 1));
+        assert_eq!(chunk.values(), &[6.0]);
     }
 }
