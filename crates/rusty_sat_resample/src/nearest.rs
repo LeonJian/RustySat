@@ -166,6 +166,23 @@ pub fn resample_area_nearest_masked_missing(
     )
 }
 
+pub fn resample_area_nearest_owned(
+    source_grid: DataGrid,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+) -> Result<DataGrid> {
+    resample_area_nearest_owned_with_policy(
+        source_grid,
+        source,
+        destination,
+        radius_of_influence,
+        fill_value,
+        MissingValuePolicy::FillValue,
+    )
+}
+
 pub fn resample_area_nearest_lazy(
     source_grid: &LazyDataArray<f64>,
     source: &AreaDefinition,
@@ -239,6 +256,57 @@ fn resample_area_nearest_with_policy(
     add_resampled_coords(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
         Some(source_grid),
+        destination,
+    )
+}
+
+fn resample_area_nearest_owned_with_policy(
+    source_grid: DataGrid,
+    source: &AreaDefinition,
+    destination: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
+) -> Result<DataGrid> {
+    let src_shape = source_grid.shape();
+    if src_shape != source.shape() {
+        return Err(RustySatError::invalid_input(format!(
+            "source grid shape {:?} does not match source area shape {:?}",
+            src_shape,
+            source.shape()
+        )));
+    }
+    let (src_values, src_coords, src_mask) = source_grid.into_parts();
+    let src_width = source.shape().1;
+    let (dst_height, dst_width) = destination.shape();
+    let dst_len = dst_height * dst_width;
+    let mut values = Vec::with_capacity(dst_len);
+    let mut mask_flags = Vec::with_capacity(dst_len);
+    for y in 0..dst_height {
+        for x in 0..dst_width {
+            let (dst_x, dst_y) = pixel_center(destination, y, x);
+            let Some((src_y, src_x, distance)) = nearest_source_pixel(source, dst_x, dst_y) else {
+                values.push(fill_value);
+                mask_flags.push(missing_value_policy.masks_missing());
+                continue;
+            };
+            if radius_of_influence.is_some_and(|radius| distance > radius) {
+                values.push(fill_value);
+                mask_flags.push(missing_value_policy.masks_missing());
+                continue;
+            }
+            let source_index = src_y * src_width + src_x;
+            let source_masked = src_mask
+                .as_ref()
+                .and_then(|m| m.is_masked(source_index))
+                .unwrap_or(false);
+            values.push(src_values.get(source_index).copied().unwrap_or(fill_value));
+            mask_flags.push(source_masked);
+        }
+    }
+    add_resampled_coords_owned(
+        finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        Some(src_coords),
         destination,
     )
 }
@@ -433,6 +501,23 @@ fn add_resampled_coords(
         for (name, coordinate) in source_grid.coords() {
             if should_preserve_coord(name, coordinate) {
                 grid.set_coordinate(name.clone(), coordinate.clone())?;
+            }
+        }
+    }
+    grid.set_coordinate("x", Coordinate::axis("x", area.projection_x_coords())?)?;
+    grid.set_coordinate("y", Coordinate::axis("y", area.projection_y_coords())?)?;
+    Ok(grid)
+}
+
+fn add_resampled_coords_owned(
+    mut grid: DataGrid,
+    source_coords: Option<BTreeMap<String, Coordinate>>,
+    area: &AreaDefinition,
+) -> Result<DataGrid> {
+    if let Some(coords) = source_coords {
+        for (name, coordinate) in coords {
+            if should_preserve_coord(&name, &coordinate) {
+                grid.set_coordinate(name, coordinate)?;
             }
         }
     }
@@ -912,5 +997,70 @@ mod tests {
 
         assert!(result.data().unwrap().values()[0].is_nan());
         assert_eq!(result.data().unwrap().mask().unwrap().masked_count(), 1);
+    }
+
+    #[test]
+    fn owned_resample_produces_same_output_as_borrowed() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 4, 4, [0.0, 0.0, 2.0, 2.0]);
+
+        let borrowed_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap();
+        let owned_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap();
+
+        let borrowed = resample_area_nearest(&borrowed_grid, &source, &destination, None, f64::NAN)
+            .unwrap();
+        let owned =
+            resample_area_nearest_owned(owned_grid, &source, &destination, None, f64::NAN).unwrap();
+
+        assert_eq!(borrowed.values(), owned.values());
+        assert_eq!(borrowed.mask(), owned.mask());
+        assert_eq!(
+            borrowed.coord("acq_time").unwrap().values(),
+            owned.coord("acq_time").unwrap().values()
+        );
+        assert_eq!(
+            borrowed.coord("x").unwrap().values(),
+            owned.coord("x").unwrap().values()
+        );
+    }
+
+    #[test]
+    fn owned_resample_propagates_source_mask() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true, false, false]))
+            .unwrap();
+
+        let result =
+            resample_area_nearest_owned(source_grid, &source, &destination, None, -999.0).unwrap();
+
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(result.mask().unwrap().masked_count(), 1);
+        assert_eq!(result.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn owned_resample_preserves_non_xy_coordinates() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap();
+
+        let result =
+            resample_area_nearest_owned(source_grid, &source, &destination, None, f64::NAN).unwrap();
+
+        assert_eq!(result.coord("acq_time").unwrap().values(), &[123.0]);
+        assert_eq!(result.coord("x").unwrap().values(), &[0.5]);
+        assert_eq!(result.coord("y").unwrap().values(), &[1.5]);
     }
 }
