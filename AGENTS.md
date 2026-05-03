@@ -121,7 +121,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.1b: Migrate `Dataset` storage from f64-only `DataGrid` to runtime typed arrays while preserving f64 grid helpers for resampling/writer code.
     - `[x]` P0.1.1c: Audit reader/resampler/writer APIs and extend the first image writer to accept runtime-typed numeric arrays directly.
     - `[x]` P0.1.1d: Keep nearest resampling f64-only until mask/chunk foundations clarify generic numeric output behavior.
-  - `[~]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
+  - `[x]` P0.1.2: Support 1D/2D/3D/4D shapes with named dimensions compatible with xarray-style `DataArray` concepts.
     - `[x]` P0.1.2a: Add validated dimension names to `DataArray`; default 1D to `y`, 2D to `y,x`, 3D to `bands,y,x`, and 4D to `time,bands,y,x`.
     - `[x]` P0.1.2b: Add dimension-aware shape helpers and enforce image writer dimensional expectations through `y,x` names.
     - `[x]` P0.1.2c: Keep nearest resampling shape-based until mask/chunk semantics are implemented.
@@ -140,10 +140,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.5a: Add nested `MetadataValue` attrs to `Dataset` while preserving legacy flat string metadata helpers.
     - `[x]` P0.1.5b: Migrate current reader/resampler/writer vertical slices to preserve nested attrs where they currently copy flat metadata.
     - `[x]` P0.1.5c: Add YAML/NetCDF-style metadata value parsing for lists, maps, booleans, numbers, and fill values.
-  - `[~]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
+  - `[x]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
     - `[x]` P0.1.6a: Add numeric coordinate storage to `DataArray`/`AnyDataArray` and attach destination x/y projection axes from current area resampling.
     - `[x]` P0.1.6b: Preserve non-x/y coordinates through current resampling paths following Satpy's `resample.base._update_resampled_coords` behavior.
-    - `[ ]` P0.1.6c: Add swath longitude/latitude coordinate attachment and reader-driven coordinate dataset linking.
+    - `[x]` P0.1.6c: Add swath longitude/latitude coordinate attachment and reader-driven coordinate dataset linking.
 - `[ ]` P0-2: CRS and projection system.
   - `[ ]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
   - `[ ]` P0.2.2: Add forward/inverse coordinate transformation APIs.
@@ -307,6 +307,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - dimension-aware helpers for named dimension lookup, `y,x` shape extraction, and exact-dimension validation
 - numeric `Coordinate` axes on `DataArray`/`AnyDataArray`, including validated 1D axis coordinates and 2D coordinates over named dimensions
 - scalar coordinates for metadata-like coordinate values that do not depend on data dimensions
+- `Dataset::coordinate_names` for reader-driven links to coordinate datasets declared by Satpy-style YAML `coordinates`
 - `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
 - `ChunkShape` metadata on `DataArray`/`AnyDataArray`, including validation and chunk-count helpers; actual lazy chunk loading is not implemented yet
 - `LazyDataArray`, `ChunkRegion`, and `ChunkSource` foundations for deferred chunk reads. This is only the contract layer: no production file-backed source, scheduler, cache, or parallel chunk execution exists yet.
@@ -358,6 +359,7 @@ The resample crate also has a focused `swath` module based on inspected Pyresamp
 
 - `SwathDefinition` can represent dimension-only swaths or validated longitude/latitude coordinate arrays.
 - It preserves Pyresample's default lon/lat WGS84 CRS convention as explicit metadata.
+- Coordinate-backed swaths can attach `longitude` and `latitude` 2D coordinates to matching `y,x` data arrays for future reader/geolocation integration.
 - YAML loading supports small 1D and 2D longitude/latitude fixtures for tests and future reader work.
 - Real geocentric resolution, aggregation, boundary extraction, CRS transforms, and resampling behavior are still future work.
 

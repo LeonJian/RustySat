@@ -4,7 +4,7 @@
 //! - `deps/pyresample/pyresample/geometry.py`
 //! - `deps/pyresample/docs/source/concepts/geometries.rst`
 
-use rusty_sat_core::{Result, RustySatError};
+use rusty_sat_core::{Coordinate, DataArray, NumericElement, Result, RustySatError};
 use serde_yaml::{Mapping, Value};
 use std::collections::BTreeMap;
 
@@ -76,6 +76,40 @@ impl SwathDefinition {
 
     pub fn crs(&self) -> &BTreeMap<String, String> {
         &self.crs
+    }
+
+    pub fn longitude_coordinate(&self) -> Result<Coordinate> {
+        let Some(lons) = self.lons.as_ref() else {
+            return Err(RustySatError::invalid_input(
+                "swath has no longitude coordinates",
+            ));
+        };
+        Coordinate::new(["y", "x"], lons.clone())
+    }
+
+    pub fn latitude_coordinate(&self) -> Result<Coordinate> {
+        let Some(lats) = self.lats.as_ref() else {
+            return Err(RustySatError::invalid_input(
+                "swath has no latitude coordinates",
+            ));
+        };
+        Coordinate::new(["y", "x"], lats.clone())
+    }
+
+    pub fn attach_coordinates_to_array<T: NumericElement>(
+        &self,
+        mut array: DataArray<T>,
+    ) -> Result<DataArray<T>> {
+        if array.shape_yx()? != self.shape() {
+            return Err(RustySatError::invalid_input(format!(
+                "data array y/x shape {:?} does not match swath shape {:?}",
+                array.shape_yx()?,
+                self.shape()
+            )));
+        }
+        array.set_coordinate("longitude", self.longitude_coordinate()?)?;
+        array.set_coordinate("latitude", self.latitude_coordinate()?)?;
+        Ok(array)
     }
 }
 
@@ -273,6 +307,42 @@ mod tests {
         assert_eq!(swath.shape(), (2, 2));
         assert_eq!(swath.lons().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(swath.lats().unwrap(), &[5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn attaches_lonlat_coordinates_to_matching_data_array() {
+        let swath =
+            SwathDefinition::from_lonlats(2, 2, vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0])
+                .unwrap();
+        let array = DataArray::<u16>::from_vec(vec![2, 2], vec![10, 20, 30, 40]).unwrap();
+
+        let array = swath.attach_coordinates_to_array(array).unwrap();
+
+        assert_eq!(
+            array.coord("longitude").unwrap().dims(),
+            &["y".to_string(), "x".to_string()]
+        );
+        assert_eq!(
+            array.coord("longitude").unwrap().values(),
+            &[1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(
+            array.coord("latitude").unwrap().values(),
+            &[5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn rejects_swath_coordinate_attachment_without_matching_shape_or_coordinates() {
+        let swath =
+            SwathDefinition::from_lonlats(2, 2, vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0])
+                .unwrap();
+        let bad_shape = DataArray::<u8>::from_vec(vec![1, 4], vec![0; 4]).unwrap();
+        assert!(swath.attach_coordinates_to_array(bad_shape).is_err());
+
+        let dimension_only = SwathDefinition::new(2, 2).unwrap();
+        let array = DataArray::<u8>::from_vec(vec![2, 2], vec![0; 4]).unwrap();
+        assert!(dimension_only.attach_coordinates_to_array(array).is_err());
     }
 
     #[test]

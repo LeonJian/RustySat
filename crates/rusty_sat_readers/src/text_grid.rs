@@ -77,7 +77,9 @@ impl Reader for TextGridReader {
         let file_match = self.first_file_for_type(file_type)?;
         let grid = load_text_grid(file_match.filename())?;
         let mut dataset = Dataset::new(id.clone()).with_data(grid);
-        for (key, value) in self.dataset_config(id)?.attrs() {
+        let dataset_config = self.dataset_config(id)?;
+        dataset.set_coordinate_names(dataset_config.coordinates().iter().cloned())?;
+        for (key, value) in dataset_config.attrs() {
             dataset.insert_attr(key.clone(), value.clone())?;
         }
         dataset.insert_metadata("filename", file_match.filename())?;
@@ -265,6 +267,7 @@ datasets:
   image:
     name: image
     resolution: 1000
+    coordinates: [longitude, latitude]
     raw_metadata:
       platform: test-sat
       scan_lines: 2
@@ -314,6 +317,10 @@ datasets:
         assert_eq!(reader.files().len(), 1);
         assert_eq!(dataset.data().unwrap().shape(), (2, 2));
         assert_eq!(dataset.data().unwrap().values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            dataset.coordinate_names(),
+            &["longitude".to_string(), "latitude".to_string()]
+        );
         assert_eq!(
             dataset.metadata().get("file_type"),
             Some(&"text_grid".to_string())

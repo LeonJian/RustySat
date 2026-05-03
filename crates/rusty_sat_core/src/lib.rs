@@ -697,6 +697,7 @@ pub struct Dataset {
     id: DataId,
     metadata: BTreeMap<String, String>,
     attrs: BTreeMap<String, MetadataValue>,
+    coordinate_names: Vec<String>,
     data: Option<AnyDataArray>,
 }
 
@@ -706,6 +707,7 @@ impl Dataset {
             id,
             metadata: BTreeMap::new(),
             attrs: BTreeMap::new(),
+            coordinate_names: Vec::new(),
             data: None,
         }
     }
@@ -750,6 +752,34 @@ impl Dataset {
 
     pub fn attr(&self, key: &str) -> Option<&MetadataValue> {
         self.attrs.get(key)
+    }
+
+    pub fn coordinate_names(&self) -> &[String] {
+        &self.coordinate_names
+    }
+
+    pub fn add_coordinate_name(&mut self, name: impl Into<String>) -> Result<()> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "coordinate dataset name cannot be empty",
+            ));
+        }
+        if !self.coordinate_names.contains(&name) {
+            self.coordinate_names.push(name);
+        }
+        Ok(())
+    }
+
+    pub fn set_coordinate_names(
+        &mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<()> {
+        self.coordinate_names.clear();
+        for name in names {
+            self.add_coordinate_name(name)?;
+        }
+        Ok(())
     }
 
     pub fn insert_metadata(
@@ -1403,6 +1433,22 @@ mod tests {
             graph.get(&green).unwrap().source(),
             &DependencySource::Unknown
         );
+    }
+
+    #[test]
+    fn dataset_can_store_coordinate_dataset_links() {
+        let data_id = DataId::new("image").unwrap();
+        let mut dataset = Dataset::new(data_id);
+
+        dataset
+            .set_coordinate_names(["longitude", "latitude", "longitude"])
+            .unwrap();
+
+        assert_eq!(
+            dataset.coordinate_names(),
+            &["longitude".to_string(), "latitude".to_string()]
+        );
+        assert!(dataset.add_coordinate_name("").is_err());
     }
 
     #[test]
