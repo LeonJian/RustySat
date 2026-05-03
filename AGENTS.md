@@ -141,7 +141,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[ ]` P0-3: `DataId`/`DataQuery` completion.
   - `[ ]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
   - `[ ]` P0.3.2: Add `ancillary_variables` query/filter support based on Satpy `anc_vars.py` behavior.
-jiaCH
+
 ### R: Readers
 
 - `[ ]` R0: Reader core framework.
@@ -261,6 +261,7 @@ jiaCH
 - Avoid adding heavy dependencies until the relevant roadmap step needs them.
 - Split growing modules into focused files before they become hard to review.
 - Keep tests close to the module they validate; move larger fixtures or broad parity suites into separate test files.
+- Prefer APIs that mutate in place or consume owned inputs when the caller no longer needs the source data. Avoid cloning large arrays, masks, metadata, or coordinate maps unless the borrowed API contract requires it; document unavoidable allocations in tests or implementation notes.
 
 ## Upstream Satpy Tracking
 
@@ -356,7 +357,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 ### Known Inefficiencies (to address in future roadmap steps)
 
 - `Dataset::insert_metadata()` writes to both `self.metadata` and `self.attrs` — transitional dual-write; plan to remove flat `metadata` map entirely.
-- Resampler allocates new `DataGrid` for every output — no consuming/in-place variant yet. When source data is no longer needed, the resampler should offer a `into_resampled(self, ...)` path that reuses capacity and moves metadata/coordinates.
+- Area nearest resampling now has a consuming `resample_area_nearest_owned` path that moves source values, mask, and preserved coordinates. It still allocates a new output grid because the destination shape and sampling order may differ; future same-shape or in-place kernels should reuse capacity where mathematically safe.
 - `AnyDataArray` dispatch uses exhaustive 5-arm match on every method — correct but verbose; a macro could reduce boilerplate.
-- `SourceChunkCache` in nearest resampler has unbounded growth — should use LRU eviction or a fixed-size buffer.
+- `SourceChunkCache` in nearest resampler is bounded with a small FIFO cache. Future work should make cache sizing configurable and consider LRU/tile traversal for better hit rates on large scenes.
 - `autoscale_lazy` in PGM writer reads all chunks twice (once for min/max, once for write) — should be single-pass with stripe-level caching.

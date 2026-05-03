@@ -151,12 +151,15 @@ pub fn encode_pgm_from_f64(
     scale: Option<LinearScale>,
     fill_value: u8,
 ) -> Result<Vec<u8>> {
+    validate_pgm_inputs(shape, values.len(), mask)?;
     let scale = match scale {
         Some(scale) => scale,
         None => autoscale_values(values, mask, fill_value)?,
     };
     let (height, width) = shape;
-    let mut out = format!("P5\n{width} {height}\n255\n").into_bytes();
+    let header = format!("P5\n{width} {height}\n255\n");
+    let mut out = Vec::with_capacity(header.len() + values.len());
+    out.extend_from_slice(header.as_bytes());
     for (idx, value) in values.iter().copied().enumerate() {
         let byte = if mask.is_some_and(|mask| mask.is_masked(idx).unwrap_or(false)) {
             fill_value
@@ -205,6 +208,7 @@ fn encode_pgm_values(
     fill_value: u8,
 ) -> Result<Vec<u8>> {
     let values: Vec<_> = values.into_iter().collect();
+    validate_pgm_inputs(shape, values.len(), mask)?;
     let scale = match scale {
         Some(scale) => scale,
         None => autoscale_values(&values, mask, fill_value)?,
@@ -219,6 +223,33 @@ fn encode_pgm_values(
         }
     }));
     Ok(out)
+}
+
+fn validate_pgm_inputs(
+    shape: (usize, usize),
+    values_len: usize,
+    mask: Option<&ValidityMask>,
+) -> Result<()> {
+    let expected_len = shape
+        .0
+        .checked_mul(shape.1)
+        .ok_or_else(|| RustySatError::invalid_input("PGM shape is too large"))?;
+    if values_len != expected_len {
+        return Err(RustySatError::invalid_input(format!(
+            "PGM data has {values_len} values but shape {:?} requires {expected_len}",
+            shape
+        )));
+    }
+    if let Some(mask) = mask {
+        if mask.len() != expected_len {
+            return Err(RustySatError::invalid_input(format!(
+                "PGM mask has {} values but shape {:?} requires {expected_len}",
+                mask.len(),
+                shape
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn write_pgm_lazy_to_writer<T: NumericElement>(
@@ -582,14 +613,8 @@ mod tests {
     fn encode_pgm_from_f64_matches_encode_pgm() {
         let grid = DataGrid::new(1, 3, vec![10.0, 15.0, 20.0]).unwrap();
         let from_grid = encode_pgm(&grid, None, 0).unwrap();
-        let from_slice = encode_pgm_from_f64(
-            grid.values(),
-            grid.shape(),
-            grid.mask(),
-            None,
-            0,
-        )
-        .unwrap();
+        let from_slice =
+            encode_pgm_from_f64(grid.values(), grid.shape(), grid.mask(), None, 0).unwrap();
         assert_eq!(from_grid, from_slice);
     }
 
@@ -599,16 +624,19 @@ mod tests {
             .unwrap()
             .with_mask(ValidityMask::from_masked_flags([false, true, false]))
             .unwrap();
-        let bytes = encode_pgm_from_f64(
-            grid.values(),
-            grid.shape(),
-            grid.mask(),
-            None,
-            7,
-        )
-        .unwrap();
+        let bytes = encode_pgm_from_f64(grid.values(), grid.shape(), grid.mask(), None, 7).unwrap();
         assert_eq!(&bytes[..11], b"P5\n3 1\n255\n");
         assert_eq!(&bytes[11..], &[0, 7, 255]);
+    }
+
+    #[test]
+    fn encode_pgm_from_f64_rejects_shape_and_mask_mismatches() {
+        let err = encode_pgm_from_f64(&[1.0, 2.0], (1, 3), None, None, 0).unwrap_err();
+        assert!(err.to_string().contains("requires 3"));
+
+        let mask = ValidityMask::from_masked_flags([false, true]);
+        let err = encode_pgm_from_f64(&[1.0, 2.0, 3.0], (1, 3), Some(&mask), None, 0).unwrap_err();
+        assert!(err.to_string().contains("mask has 2 values"));
     }
 
     #[test]

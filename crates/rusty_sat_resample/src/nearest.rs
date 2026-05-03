@@ -1023,8 +1023,8 @@ mod tests {
             .with_coordinate("acq_time", Coordinate::scalar(123.0))
             .unwrap();
 
-        let borrowed = resample_area_nearest(&borrowed_grid, &source, &destination, None, f64::NAN)
-            .unwrap();
+        let borrowed =
+            resample_area_nearest(&borrowed_grid, &source, &destination, None, f64::NAN).unwrap();
         let owned =
             resample_area_nearest_owned(owned_grid, &source, &destination, None, f64::NAN).unwrap();
 
@@ -1059,28 +1059,30 @@ mod tests {
 
     #[test]
     fn lazy_source_cache_survives_chunk_eviction() {
-        let source_values = Arc::new(MatrixSource::new(3, vec![
-            1.0, 2.0, 3.0, //
-            4.0, 5.0, 6.0, //
-            7.0, 8.0, 9.0,
-        ]));
+        let source_values = Arc::new(MatrixSource::new(
+            5,
+            (1..=25).map(f64::from).collect::<Vec<_>>(),
+        ));
         let source_grid = LazyDataArray::from_shape(
-            vec![3, 3],
+            vec![5, 5],
             ChunkShape::new(vec![1, 1]).unwrap(),
             source_values.clone(),
         )
         .unwrap();
-        let source = area("source", 3, 3, [0.0, 0.0, 3.0, 3.0]);
-        let destination = area("destination", 3, 3, [0.0, 0.0, 3.0, 3.0]);
+        let mut cache = SourceChunkCache::new(&source_grid);
 
-        let result =
-            resample_area_nearest_lazy(&source_grid, &source, &destination, None, f64::NAN).unwrap();
+        for y in 0..4 {
+            for x in 0..5 {
+                let expected = (y * 5 + x + 1) as f64;
+                assert_eq!(cache.value_at(y, x, f64::NAN).unwrap(), (expected, false));
+            }
+        }
 
-        assert_eq!(result.shape(), (3, 3));
-        assert_eq!(
-            result.values(),
-            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-        );
+        assert_eq!(cache.chunks.len(), MAX_CACHED_CHUNKS);
+        assert!(!cache.chunks.contains_key(&(0, 0)));
+
+        assert_eq!(cache.value_at(0, 0, f64::NAN).unwrap(), (1.0, false));
+        assert_eq!(source_values.requests.lock().unwrap().len(), 21);
     }
 
     #[test]
@@ -1093,7 +1095,8 @@ mod tests {
             .unwrap();
 
         let result =
-            resample_area_nearest_owned(source_grid, &source, &destination, None, f64::NAN).unwrap();
+            resample_area_nearest_owned(source_grid, &source, &destination, None, f64::NAN)
+                .unwrap();
 
         assert_eq!(result.coord("acq_time").unwrap().values(), &[123.0]);
         assert_eq!(result.coord("x").unwrap().values(), &[0.5]);
