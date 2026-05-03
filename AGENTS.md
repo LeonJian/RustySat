@@ -63,18 +63,25 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 - `[~]` in progress
 - `[x]` done
 - `[!]` blocked
+- `[@]` selected roadmap item for the current milestone
 
-## Roadmap Reference Marker
+## Current Milestone Roadmap Marker
 
-Use `@` to mark the roadmap item that will be implemented or advanced by a milestone or milestone substep. Example: `M2-image-d @W2` means this substep is an implementation slice of roadmap item `W2`, not just a dependency note.
+Use `[@]` in the roadmap itself to mark a not-yet-complete roadmap item that must be implemented for the active milestone. It is a status marker like `[ ]`, `[~]`, `[x]`, and `[!]`, not a suffix tag.
+
+Example: if the active milestone is `M2-image` and it needs the PNG writer, mark the roadmap item as:
+
+```text
+- `[@]` W2: Simple image writer...
+```
 
 Milestone check rule:
 
-1. Before starting a milestone substep, identify the roadmap item marked by `@`.
-2. Check that the chosen roadmap item is the correct next implementation target for the milestone.
-3. Update both the milestone substep and the referenced roadmap item/subitem as implementation progresses.
-4. Do not mark a milestone substep complete unless the corresponding `@roadmap` slice is also complete.
-5. Do not mark a milestone complete unless all required `@roadmap` items for that milestone are complete enough for the stated milestone goal.
+1. Before starting a milestone, mark every needed roadmap item with `[@]`.
+2. When implementing one selected roadmap item, change it from `[@]` to `[~]`.
+3. When that roadmap slice is complete, change it to `[x]`.
+4. Do not mark a milestone substep complete unless its roadmap slice is `[x]`.
+5. Do not mark a milestone complete unless all roadmap items selected by `[@]` for that milestone have become `[x]`.
 
 ## Precision And Output Depth Policy
 
@@ -201,7 +208,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` I1: Trollimage-like `XRImage` core: construction, dimension correction, stretch modes, gamma, invert, finalize, alpha, mode conversion, colorize, stack/merge, scaling history, and save helpers.
   - `[x]` I1-m2a: Owned image buffer construction and mask-aware luma finalization foundation for M2-image.
   - `[x]` I1-m2b: Crude stretch foundation with in-place float normalization and scale/offset history for M2-image.
-  - `[ ]` I1-m2prec: Add generic or parallel `f64` float image/enhancement path; keep `f32` only as an optimization/compatibility dtype, not the only enhancement dtype.
+  - `[@]` I1-m2prec: Add generic or parallel `f64` float image/enhancement path; keep `f32` only as an optimization/compatibility dtype, not the only enhancement dtype.
   - `[ ]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
 - `[ ]` I2: Colormap system: validation, colorize/palettize, RGB/RGBA conversion, merging, reversing/ranging, export, and YAML loading.
 - `[ ]` I3: Legacy `Image` compatibility where needed.
@@ -212,7 +219,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ### C: Composites
 
-- `[ ]` C0: Composite core: `CompositeBase`, generic/single-band/RGB compositors, enhance-to-dataset helpers, band handling, and mode checks.
+- `[@]` C0: Composite core: `CompositeBase`, generic/single-band/RGB compositors, enhance-to-dataset helpers, band handling, and mode checks.
 - `[ ]` C1: Arithmetic composites such as NDVI/EVI/diff/ratio/sum and channel-operation compositors.
 - `[ ]` C2: Spectral composites, weighted blends, and band replacement/mapping.
 - `[ ]` C3: SEVIRI composites and YAML parity.
@@ -230,7 +237,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 ### W: Writers
 
 - `[ ]` W1: Writer framework completion: writer trait, image-writer base, extension-based factory, and writer YAML config.
-- `[ ]` W2: Simple image writer: PNG/JPEG output, format detection, transparency/fill/mode handling, PNG metadata, and 8-bit/16-bit PNG output paths.
+- `[@]` W2: Simple image writer: PNG/JPEG output, format detection, transparency/fill/mode handling, PNG metadata, and 8-bit/16-bit PNG output paths.
 - `[ ]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
   - `[ ]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
@@ -250,7 +257,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[ ]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
 - `[ ]` SC2: Scene spatial operations: finest/coarsest area, crop, aggregate, slice, copy, same-area/proj checks, and area iteration.
 - `[ ]` SC3: Scene resampling pipeline and integration with all resamplers.
-- `[ ]` SC4: Scene save/show/to-xarray APIs.
+- `[@]` SC4: Scene save/show/to-xarray APIs.
 - `[ ]` SC5: Composite/modifier Scene integration and dependency execution.
 - `[ ]` SC6: Multi-scene support and optional animation output.
 
@@ -268,27 +275,27 @@ Before starting or closing a milestone, check this table and update both the mil
 
 | Milestone | Must Finish Roadmap Items | Current Roadmap Gaps |
 |-----------|---------------------------|----------------------|
-| M1 | @Step0-10a early vertical slice | Done |
-| M2-foundation | @P0-1, @P0-2, @P0-3 | Done |
-| M2-image | @I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), @C0 partial (generic/RGB compositor), @W2 partial (PNG/simple image writer with 8-bit and planned 16-bit path), @SC4 partial (`Scene.save_dataset`) | @I1 still needs f64 path; M2-image-c needs @C0 RGB compositor; M2-image-d needs @W2 PNG writer; M2-image-e needs @SC4 save API |
-| M3-reader | @R0.1, @R0.2, @R0.8 partial, @R1.1 ABI L1B partial, @SC1 load path, @W2 output path | Blocked until M2-image produces PNG output |
-| M4-resample | @S1 partial, @S2 partial, @R1.13 or another NetCDF reader slice, @SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
-| M5-enhance-composite | @I1 broader stretch/finalize, @I5 enhancer framework, @C1 arithmetic, @C2 spectral | Needs M2-image primitives first |
-| M6-resampling-full | @S1-@S7 | Needs M4 resampling architecture first |
-| M7-writers-composites-full | @W1-@W5 and @C0-@C5 | Needs M2/M5 output and composite foundations |
-| M8-readers-modifiers-orbit | @R0-@R5, @M1-@M5, @O1-@O6 | Needs reader framework and test infrastructure |
-| M9-production | @SC1-@SC6, @CLI, @Y, @T | Needs all prior functional milestones |
+| M1 | Step0-10a early vertical slice | Done |
+| M2-foundation | P0-1, P0-2, P0-3 | Done |
+| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and planned 16-bit path), SC4 partial (`Scene.save_dataset`) | Roadmap currently selected with `[@]`: I1-m2prec, C0, W2, SC4 |
+| M3-reader | R0.1, R0.2, R0.8 partial, R1.1 ABI L1B partial, SC1 load path, W2 output path | Blocked until M2-image produces PNG output |
+| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
+| M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
+| M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
+| M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
+| M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
+| M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
 
 - `[x]` M1: Early vertical slice: text grid data can become a grayscale PGM image.
 - `[x]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
 - `[~]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
-  - `[x]` M2-image-a @I1: Review Trollimage `XRImage`, Satpy `PillowWriter`, and `GenericCompositor`; add an owned u8 image buffer with mask-aware luma conversion from datasets.
-  - `[x]` M2-image-b @I1: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior.
-  - `[ ]` M2-image-b2 @I1: Add `f64` image/enhancement buffer path or generic float buffer abstraction before relying on this image foundation for scientific corrections.
-  - `[ ]` M2-image-c @C0: Add RGB compositor vertical slice for three matching single-band datasets.
-  - `[ ]` M2-image-d @W2: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support.
-  - `[ ]` M2-image-d2 @W2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output.
-  - `[ ]` M2-image-e @SC4: Add `Scene.save_dataset` wrapper for self-made datasets and generated images.
+  - `[x]` M2-image-a: Review Trollimage `XRImage`, Satpy `PillowWriter`, and `GenericCompositor`; add an owned u8 image buffer with mask-aware luma conversion from datasets. Roadmap: I1.
+  - `[x]` M2-image-b: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior. Roadmap: I1.
+  - `[ ]` M2-image-b2: Add `f64` image/enhancement buffer path or generic float buffer abstraction before relying on this image foundation for scientific corrections. Roadmap: I1-m2prec.
+  - `[ ]` M2-image-c: Add RGB compositor vertical slice for three matching single-band datasets. Roadmap: C0.
+  - `[ ]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
+  - `[ ]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
+  - `[ ]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
 - `[ ]` M3-reader: NetCDF base plus ABI L1B reader and Scene load path sufficient for a GOES ABI sample to output a basic image.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
