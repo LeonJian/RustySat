@@ -10,9 +10,9 @@
 //! - `satpy/doc/source/reading.rst` documents `crs` as a scalar pyproj CRS
 //!   coordinate for projected data, with swaths defaulting to WGS84 longlat.
 //!
-//! This module intentionally does not bind to PROJ yet. `P0.2.1` needs a
-//! typed CRS representation and a dependency strategy; real forward/inverse
-//! transforms belong to `P0.2.2`.
+//! This module intentionally does not bind to PROJ yet. `P0.2.2` adds the
+//! public transform API and identity behavior only where it is safe. Real
+//! cross-projection math still requires a backend selected in a later step.
 
 use rusty_sat_core::{Result, RustySatError};
 use std::collections::BTreeMap;
@@ -38,6 +38,37 @@ pub enum CrsSource {
     Wgs84LongLat,
     ProjMap,
     ProjString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformDirection {
+    Forward,
+    Inverse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Coordinate2D {
+    x: f64,
+    y: f64,
+}
+
+impl Coordinate2D {
+    pub fn new(x: f64, y: f64) -> Result<Self> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(RustySatError::invalid_input(
+                "coordinate values must be finite",
+            ));
+        }
+        Ok(Self { x, y })
+    }
+
+    pub fn x(self) -> f64 {
+        self.x
+    }
+
+    pub fn y(self) -> f64 {
+        self.y
+    }
 }
 
 impl ProjCrs {
@@ -131,6 +162,57 @@ impl ProjCrs {
             self.projection_name(),
             Some("longlat" | "latlong" | "lonlat")
         )
+    }
+
+    pub fn equivalent_to(&self, other: &Self) -> bool {
+        self.params == other.params
+    }
+
+    pub fn transform_coordinate(
+        &self,
+        direction: TransformDirection,
+        coordinate: Coordinate2D,
+    ) -> Result<Coordinate2D> {
+        if self.is_geographic() {
+            return Ok(coordinate);
+        }
+        Err(RustySatError::unsupported(format!(
+            "{direction:?} coordinate transform for CRS '{}'",
+            self.to_proj4_string()
+        )))
+    }
+
+    pub fn transform_coordinates(
+        &self,
+        direction: TransformDirection,
+        coordinates: impl IntoIterator<Item = Coordinate2D>,
+    ) -> Result<Vec<Coordinate2D>> {
+        coordinates
+            .into_iter()
+            .map(|coordinate| self.transform_coordinate(direction, coordinate))
+            .collect()
+    }
+
+    pub fn transform_to(&self, target: &Self, coordinate: Coordinate2D) -> Result<Coordinate2D> {
+        if self.equivalent_to(target) {
+            return Ok(coordinate);
+        }
+        Err(RustySatError::unsupported(format!(
+            "coordinate transform from '{}' to '{}'",
+            self.to_proj4_string(),
+            target.to_proj4_string()
+        )))
+    }
+
+    pub fn transform_many_to(
+        &self,
+        target: &Self,
+        coordinates: impl IntoIterator<Item = Coordinate2D>,
+    ) -> Result<Vec<Coordinate2D>> {
+        coordinates
+            .into_iter()
+            .map(|coordinate| self.transform_to(target, coordinate))
+            .collect()
     }
 
     pub fn to_proj4_string(&self) -> String {
@@ -238,6 +320,85 @@ mod tests {
 
         assert_eq!(crs.param("epsg"), Some(Some("4326")));
         assert_eq!(crs.to_proj4_string(), "+epsg=4326");
+    }
+
+    #[test]
+    fn coordinate_constructor_rejects_non_finite_values() {
+        assert!(Coordinate2D::new(1.0, 2.0).is_ok());
+        assert!(Coordinate2D::new(f64::NAN, 2.0).is_err());
+        assert!(Coordinate2D::new(1.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn geographic_forward_and_inverse_transforms_are_identity() {
+        let crs = ProjCrs::wgs84_longlat();
+        let coordinate = Coordinate2D::new(12.5, -45.25).unwrap();
+
+        assert_eq!(
+            crs.transform_coordinate(TransformDirection::Forward, coordinate)
+                .unwrap(),
+            coordinate
+        );
+        assert_eq!(
+            crs.transform_coordinate(TransformDirection::Inverse, coordinate)
+                .unwrap(),
+            coordinate
+        );
+    }
+
+    #[test]
+    fn same_crs_transform_is_identity() {
+        let source = ProjCrs::from_proj4_str("+proj=laea +lat_0=-90 +lon_0=0 +units=m").unwrap();
+        let target = ProjCrs::from_projection_map(&BTreeMap::from([
+            ("proj".to_string(), "laea".to_string()),
+            ("lat_0".to_string(), "-90".to_string()),
+            ("lon_0".to_string(), "0".to_string()),
+            ("units".to_string(), "m".to_string()),
+        ]))
+        .unwrap();
+        let coordinate = Coordinate2D::new(100.0, -200.0).unwrap();
+
+        assert!(source.equivalent_to(&target));
+        assert_eq!(
+            source.transform_to(&target, coordinate).unwrap(),
+            coordinate
+        );
+        assert_eq!(
+            source
+                .transform_many_to(&target, [coordinate, Coordinate2D::new(0.0, 0.0).unwrap()])
+                .unwrap(),
+            vec![coordinate, Coordinate2D::new(0.0, 0.0).unwrap()]
+        );
+    }
+
+    #[test]
+    fn projected_and_cross_crs_transforms_require_backend() {
+        let projected = ProjCrs::from_proj4_str("+proj=laea +lat_0=-90 +lon_0=0 +units=m").unwrap();
+        let geographic = ProjCrs::wgs84_longlat();
+        let coordinate = Coordinate2D::new(100.0, -200.0).unwrap();
+
+        assert!(matches!(
+            projected.transform_coordinate(TransformDirection::Forward, coordinate),
+            Err(RustySatError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            projected.transform_to(&geographic, coordinate),
+            Err(RustySatError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn transform_coordinates_stops_on_unsupported_backend() {
+        let projected = ProjCrs::from_proj4_str("+proj=stere +lat_0=90 +lon_0=0").unwrap();
+        let coordinates = [
+            Coordinate2D::new(0.0, 0.0).unwrap(),
+            Coordinate2D::new(1.0, 1.0).unwrap(),
+        ];
+
+        assert!(matches!(
+            projected.transform_coordinates(TransformDirection::Inverse, coordinates),
+            Err(RustySatError::Unsupported { .. })
+        ));
     }
 
     #[test]

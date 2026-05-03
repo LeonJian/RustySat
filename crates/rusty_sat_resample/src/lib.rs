@@ -8,7 +8,7 @@ pub mod swath;
 pub use area::{
     load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition, PixelResolution,
 };
-pub use crs::{CrsSource, ProjCrs, ProjectionBackendStrategy};
+pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
 pub use nearest::{
     resample_area_nearest, resample_area_nearest_lazy, resample_swath_nearest, NearestAreaResampler,
 };

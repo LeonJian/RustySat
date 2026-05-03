@@ -146,7 +146,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.6c: Add swath longitude/latitude coordinate attachment and reader-driven coordinate dataset linking.
 - `[~]` P0-2: CRS and projection system.
   - `[x]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
-  - `[ ]` P0.2.2: Add forward/inverse coordinate transformation APIs.
+  - `[x]` P0.2.2: Add forward/inverse coordinate transformation APIs.
   - `[ ]` P0.2.3: Parse, validate, and normalize proj4 strings beyond the current string-map metadata.
 - `[ ]` P0-3: `DataId`/`DataQuery` completion.
   - `[ ]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
@@ -308,7 +308,8 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - numeric `Coordinate` axes on `DataArray`/`AnyDataArray`, including validated 1D axis coordinates and 2D coordinates over named dimensions
 - scalar coordinates for metadata-like coordinate values that do not depend on data dimensions
 - `Dataset::coordinate_names` for reader-driven links to coordinate datasets declared by Satpy-style YAML `coordinates`
-- `ProjCrs` CRS metadata wrapper in `rusty_sat_resample`, with WGS84 longlat defaults, symbolic EPSG support, PROJ map/string ingestion, and an explicit metadata-only backend strategy. Real coordinate transforms remain deferred to `P0.2.2`; do not add a native PROJ dependency without documenting build assumptions and parity tests.
+- `ProjCrs` CRS metadata wrapper in `rusty_sat_resample`, with WGS84 longlat defaults, symbolic EPSG support, PROJ map/string ingestion, and an explicit metadata-only backend strategy.
+- `Coordinate2D` and CRS transform APIs for forward/inverse and source-to-target transforms. Current transform behavior is intentionally limited to safe identity cases: geographic forward/inverse identity and same-CRS source-to-target identity. Cross-CRS or projected forward/inverse transforms return explicit unsupported errors until a real backend is selected. Do not add a native PROJ dependency without documenting build assumptions and parity tests.
 - `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
 - `ChunkShape` metadata on `DataArray`/`AnyDataArray`, including validation and chunk-count helpers; actual lazy chunk loading is not implemented yet
 - `LazyDataArray`, `ChunkRegion`, and `ChunkSource` foundations for deferred chunk reads. This is only the contract layer: no production file-backed source, scheduler, cache, or parallel chunk execution exists yet.
