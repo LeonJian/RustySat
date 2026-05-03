@@ -15,7 +15,7 @@ use rusty_sat_core::{
     Coordinate, DataGrid, Dataset, LazyDataArray, MetadataValue, Result, RustySatError,
     ValidityMask,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingValuePolicy {
@@ -356,9 +356,12 @@ fn resample_area_nearest_lazy_with_policy(
     )
 }
 
+const MAX_CACHED_CHUNKS: usize = 16;
+
 struct SourceChunkCache<'a> {
     source_grid: &'a LazyDataArray<f64>,
     chunks: BTreeMap<(usize, usize), DataGrid>,
+    insert_order: VecDeque<(usize, usize)>,
 }
 
 impl<'a> SourceChunkCache<'a> {
@@ -366,6 +369,7 @@ impl<'a> SourceChunkCache<'a> {
         Self {
             source_grid,
             chunks: BTreeMap::new(),
+            insert_order: VecDeque::new(),
         }
     }
 
@@ -374,10 +378,16 @@ impl<'a> SourceChunkCache<'a> {
         let chunk_x = self.source_grid.chunks().as_slice()[1];
         let chunk_index = (y / chunk_y, x / chunk_x);
         if !self.chunks.contains_key(&chunk_index) {
+            if self.chunks.len() >= MAX_CACHED_CHUNKS {
+                if let Some(oldest) = self.insert_order.pop_front() {
+                    self.chunks.remove(&oldest);
+                }
+            }
             let chunk = self
                 .source_grid
                 .read_chunk(&[chunk_index.0, chunk_index.1])?;
             self.chunks.insert(chunk_index, chunk);
+            self.insert_order.push_back(chunk_index);
         }
         let chunk = self
             .chunks
@@ -1045,6 +1055,32 @@ mod tests {
         assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(result.mask().unwrap().masked_count(), 1);
         assert_eq!(result.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn lazy_source_cache_survives_chunk_eviction() {
+        let source_values = Arc::new(MatrixSource::new(3, vec![
+            1.0, 2.0, 3.0, //
+            4.0, 5.0, 6.0, //
+            7.0, 8.0, 9.0,
+        ]));
+        let source_grid = LazyDataArray::from_shape(
+            vec![3, 3],
+            ChunkShape::new(vec![1, 1]).unwrap(),
+            source_values.clone(),
+        )
+        .unwrap();
+        let source = area("source", 3, 3, [0.0, 0.0, 3.0, 3.0]);
+        let destination = area("destination", 3, 3, [0.0, 0.0, 3.0, 3.0]);
+
+        let result =
+            resample_area_nearest_lazy(&source_grid, &source, &destination, None, f64::NAN).unwrap();
+
+        assert_eq!(result.shape(), (3, 3));
+        assert_eq!(
+            result.values(),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        );
     }
 
     #[test]
