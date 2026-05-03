@@ -5,6 +5,7 @@
 //! - `deps/pyresample/docs/source/concepts/geometries.rst`
 //! - `satpy/utils/coord2area_def.py`
 
+use crate::ProjCrs;
 use rusty_sat_core::{Result, RustySatError};
 use serde_yaml::{Mapping, Value};
 use std::collections::BTreeMap;
@@ -172,6 +173,10 @@ impl AreaDefinition {
 
     pub fn projection(&self) -> &BTreeMap<String, String> {
         &self.projection
+    }
+
+    pub fn crs(&self) -> Result<ProjCrs> {
+        ProjCrs::from_projection_map(&self.projection)
     }
 
     pub fn shape(&self) -> (usize, usize) {
@@ -519,6 +524,7 @@ mod tests {
         assert_eq!(area.shape(), (10, 20));
         assert_eq!(area.area_extent(), [-100.0, -50.0, 100.0, 50.0]);
         assert_eq!(area.pixel_size(), (10.0, 10.0));
+        assert_eq!(area.crs().unwrap().projection_name(), Some("stere"));
         assert_eq!(area.projection_x_coords()[..3], [-95.0, -85.0, -75.0]);
         assert_eq!(area.projection_y_coords()[..3], [45.0, 35.0, 25.0]);
     }
@@ -567,6 +573,7 @@ simple:
         let area = load_area_from_str(yaml, "simple").unwrap();
 
         assert_eq!(area.projection().get("proj4").unwrap(), "+proj=latlong");
+        assert_eq!(area.crs().unwrap().projection_name(), Some("latlong"));
         assert_eq!(area.shape(), (2, 3));
         assert_eq!(area.area_extent(), [-10.0, -5.0, 10.0, 5.0]);
     }

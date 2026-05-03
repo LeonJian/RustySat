@@ -4,6 +4,7 @@
 //! - `deps/pyresample/pyresample/geometry.py`
 //! - `deps/pyresample/docs/source/concepts/geometries.rst`
 
+use crate::ProjCrs;
 use rusty_sat_core::{Coordinate, DataArray, NumericElement, Result, RustySatError};
 use serde_yaml::{Mapping, Value};
 use std::collections::BTreeMap;
@@ -76,6 +77,10 @@ impl SwathDefinition {
 
     pub fn crs(&self) -> &BTreeMap<String, String> {
         &self.crs
+    }
+
+    pub fn crs_definition(&self) -> Result<ProjCrs> {
+        ProjCrs::from_projection_map(&self.crs)
     }
 
     pub fn longitude_coordinate(&self) -> Result<Coordinate> {
@@ -296,6 +301,10 @@ mod tests {
         assert!(!swath.has_coordinates());
         assert_eq!(swath.crs().get("proj").unwrap(), "longlat");
         assert_eq!(swath.crs().get("ellps").unwrap(), "WGS84");
+        assert_eq!(
+            swath.crs_definition().unwrap().projection_name(),
+            Some("longlat")
+        );
     }
 
     #[test]
