@@ -144,6 +144,30 @@ pub fn encode_pgm(grid: &DataGrid, scale: Option<LinearScale>, fill_value: u8) -
     )
 }
 
+pub fn encode_pgm_from_f64(
+    values: &[f64],
+    shape: (usize, usize),
+    mask: Option<&ValidityMask>,
+    scale: Option<LinearScale>,
+    fill_value: u8,
+) -> Result<Vec<u8>> {
+    let scale = match scale {
+        Some(scale) => scale,
+        None => autoscale_values(values, mask, fill_value)?,
+    };
+    let (height, width) = shape;
+    let mut out = format!("P5\n{width} {height}\n255\n").into_bytes();
+    for (idx, value) in values.iter().copied().enumerate() {
+        let byte = if mask.is_some_and(|mask| mask.is_masked(idx).unwrap_or(false)) {
+            fill_value
+        } else {
+            scale_value(value, scale, fill_value)
+        };
+        out.push(byte);
+    }
+    Ok(out)
+}
+
 pub fn encode_pgm_array(
     array: &AnyDataArray,
     scale: Option<LinearScale>,
@@ -151,6 +175,9 @@ pub fn encode_pgm_array(
 ) -> Result<Vec<u8>> {
     array.require_dims_exact(&["y", "x"])?;
     let shape = array.shape_yx()?;
+    if let Some(f64_array) = array.as_f64() {
+        return encode_pgm_from_f64(f64_array.values(), shape, array.mask(), scale, fill_value);
+    }
     encode_pgm_values(
         shape,
         array.values_as_f64(),
@@ -549,5 +576,47 @@ mod tests {
     fn pgm_writer_implements_writer_trait() {
         let writer: Box<dyn Writer> = Box::new(PgmWriter::new());
         assert_eq!(writer.name(), "pgm");
+    }
+
+    #[test]
+    fn encode_pgm_from_f64_matches_encode_pgm() {
+        let grid = DataGrid::new(1, 3, vec![10.0, 15.0, 20.0]).unwrap();
+        let from_grid = encode_pgm(&grid, None, 0).unwrap();
+        let from_slice = encode_pgm_from_f64(
+            grid.values(),
+            grid.shape(),
+            grid.mask(),
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(from_grid, from_slice);
+    }
+
+    #[test]
+    fn encode_pgm_from_f64_handles_mask() {
+        let grid = DataGrid::new(1, 3, vec![10.0, 9999.0, 20.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true, false]))
+            .unwrap();
+        let bytes = encode_pgm_from_f64(
+            grid.values(),
+            grid.shape(),
+            grid.mask(),
+            None,
+            7,
+        )
+        .unwrap();
+        assert_eq!(&bytes[..11], b"P5\n3 1\n255\n");
+        assert_eq!(&bytes[11..], &[0, 7, 255]);
+    }
+
+    #[test]
+    fn encode_pgm_array_f64_fast_path_matches_encode_pgm() {
+        let grid = DataGrid::new(1, 3, vec![10.0, 15.0, 20.0]).unwrap();
+        let array = AnyDataArray::from(grid.clone());
+        let from_encode_pgm = encode_pgm(&grid, None, 0).unwrap();
+        let from_array = encode_pgm_array(&array, None, 0).unwrap();
+        assert_eq!(from_encode_pgm, from_array);
     }
 }
