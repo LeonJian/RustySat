@@ -66,14 +66,15 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 
 ## Roadmap Reference Marker
 
-Use `@` to reference the roadmap item that a milestone or substep implements. Example: `@I1`, `@W2`, `@SC4`.
+Use `@` to mark the roadmap item that will be implemented or advanced by a milestone or milestone substep. Example: `M2-image-d @W2` means this substep is an implementation slice of roadmap item `W2`, not just a dependency note.
 
 Milestone check rule:
 
-1. Before starting a milestone substep, identify its `@roadmap` references.
-2. Check whether those roadmap items are started, blocked, or complete.
-3. Update both the milestone substep and the referenced roadmap item/subitem.
-4. Do not mark a milestone complete unless all required `@roadmap` items for that milestone are complete enough for the stated milestone goal.
+1. Before starting a milestone substep, identify the roadmap item marked by `@`.
+2. Check that the chosen roadmap item is the correct next implementation target for the milestone.
+3. Update both the milestone substep and the referenced roadmap item/subitem as implementation progresses.
+4. Do not mark a milestone substep complete unless the corresponding `@roadmap` slice is also complete.
+5. Do not mark a milestone complete unless all required `@roadmap` items for that milestone are complete enough for the stated milestone goal.
 
 ## Precision And Output Depth Policy
 
