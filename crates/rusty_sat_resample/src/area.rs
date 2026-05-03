@@ -573,7 +573,7 @@ simple:
         let area = load_area_from_str(yaml, "simple").unwrap();
 
         assert_eq!(area.projection().get("proj4").unwrap(), "+proj=latlong");
-        assert_eq!(area.crs().unwrap().projection_name(), Some("latlong"));
+        assert_eq!(area.crs().unwrap().projection_name(), Some("longlat"));
         assert_eq!(area.shape(), (2, 3));
         assert_eq!(area.area_extent(), [-10.0, -5.0, 10.0, 5.0]);
     }

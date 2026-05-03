@@ -94,8 +94,10 @@ impl ProjCrs {
         let mut params = BTreeMap::new();
         for (key, value) in projection {
             let key = normalize_key(key)?;
-            params.insert(key, normalize_value(value));
+            let value = normalize_value_for_key(&key, value)?;
+            insert_param(&mut params, key, value)?;
         }
+        normalize_epsg_init(&mut params)?;
         validate_params(&params)?;
         Ok(Self {
             params,
@@ -109,8 +111,9 @@ impl ProjCrs {
             return Err(RustySatError::invalid_input("PROJ string cannot be empty"));
         }
         if proj4.to_ascii_uppercase().starts_with("EPSG:") {
+            let epsg = normalize_epsg_code(&proj4[5..])?;
             return Ok(Self {
-                params: BTreeMap::from([("epsg".to_string(), Some(proj4[5..].to_string()))]),
+                params: BTreeMap::from([("epsg".to_string(), Some(epsg))]),
                 source: CrsSource::ProjString,
             });
         }
@@ -123,9 +126,14 @@ impl ProjCrs {
             }
             let mut parts = token.splitn(2, '=');
             let key = normalize_key(parts.next().unwrap_or_default())?;
-            let value = parts.next().map(normalize_value).unwrap_or(None);
-            params.insert(key, value);
+            let value = parts
+                .next()
+                .map(|value| normalize_value_for_key(&key, value))
+                .transpose()?
+                .unwrap_or(None);
+            insert_param(&mut params, key, value)?;
         }
+        normalize_epsg_init(&mut params)?;
         validate_params(&params)?;
         Ok(Self {
             params,
@@ -251,6 +259,19 @@ fn normalize_key(key: &str) -> Result<String> {
     Ok(key.to_string())
 }
 
+fn normalize_value_for_key(key: &str, value: &str) -> Result<Option<String>> {
+    let Some(value) = normalize_value(value) else {
+        return Ok(None);
+    };
+    if key == "proj" {
+        return Ok(Some(normalize_projection_name(&value)));
+    }
+    if key == "epsg" {
+        return Ok(Some(normalize_epsg_code(&value)?));
+    }
+    Ok(Some(normalize_numeric_string(&value)))
+}
+
 fn normalize_value(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty()
@@ -262,6 +283,74 @@ fn normalize_value(value: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
+}
+
+fn normalize_projection_name(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "latlong" | "lonlat" => "longlat".to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn normalize_numeric_string(value: &str) -> String {
+    let Ok(number) = value.parse::<f64>() else {
+        return value.to_string();
+    };
+    if !number.is_finite() {
+        return value.to_string();
+    }
+    number.to_string()
+}
+
+fn normalize_epsg_code(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(RustySatError::invalid_input(format!(
+            "EPSG code '{value}' must contain only digits"
+        )));
+    }
+    let normalized = value.trim_start_matches('0');
+    Ok(if normalized.is_empty() {
+        "0".to_string()
+    } else {
+        normalized.to_string()
+    })
+}
+
+fn insert_param(
+    params: &mut BTreeMap<String, Option<String>>,
+    key: String,
+    value: Option<String>,
+) -> Result<()> {
+    if params.contains_key(&key) {
+        return Err(RustySatError::invalid_input(format!(
+            "duplicate CRS parameter '{key}'"
+        )));
+    }
+    params.insert(key, value);
+    Ok(())
+}
+
+fn normalize_epsg_init(params: &mut BTreeMap<String, Option<String>>) -> Result<()> {
+    let Some(init) = params.remove("init") else {
+        return Ok(());
+    };
+    let Some(init) = init else {
+        return Err(RustySatError::invalid_input(
+            "CRS init parameter requires a value",
+        ));
+    };
+    let Some((authority, code)) = init.split_once(':') else {
+        return Err(RustySatError::invalid_input(format!(
+            "unsupported CRS init authority '{init}'"
+        )));
+    };
+    if !authority.eq_ignore_ascii_case("epsg") {
+        return Err(RustySatError::invalid_input(format!(
+            "unsupported CRS init authority '{authority}'"
+        )));
+    }
+    insert_param(params, "epsg".to_string(), Some(normalize_epsg_code(code)?))
 }
 
 #[cfg(test)]
@@ -290,8 +379,8 @@ mod tests {
     fn constructs_crs_from_projection_map() {
         let crs = ProjCrs::from_projection_map(&BTreeMap::from([
             ("+proj".to_string(), "laea".to_string()),
-            ("lat_0".to_string(), "-90".to_string()),
-            ("lon_0".to_string(), "0".to_string()),
+            ("lat_0".to_string(), "-90.0".to_string()),
+            ("lon_0".to_string(), "0.000".to_string()),
             ("no_defs".to_string(), "None".to_string()),
             ("units".to_string(), "m".to_string()),
         ]))
@@ -299,6 +388,8 @@ mod tests {
 
         assert_eq!(crs.source(), CrsSource::ProjMap);
         assert_eq!(crs.projection_name(), Some("laea"));
+        assert_eq!(crs.param("lat_0"), Some(Some("-90")));
+        assert_eq!(crs.param("lon_0"), Some(Some("0")));
         assert_eq!(crs.param("no_defs"), Some(None));
         assert!(!crs.is_geographic());
     }
@@ -316,10 +407,27 @@ mod tests {
 
     #[test]
     fn accepts_epsg_string_as_symbolic_crs() {
-        let crs = ProjCrs::from_proj4_str("EPSG:4326").unwrap();
+        let crs = ProjCrs::from_proj4_str("EPSG:04326").unwrap();
 
         assert_eq!(crs.param("epsg"), Some(Some("4326")));
         assert_eq!(crs.to_proj4_string(), "+epsg=4326");
+    }
+
+    #[test]
+    fn normalizes_proj_aliases_and_deprecated_epsg_init() {
+        let longlat = ProjCrs::from_proj4_str("+proj=latlong +datum=WGS84").unwrap();
+        let init = ProjCrs::from_proj4_str("+init=EPSG:4326").unwrap();
+
+        assert_eq!(longlat.projection_name(), Some("longlat"));
+        assert_eq!(init.param("epsg"), Some(Some("4326")));
+        assert!(init.params().get("init").is_none());
+    }
+
+    #[test]
+    fn rejects_duplicate_and_malformed_crs_parameters() {
+        assert!(ProjCrs::from_proj4_str("+proj=merc +proj=laea").is_err());
+        assert!(ProjCrs::from_proj4_str("EPSG:abcd").is_err());
+        assert!(ProjCrs::from_proj4_str("+init=IGNF:LAMB1").is_err());
     }
 
     #[test]

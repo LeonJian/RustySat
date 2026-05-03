@@ -147,7 +147,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` P0-2: CRS and projection system.
   - `[x]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
   - `[x]` P0.2.2: Add forward/inverse coordinate transformation APIs.
-  - `[ ]` P0.2.3: Parse, validate, and normalize proj4 strings beyond the current string-map metadata.
+  - `[x]` P0.2.3: Parse, validate, and normalize proj4 strings beyond the current string-map metadata.
 - `[ ]` P0-3: `DataId`/`DataQuery` completion.
   - `[ ]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
   - `[ ]` P0.3.2: Add `ancillary_variables` query/filter support based on Satpy `anc_vars.py` behavior.
@@ -309,6 +309,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - scalar coordinates for metadata-like coordinate values that do not depend on data dimensions
 - `Dataset::coordinate_names` for reader-driven links to coordinate datasets declared by Satpy-style YAML `coordinates`
 - `ProjCrs` CRS metadata wrapper in `rusty_sat_resample`, with WGS84 longlat defaults, symbolic EPSG support, PROJ map/string ingestion, and an explicit metadata-only backend strategy.
+- Current CRS parsing normalizes simple PROJ metadata deterministically: numeric string values are canonicalized, `latlong`/`lonlat` projection aliases become `longlat`, deprecated `+init=EPSG:...` is represented as symbolic EPSG metadata, duplicate parameters are rejected, and malformed EPSG/init values return explicit errors. This is still not pyproj CRS normalization.
 - `Coordinate2D` and CRS transform APIs for forward/inverse and source-to-target transforms. Current transform behavior is intentionally limited to safe identity cases: geographic forward/inverse identity and same-CRS source-to-target identity. Cross-CRS or projected forward/inverse transforms return explicit unsupported errors until a real backend is selected. Do not add a native PROJ dependency without documenting build assumptions and parity tests.
 - `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
 - `ChunkShape` metadata on `DataArray`/`AnyDataArray`, including validation and chunk-count helpers; actual lazy chunk loading is not implemented yet
