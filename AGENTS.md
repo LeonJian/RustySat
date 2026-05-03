@@ -232,8 +232,13 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 ## Milestones
 
 - `[x]` M1: Early vertical slice: text grid data can become a grayscale PGM image.
-- `[~]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
-- `[ ]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
+- `[x]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
+- `[~]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
+  - `[x]` M2-image-a: Review Trollimage `XRImage`, Satpy `PillowWriter`, and `GenericCompositor`; add an owned u8 image buffer with mask-aware luma conversion from datasets.
+  - `[ ]` M2-image-b: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior.
+  - `[ ]` M2-image-c: Add RGB compositor vertical slice for three matching single-band datasets.
+  - `[ ]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support.
+  - `[ ]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images.
 - `[ ]` M3-reader: NetCDF base plus ABI L1B reader and Scene load path sufficient for a GOES ABI sample to output a basic image.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
@@ -340,7 +345,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| Define `ImageMode` (Luma/Rgb/Rgba), `Image` shape/mode metadata, `Enhancer` trait | Store pixel data (Image has no data buffer), perform any enhancement, colorize, or mode conversion |
+| Store owned u8 `Image` pixels for Luma/RGB/RGBA, construct luma images from 2D runtime-typed datasets with mask-aware autoscale | Crude stretch history, float image storage, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 
