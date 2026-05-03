@@ -172,7 +172,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ### I: Image And Enhancement
 
-- `[ ]` I1: Trollimage-like `XRImage` core: construction, dimension correction, stretch modes, gamma, invert, finalize, alpha, mode conversion, colorize, stack/merge, scaling history, and save helpers.
+- `[~]` I1: Trollimage-like `XRImage` core: construction, dimension correction, stretch modes, gamma, invert, finalize, alpha, mode conversion, colorize, stack/merge, scaling history, and save helpers.
+  - `[x]` I1-m2a: Owned image buffer construction and mask-aware luma finalization foundation for M2-image.
+  - `[x]` I1-m2b: Crude stretch foundation with in-place float normalization and scale/offset history for M2-image.
+  - `[ ]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
 - `[ ]` I2: Colormap system: validation, colorize/palettize, RGB/RGBA conversion, merging, reversing/ranging, export, and YAML loading.
 - `[ ]` I3: Legacy `Image` compatibility where needed.
 - `[ ]` I4: Color-space conversion and utility ramps.
@@ -231,11 +234,28 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ## Milestones
 
+### Milestone Roadmap Dependencies
+
+Before starting or closing a milestone, check this table and update both the milestone and the referenced roadmap status. Milestone substeps are only execution slices; the source of truth for project completeness remains the roadmap above.
+
+| Milestone | Must Finish Roadmap Items | Current Roadmap Gaps |
+|-----------|---------------------------|----------------------|
+| M1 | Early Step 0-10a vertical slice | Done |
+| M2-foundation | P0-1, P0-2, P0-3 | Done |
+| M2-image | I1 partial (`XRImage` construction, crude stretch, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer), SC4 partial (`Scene.save_dataset`) | I1 M2 slice done after M2-image-b; M2-image-c needs C0 RGB compositor; M2-image-d needs W2 PNG writer; M2-image-e needs SC4 save API |
+| M3-reader | R0.1, R0.2, R0.8 partial, R1.1 ABI L1B partial, SC1 load path, W2 output path | Blocked until M2-image produces PNG output |
+| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
+| M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
+| M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
+| M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
+| M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
+| M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
+
 - `[x]` M1: Early vertical slice: text grid data can become a grayscale PGM image.
 - `[x]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
 - `[~]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
   - `[x]` M2-image-a: Review Trollimage `XRImage`, Satpy `PillowWriter`, and `GenericCompositor`; add an owned u8 image buffer with mask-aware luma conversion from datasets.
-  - `[ ]` M2-image-b: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior.
+  - `[x]` M2-image-b: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior.
   - `[ ]` M2-image-c: Add RGB compositor vertical slice for three matching single-band datasets.
   - `[ ]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support.
   - `[ ]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images.
@@ -345,7 +365,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| Store owned u8 `Image` pixels for Luma/RGB/RGBA, construct luma images from 2D runtime-typed datasets with mask-aware autoscale | Crude stretch history, float image storage, colorize, mode conversion, or save helpers |
+| Store owned u8 `Image` pixels and owned f32 `FloatImage` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch with scale/offset history | Broader XRImage parity: gamma/invert, alpha/finalize policy, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 
