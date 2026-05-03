@@ -8,7 +8,8 @@
 use crate::filename_pattern::{FilenamePattern, PatternValue};
 use crate::Reader;
 use rusty_sat_core::{
-    DataId, Dataset, ModifierTuple, ReaderInventory, Result, RustySatError, WavelengthRange,
+    DataId, Dataset, MetadataValue, ModifierTuple, ReaderInventory, Result, RustySatError,
+    WavelengthRange,
 };
 use serde_yaml::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,6 +99,7 @@ pub struct DatasetConfig {
     data_ids: Vec<DataId>,
     file_type: Option<String>,
     coordinates: Vec<String>,
+    attrs: BTreeMap<String, MetadataValue>,
 }
 
 impl DatasetConfig {
@@ -115,6 +117,10 @@ impl DatasetConfig {
 
     pub fn coordinates(&self) -> &[String] {
         &self.coordinates
+    }
+
+    pub fn attrs(&self) -> &BTreeMap<String, MetadataValue> {
+        &self.attrs
     }
 }
 
@@ -388,7 +394,49 @@ fn parse_dataset(config_key: &str, value: &Value) -> Result<DatasetConfig> {
         data_ids,
         file_type,
         coordinates,
+        attrs: parse_metadata_mapping(mapping)?,
     })
+}
+
+fn parse_metadata_mapping(mapping: &Mapping) -> Result<BTreeMap<String, MetadataValue>> {
+    let mut attrs = BTreeMap::new();
+    for (key, value) in mapping {
+        let key = yaml_scalar_to_string(key)?;
+        attrs.insert(key, yaml_to_metadata_value(value)?);
+    }
+    Ok(attrs)
+}
+
+pub fn yaml_to_metadata_value(value: &Value) -> Result<MetadataValue> {
+    match value {
+        Value::Null => Ok(MetadataValue::Null),
+        Value::Bool(value) => Ok(MetadataValue::Bool(*value)),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(MetadataValue::Integer(value))
+            } else if let Some(value) = value.as_f64() {
+                MetadataValue::float(value)
+            } else {
+                Err(RustySatError::invalid_input(
+                    "unsupported YAML metadata number",
+                ))
+            }
+        }
+        Value::String(value) => Ok(MetadataValue::String(value.clone())),
+        Value::Sequence(values) => values
+            .iter()
+            .map(yaml_to_metadata_value)
+            .collect::<Result<Vec<_>>>()
+            .map(MetadataValue::List),
+        Value::Mapping(mapping) => {
+            let mut attrs = BTreeMap::new();
+            for (key, value) in mapping {
+                attrs.insert(yaml_scalar_to_string(key)?, yaml_to_metadata_value(value)?);
+            }
+            Ok(MetadataValue::Map(attrs))
+        }
+        Value::Tagged(value) => yaml_to_metadata_value(&value.value),
+    }
 }
 
 fn match_filenames_for_file_type(
@@ -541,7 +589,7 @@ fn yaml_scalar_to_string(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::DataValue;
+    use rusty_sat_core::{DataValue, MetadataValue};
 
     const SEVIRI_STYLE_YAML: &str = r#"
 reader:
@@ -562,6 +610,12 @@ datasets:
     name: VIS006
     resolution: 3000.403165817
     wavelength: [0.56, 0.635, 0.71]
+    ancillary_variables: [solar_zenith_angle, quality_flag]
+    raw_metadata:
+      platform: MSG4
+      scan_line_count: 3712
+      geostationary: true
+      missing_value: null
     calibration:
       reflectance:
         standard_name: toa_bidirectional_reflectance
@@ -620,6 +674,47 @@ datasets:
             .data_ids()
             .iter()
             .all(|id| id.qualifier("wavelength").is_some()));
+    }
+
+    #[test]
+    fn parses_dataset_yaml_values_as_nested_metadata_attrs() {
+        let config = YamlReaderConfig::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let attrs = config.datasets().get("VIS006").unwrap().attrs();
+
+        assert_eq!(attrs.get("name"), Some(&MetadataValue::string("VIS006")));
+        assert_eq!(
+            attrs.get("ancillary_variables"),
+            Some(&MetadataValue::List(vec![
+                MetadataValue::string("solar_zenith_angle"),
+                MetadataValue::string("quality_flag"),
+            ]))
+        );
+        assert_eq!(
+            attrs
+                .get("raw_metadata")
+                .and_then(|value| value.get_path(&["platform"]))
+                .and_then(MetadataValue::as_str),
+            Some("MSG4")
+        );
+        assert_eq!(
+            attrs
+                .get("raw_metadata")
+                .and_then(|value| value.get_path(&["scan_line_count"])),
+            Some(&MetadataValue::Integer(3712))
+        );
+        assert_eq!(
+            attrs
+                .get("raw_metadata")
+                .and_then(|value| value.get_path(&["missing_value"])),
+            Some(&MetadataValue::Null)
+        );
+        assert_eq!(
+            attrs
+                .get("calibration")
+                .and_then(|value| value.get_path(&["reflectance", "units"]))
+                .and_then(MetadataValue::as_str),
+            Some("%")
+        );
     }
 
     #[test]

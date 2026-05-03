@@ -136,10 +136,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
       - `[x]` P0.1.4c1: Teach the first PGM writer to consume 2D lazy arrays by reading chunks into one y-stripe at a time.
       - `[x]` P0.1.4c2: Add reader-side lazy chunk source fixtures before production NetCDF/HDF handlers.
       - `[x]` P0.1.4c3: Add resampler-side lazy input consumption for current f64 nearest area resampling. Chunk-preserving lazy output remains future work once generic numeric resampling is ready.
-  - `[~]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
+  - `[x]` P0.1.5: Replace flat metadata-only assumptions with nested metadata values compatible with xarray attrs dictionaries.
     - `[x]` P0.1.5a: Add nested `MetadataValue` attrs to `Dataset` while preserving legacy flat string metadata helpers.
     - `[x]` P0.1.5b: Migrate current reader/resampler/writer vertical slices to preserve nested attrs where they currently copy flat metadata.
-    - `[ ]` P0.1.5c: Add YAML/NetCDF-style metadata value parsing for lists, maps, booleans, numbers, and fill values.
+    - `[x]` P0.1.5c: Add YAML/NetCDF-style metadata value parsing for lists, maps, booleans, numbers, and fill values.
   - `[ ]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
 - `[ ]` P0-2: CRS and projection system.
   - `[ ]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
@@ -309,6 +309,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - `DataId` with typed qualifier values
 - `DataQuery` with exact, one-of, wildcard, wavelength containment matching, best-match sorting, and ambiguity errors
 - `MetadataValue` and nested `Dataset::attrs` for Satpy/xarray-style metadata dictionaries; the legacy flat string `metadata()` API still exists for current vertical slices
+- YAML reader metadata conversion for nested maps, lists, booleans, integers, floats, strings, nulls, and tagged values into `MetadataValue`
 - `DependencyGraph` with node sources, dependency edges, leaves, dependents, and Scene integration for user-provided datasets.
 - `ReaderInventory` and `SceneLoadPlan` for planning reader-backed dataset loads without reading data yet.
 - `CompositeRecipe` and `ModifierRecipe` for populating dependency graph edges before real generation exists.
@@ -330,6 +331,7 @@ The readers crate now has the first real array-loading vertical slice:
 - `rusty_sat_core::Dataset` now stores runtime-typed `AnyDataArray` values.
 - `rusty_sat_core::DataGrid` is now a compatibility alias for `DataArray<f64>` and the `Dataset::data()` helper still exposes f64 grids for existing reader/resampler/writer code.
 - `text_grid::TextGridReader` combines Satpy-style YAML metadata, filename matching, and a tiny plain-text numeric grid file handler.
+- Loaded text-grid datasets now receive parsed dataset YAML attrs in addition to filename/file-type metadata.
 - `text_grid::TextGridChunkSource` and `TextGridReader::lazy_array` provide a reader-side lazy chunk fixture for testing deferred reads before production NetCDF/HDF chunk sources exist.
 - This proves the Reader trait can return real `Dataset` values. It is intentionally not a production satellite reader; NetCDF/HDF/GeoTIFF product handlers remain future work.
 

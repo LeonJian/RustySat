@@ -33,15 +33,20 @@ impl TextGridReader {
         &self.files
     }
 
-    fn dataset_file_type(&self, id: &DataId) -> Result<&str> {
+    fn dataset_config(&self, id: &DataId) -> Result<&crate::DatasetConfig> {
         self.config
             .datasets()
             .values()
             .find(|dataset| dataset.data_ids().iter().any(|candidate| candidate == id))
-            .and_then(|dataset| dataset.file_type())
             .ok_or_else(|| {
-                RustySatError::not_found(format!("file type for dataset '{}'", id.name()))
+                RustySatError::not_found(format!("dataset config for dataset '{}'", id.name()))
             })
+    }
+
+    fn dataset_file_type(&self, id: &DataId) -> Result<&str> {
+        self.dataset_config(id)?.file_type().ok_or_else(|| {
+            RustySatError::not_found(format!("file type for dataset '{}'", id.name()))
+        })
     }
 
     fn first_file_for_type(&self, file_type: &str) -> Result<&FileMatch> {
@@ -72,6 +77,9 @@ impl Reader for TextGridReader {
         let file_match = self.first_file_for_type(file_type)?;
         let grid = load_text_grid(file_match.filename())?;
         let mut dataset = Dataset::new(id.clone()).with_data(grid);
+        for (key, value) in self.dataset_config(id)?.attrs() {
+            dataset.insert_attr(key.clone(), value.clone())?;
+        }
         dataset.insert_metadata("filename", file_match.filename())?;
         dataset.insert_metadata("file_type", file_match.file_type())?;
         Ok(dataset)
@@ -257,6 +265,10 @@ datasets:
   image:
     name: image
     resolution: 1000
+    raw_metadata:
+      platform: test-sat
+      scan_lines: 2
+      flags: [day, test]
     file_type: text_grid
 "#;
 
@@ -305,6 +317,13 @@ datasets:
         assert_eq!(
             dataset.metadata().get("file_type"),
             Some(&"text_grid".to_string())
+        );
+        assert_eq!(
+            dataset
+                .attr("raw_metadata")
+                .and_then(|value| value.get_path(&["platform"]))
+                .and_then(rusty_sat_core::MetadataValue::as_str),
+            Some("test-sat")
         );
     }
 

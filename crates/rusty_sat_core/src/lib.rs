@@ -621,6 +621,7 @@ pub struct ScoredDataId<'a> {
 /// Satpy/xarray-style metadata value for dataset attrs dictionaries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataValue {
+    Null,
     String(String),
     Bool(bool),
     Integer(i64),

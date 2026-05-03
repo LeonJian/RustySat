@@ -8,7 +8,8 @@ pub use text_grid::{
     lazy_text_grid, load_text_grid, parse_text_grid, TextGridChunkSource, TextGridReader,
 };
 pub use yaml_reader::{
-    DatasetConfig, FileMatch, FileTypeConfig, ReaderInfo, YamlMetadataReader, YamlReaderConfig,
+    yaml_to_metadata_value, DatasetConfig, FileMatch, FileTypeConfig, ReaderInfo,
+    YamlMetadataReader, YamlReaderConfig,
 };
 
 use rusty_sat_core::{DataId, Dataset, ReaderInventory, Result, RustySatError};
