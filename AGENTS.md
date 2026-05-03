@@ -105,7 +105,7 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 
 Highest priority. Complete these before major reader/composite/writer expansion.
 
-- `[~]` P0-1: DataArray/DataGrid foundation.
+- `[x]` P0-1: DataArray/DataGrid foundation.
   - `[~]` P0.1.1: Replace f64-only 2D `DataGrid` with a Rust-native `DataArray`/`ArrayD<T>` style model supporting numeric dtypes such as `f32`, `f64`, `u8`, `u16`, and `i16`.
     - `[x]` P0.1.1a: Add owned generic `DataArray<T>`, runtime `AnyDataArray`, dtype markers, and keep `DataGrid = DataArray<f64>` compatibility for existing vertical slices.
     - `[x]` P0.1.1b: Migrate `Dataset` storage from f64-only `DataGrid` to runtime typed arrays while preserving f64 grid helpers for resampling/writer code.
@@ -134,14 +134,14 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.6a: Add numeric coordinate storage to `DataArray`/`AnyDataArray` and attach destination x/y projection axes from current area resampling.
     - `[x]` P0.1.6b: Preserve non-x/y coordinates through current resampling paths following Satpy's `resample.base._update_resampled_coords` behavior.
     - `[x]` P0.1.6c: Add swath longitude/latitude coordinate attachment and reader-driven coordinate dataset linking.
-- `[~]` P0-2: CRS and projection system.
+- `[x]` P0-2: CRS and projection system.
   - `[x]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
   - `[x]` P0.2.2: Add forward/inverse coordinate transformation APIs.
   - `[x]` P0.2.3: Parse, validate, and normalize proj4 strings beyond the current string-map metadata.
 - `[ ]` P0-3: `DataId`/`DataQuery` completion.
   - `[ ]` P0.3.1: Complete modifier-chain matching with shortest-path/preference behavior after inspecting Satpy modifier dependency logic.
   - `[ ]` P0.3.2: Add `ancillary_variables` query/filter support based on Satpy `anc_vars.py` behavior.
-
+jiaCH
 ### R: Readers
 
 - `[ ]` R0: Reader core framework.
