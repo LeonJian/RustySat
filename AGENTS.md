@@ -208,7 +208,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` I1: Trollimage-like `XRImage` core: construction, dimension correction, stretch modes, gamma, invert, finalize, alpha, mode conversion, colorize, stack/merge, scaling history, and save helpers.
   - `[x]` I1-m2a: Owned image buffer construction and mask-aware luma finalization foundation for M2-image.
   - `[x]` I1-m2b: Crude stretch foundation with in-place float normalization and scale/offset history for M2-image.
-  - `[@]` I1-m2prec: Add generic or parallel `f64` float image/enhancement path; keep `f32` only as an optimization/compatibility dtype, not the only enhancement dtype.
+  - `[x]` I1-m2prec: Add generic or parallel `f64` float image/enhancement path; keep `f32` only as an optimization/compatibility dtype, not the only enhancement dtype.
   - `[ ]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
 - `[ ]` I2: Colormap system: validation, colorize/palettize, RGB/RGBA conversion, merging, reversing/ranging, export, and YAML loading.
 - `[ ]` I3: Legacy `Image` compatibility where needed.
@@ -277,7 +277,7 @@ Before starting or closing a milestone, check this table and update both the mil
 |-----------|---------------------------|----------------------|
 | M1 | Step0-10a early vertical slice | Done |
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
-| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and planned 16-bit path), SC4 partial (`Scene.save_dataset`) | Roadmap currently selected with `[@]`: I1-m2prec, C0, W2, SC4 |
+| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and planned 16-bit path), SC4 partial (`Scene.save_dataset`) | Roadmap currently selected with `[@]`: C0, W2, SC4 |
 | M3-reader | R0.1, R0.2, R0.8 partial, R1.1 ABI L1B partial, SC1 load path, W2 output path | Blocked until M2-image produces PNG output |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
@@ -291,7 +291,7 @@ Before starting or closing a milestone, check this table and update both the mil
 - `[~]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
   - `[x]` M2-image-a: Review Trollimage `XRImage`, Satpy `PillowWriter`, and `GenericCompositor`; add an owned u8 image buffer with mask-aware luma conversion from datasets. Roadmap: I1.
   - `[x]` M2-image-b: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior. Roadmap: I1.
-  - `[ ]` M2-image-b2: Add `f64` image/enhancement buffer path or generic float buffer abstraction before relying on this image foundation for scientific corrections. Roadmap: I1-m2prec.
+  - `[x]` M2-image-b2: Add `f64` image/enhancement buffer path or generic float buffer abstraction before relying on this image foundation for scientific corrections. Roadmap: I1-m2prec.
   - `[ ]` M2-image-c: Add RGB compositor vertical slice for three matching single-band datasets. Roadmap: C0.
   - `[ ]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
   - `[ ]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
@@ -402,7 +402,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| Store owned u8 `Image` pixels and owned f32 `FloatImage` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch with scale/offset history | `f64` image/enhancement buffer path, 16-bit/HDR finalization, broader XRImage parity: gamma/invert, alpha/finalize policy, colorize, mode conversion, or save helpers |
+| Store owned u8 `Image` pixels and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch with scale/offset history | 16-bit/HDR finalization, broader XRImage parity: gamma/invert, alpha/finalize policy, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 

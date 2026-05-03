@@ -4,6 +4,40 @@ use rusty_sat_core::{
     AnyDataArray, DataArray, Dataset, NumericElement, Result, RustySatError, ValidityMask,
 };
 
+pub trait ImageFloat: Copy + Clone + PartialEq + PartialOrd + std::fmt::Debug + 'static {
+    fn from_f64(value: f64) -> Self;
+    fn to_f64(self) -> f64;
+    fn is_finite(self) -> bool;
+}
+
+impl ImageFloat for f32 {
+    fn from_f64(value: f64) -> Self {
+        value as f32
+    }
+
+    fn to_f64(self) -> f64 {
+        f64::from(self)
+    }
+
+    fn is_finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
+impl ImageFloat for f64 {
+    fn from_f64(value: f64) -> Self {
+        value
+    }
+
+    fn to_f64(self) -> f64 {
+        self
+    }
+
+    fn is_finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageMode {
     Luma,
@@ -20,19 +54,19 @@ pub struct Image {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FloatImage {
+pub struct FloatImage<T: ImageFloat = f32> {
     mode: ImageMode,
     height: usize,
     width: usize,
-    pixels: Vec<f32>,
+    pixels: Vec<T>,
     mask: Option<ValidityMask>,
-    enhancement_history: Vec<StretchRecord>,
+    enhancement_history: Vec<StretchRecord<T>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct StretchRecord {
-    scale: Vec<f32>,
-    offset: Vec<f32>,
+pub struct StretchRecord<T: ImageFloat = f32> {
+    scale: Vec<T>,
+    offset: Vec<T>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +122,7 @@ impl Image {
     }
 
     pub fn from_luma_array(array: &AnyDataArray) -> Result<Self> {
-        FloatImage::from_luma_array(array)?
+        FloatImage::<f32>::from_luma_array(array)?
             .crude_stretched(None, None)
             .to_u8_image(0)
     }
@@ -114,12 +148,12 @@ impl Image {
     }
 }
 
-impl FloatImage {
+impl<T: ImageFloat> FloatImage<T> {
     pub fn from_pixels(
         mode: ImageMode,
         height: usize,
         width: usize,
-        pixels: Vec<f32>,
+        pixels: Vec<T>,
     ) -> Result<Self> {
         if height == 0 || width == 0 {
             return Err(RustySatError::invalid_input(
@@ -172,30 +206,32 @@ impl FloatImage {
         Ok(image)
     }
 
-    fn from_numeric_luma_array<T: NumericElement>(
-        array: &DataArray<T>,
+    fn from_numeric_luma_array<U: NumericElement>(
+        array: &DataArray<U>,
         height: usize,
         width: usize,
     ) -> Result<Self> {
         let pixels = array
             .values()
             .iter()
-            .map(|value| value.to_f64() as f32)
+            .map(|value| T::from_f64(value.to_f64()))
             .collect();
         Self::from_pixels(ImageMode::Luma, height, width, pixels)
     }
 
-    pub fn crude_stretched(mut self, min_stretch: Option<f32>, max_stretch: Option<f32>) -> Self {
+    pub fn crude_stretched(mut self, min_stretch: Option<T>, max_stretch: Option<T>) -> Self {
         self.crude_stretch_in_place(min_stretch, max_stretch);
         self
     }
 
-    pub fn crude_stretch_in_place(&mut self, min_stretch: Option<f32>, max_stretch: Option<f32>) {
+    pub fn crude_stretch_in_place(&mut self, min_stretch: Option<T>, max_stretch: Option<T>) {
         let channels = self.mode.channels();
         let mut scale = Vec::with_capacity(channels);
         let mut offset = Vec::with_capacity(channels);
         for channel in 0..channels {
             let (min_value, max_value) = self.channel_min_max(channel, min_stretch, max_stretch);
+            let min_value = min_value.to_f64();
+            let max_value = max_value.to_f64();
             let delta = max_value - min_value;
             let channel_scale = if delta.is_finite() && delta != 0.0 {
                 1.0 / delta
@@ -207,15 +243,15 @@ impl FloatImage {
             } else {
                 -min_value * channel_scale
             };
-            scale.push(channel_scale);
-            offset.push(channel_offset);
+            scale.push(T::from_f64(channel_scale));
+            offset.push(T::from_f64(channel_offset));
             for idx in (channel..self.pixels.len()).step_by(channels) {
                 if self.is_masked_pixel(idx / channels) {
                     continue;
                 }
                 let value = self.pixels[idx];
                 self.pixels[idx] = if value.is_finite() {
-                    value * channel_scale + channel_offset
+                    T::from_f64(value.to_f64() * channel_scale + channel_offset)
                 } else {
                     value
                 };
@@ -228,9 +264,9 @@ impl FloatImage {
     fn channel_min_max(
         &self,
         channel: usize,
-        min_stretch: Option<f32>,
-        max_stretch: Option<f32>,
-    ) -> (f32, f32) {
+        min_stretch: Option<T>,
+        max_stretch: Option<T>,
+    ) -> (T, T) {
         let min_value =
             min_stretch.unwrap_or_else(|| self.channel_extreme(channel, ChannelExtreme::Min));
         let max_value =
@@ -238,11 +274,11 @@ impl FloatImage {
         (min_value, max_value)
     }
 
-    fn channel_extreme(&self, channel: usize, extreme: ChannelExtreme) -> f32 {
+    fn channel_extreme(&self, channel: usize, extreme: ChannelExtreme) -> T {
         let channels = self.mode.channels();
         let mut result = match extreme {
-            ChannelExtreme::Min => f32::INFINITY,
-            ChannelExtreme::Max => f32::NEG_INFINITY,
+            ChannelExtreme::Min => f64::INFINITY,
+            ChannelExtreme::Max => f64::NEG_INFINITY,
         };
         for idx in (channel..self.pixels.len()).step_by(channels) {
             if self.is_masked_pixel(idx / channels) {
@@ -250,13 +286,14 @@ impl FloatImage {
             }
             let value = self.pixels[idx];
             if value.is_finite() {
+                let value = value.to_f64();
                 result = match extreme {
                     ChannelExtreme::Min => result.min(value),
                     ChannelExtreme::Max => result.max(value),
                 };
             }
         }
-        result
+        T::from_f64(result)
     }
 
     pub fn to_u8_image(&self, fill_value: u8) -> Result<Image> {
@@ -269,7 +306,7 @@ impl FloatImage {
                 if self.is_masked_pixel(idx / channels) || !value.is_finite() {
                     fill_value
                 } else {
-                    (value * 255.0).clamp(0.0, 255.0).round() as u8
+                    (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
                 }
             })
             .collect();
@@ -284,11 +321,11 @@ impl FloatImage {
         (self.height, self.width)
     }
 
-    pub fn pixels(&self) -> &[f32] {
+    pub fn pixels(&self) -> &[T] {
         &self.pixels
     }
 
-    pub fn enhancement_history(&self) -> &[StretchRecord] {
+    pub fn enhancement_history(&self) -> &[StretchRecord<T>] {
         &self.enhancement_history
     }
 
@@ -300,12 +337,12 @@ impl FloatImage {
     }
 }
 
-impl StretchRecord {
-    pub fn scale(&self) -> &[f32] {
+impl<T: ImageFloat> StretchRecord<T> {
+    pub fn scale(&self) -> &[T] {
         &self.scale
     }
 
-    pub fn offset(&self) -> &[f32] {
+    pub fn offset(&self) -> &[T] {
         &self.offset
     }
 }
@@ -390,7 +427,7 @@ mod tests {
 
         image.crude_stretch_in_place(None, None);
 
-        assert_pixels_close(image.pixels(), &[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+        assert_pixels_close(image.pixels(), &[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0], 1e-6);
         assert_eq!(image.enhancement_history().len(), 1);
         assert_eq!(image.enhancement_history()[0].scale(), &[1.0 / 3.0]);
         assert_eq!(image.enhancement_history()[0].offset(), &[-1.0 / 3.0]);
@@ -406,10 +443,39 @@ mod tests {
         assert_eq!(final_image.pixels(), &[0, 85, 170, 255]);
     }
 
-    fn assert_pixels_close(left: &[f32], right: &[f32]) {
+    #[test]
+    fn crude_stretch_supports_f64_precision_path() {
+        let mut image = FloatImage::<f64>::from_pixels(
+            ImageMode::Luma,
+            1,
+            3,
+            vec![1.0, 1.0 + f64::EPSILON, 1.0 + (2.0 * f64::EPSILON)],
+        )
+        .unwrap();
+
+        image.crude_stretch_in_place(None, None);
+
+        assert_pixels_close(image.pixels(), &[0.0, 0.5, 1.0], 1e-12);
+        assert_eq!(image.enhancement_history().len(), 1);
+        assert_eq!(image.enhancement_history()[0].scale().len(), 1);
+    }
+
+    #[test]
+    fn f64_luma_conversion_preserves_precise_source_values() {
+        let array =
+            DataArray::<f64>::from_vec_named(vec![1, 2], ["y", "x"], vec![1.0, 1.0 + f64::EPSILON])
+                .unwrap();
+        let image = FloatImage::<f64>::from_luma_array(&array.into()).unwrap();
+
+        assert_eq!(image.pixels(), &[1.0, 1.0 + f64::EPSILON]);
+    }
+
+    fn assert_pixels_close<T: ImageFloat>(left: &[T], right: &[T], tolerance: f64) {
         assert_eq!(left.len(), right.len());
         for (left, right) in left.iter().zip(right) {
-            assert!((left - right).abs() < 1e-6, "{left} != {right}");
+            let left = left.to_f64();
+            let right = right.to_f64();
+            assert!((left - right).abs() < tolerance, "{left} != {right}");
         }
     }
 }
