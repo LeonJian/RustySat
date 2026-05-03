@@ -236,8 +236,9 @@ fn resample_area_nearest_with_policy(
             mask_flags.push(source_masked);
         }
     }
-    add_area_xy_coords(
+    add_resampled_coords(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        Some(source_grid),
         destination,
     )
 }
@@ -280,8 +281,9 @@ fn resample_area_nearest_lazy_with_policy(
             mask_flags.push(masked);
         }
     }
-    add_area_xy_coords(
+    add_resampled_coords(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        None,
         destination,
     )
 }
@@ -401,8 +403,9 @@ fn resample_swath_nearest_with_policy(
             mask_flags.push(source_masked);
         }
     }
-    add_area_xy_coords(
+    add_resampled_coords(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+        Some(source_grid),
         destination,
     )
 }
@@ -421,10 +424,30 @@ fn finish_resampled_grid(
     }
 }
 
-fn add_area_xy_coords(mut grid: DataGrid, area: &AreaDefinition) -> Result<DataGrid> {
+fn add_resampled_coords(
+    mut grid: DataGrid,
+    source_grid: Option<&DataGrid>,
+    area: &AreaDefinition,
+) -> Result<DataGrid> {
+    if let Some(source_grid) = source_grid {
+        for (name, coordinate) in source_grid.coords() {
+            if should_preserve_coord(name, coordinate) {
+                grid.set_coordinate(name.clone(), coordinate.clone())?;
+            }
+        }
+    }
     grid.set_coordinate("x", Coordinate::axis("x", area.projection_x_coords())?)?;
     grid.set_coordinate("y", Coordinate::axis("y", area.projection_y_coords())?)?;
     Ok(grid)
+}
+
+fn should_preserve_coord(name: &str, coordinate: &Coordinate) -> bool {
+    const IGNORE_DIMS: [&str; 3] = ["y", "x", "crs"];
+    !IGNORE_DIMS.contains(&name)
+        && !coordinate
+            .dims()
+            .iter()
+            .any(|dim| IGNORE_DIMS.contains(&dim.as_str()))
 }
 
 fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, usize, f64)> {
@@ -585,6 +608,31 @@ mod tests {
         assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(result.mask().unwrap().masked_count(), 1);
         assert_eq!(result.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn nearest_preserves_non_xy_coordinates_and_replaces_xy_axes() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap()
+            .with_coordinate("x", Coordinate::axis("x", vec![0.5, 1.5]).unwrap())
+            .unwrap()
+            .with_coordinate(
+                "longitude",
+                Coordinate::new(["y", "x"], vec![1.0, 2.0, 3.0, 4.0]).unwrap(),
+            )
+            .unwrap();
+
+        let result =
+            resample_area_nearest(&source_grid, &source, &destination, None, f64::NAN).unwrap();
+
+        assert_eq!(result.coord("acq_time").unwrap().values(), &[123.0]);
+        assert!(result.coord("longitude").is_none());
+        assert_eq!(result.coord("x").unwrap().values(), &[0.5]);
+        assert_eq!(result.coord("y").unwrap().values(), &[1.5]);
     }
 
     #[test]

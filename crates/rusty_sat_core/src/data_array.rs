@@ -114,11 +114,6 @@ impl Coordinate {
         values: Vec<f64>,
     ) -> Result<Self> {
         let dims = dims.into_iter().map(Into::into).collect::<Vec<_>>();
-        if dims.is_empty() {
-            return Err(RustySatError::invalid_input(
-                "coordinate must have at least one dimension",
-            ));
-        }
         if dims.iter().any(|dim| dim.trim().is_empty()) {
             return Err(RustySatError::invalid_input(
                 "coordinate dimension name cannot be empty",
@@ -129,11 +124,23 @@ impl Coordinate {
                 "coordinate must have at least one value",
             ));
         }
+        if dims.is_empty() && values.len() != 1 {
+            return Err(RustySatError::invalid_input(
+                "scalar coordinate must have exactly one value",
+            ));
+        }
         Ok(Self { dims, values })
     }
 
     pub fn axis(dim: impl Into<String>, values: Vec<f64>) -> Result<Self> {
         Self::new([dim], values)
+    }
+
+    pub fn scalar(value: f64) -> Self {
+        Self {
+            dims: Vec::new(),
+            values: vec![value],
+        }
     }
 
     pub fn dims(&self) -> &[String] {
@@ -877,6 +884,18 @@ mod tests {
             array.coord("longitude").unwrap().dims(),
             &["y".to_string(), "x".to_string()]
         );
+    }
+
+    #[test]
+    fn stores_scalar_coordinates() {
+        let array = DataArray::<u8>::from_vec(vec![2, 3], vec![0; 6])
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap();
+
+        assert!(array.coord("acq_time").unwrap().dims().is_empty());
+        assert_eq!(array.coord("acq_time").unwrap().values(), &[123.0]);
+        assert!(Coordinate::new(Vec::<String>::new(), vec![1.0, 2.0]).is_err());
     }
 
     #[test]

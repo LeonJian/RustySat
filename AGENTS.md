@@ -142,7 +142,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` P0.1.5c: Add YAML/NetCDF-style metadata value parsing for lists, maps, booleans, numbers, and fill values.
   - `[~]` P0.1.6: Attach named coordinates and coordinate axes, initially x/y and later lon/lat/time/band coordinates.
     - `[x]` P0.1.6a: Add numeric coordinate storage to `DataArray`/`AnyDataArray` and attach destination x/y projection axes from current area resampling.
-    - `[ ]` P0.1.6b: Preserve non-x/y coordinates through current resampling paths following Satpy's `resample.base._update_resampled_coords` behavior.
+    - `[x]` P0.1.6b: Preserve non-x/y coordinates through current resampling paths following Satpy's `resample.base._update_resampled_coords` behavior.
     - `[ ]` P0.1.6c: Add swath longitude/latitude coordinate attachment and reader-driven coordinate dataset linking.
 - `[ ]` P0-2: CRS and projection system.
   - `[ ]` P0.2.1: Add `ProjCrs` wrapper and choose projection dependency strategy after inspecting Pyresample/pyproj behavior and Rust crate build requirements.
@@ -306,6 +306,7 @@ The initial Rust workspace exists. It contains compile-only crate skeletons and 
 - validated `DataArray` dimension names with Satpy/xarray-style defaults for 1D through 4D data
 - dimension-aware helpers for named dimension lookup, `y,x` shape extraction, and exact-dimension validation
 - numeric `Coordinate` axes on `DataArray`/`AnyDataArray`, including validated 1D axis coordinates and 2D coordinates over named dimensions
+- scalar coordinates for metadata-like coordinate values that do not depend on data dimensions
 - `ValidityMask` with packed u8 bit storage attached independently to `DataArray` values
 - `ChunkShape` metadata on `DataArray`/`AnyDataArray`, including validation and chunk-count helpers; actual lazy chunk loading is not implemented yet
 - `LazyDataArray`, `ChunkRegion`, and `ChunkSource` foundations for deferred chunk reads. This is only the contract layer: no production file-backed source, scheduler, cache, or parallel chunk execution exists yet.
@@ -365,6 +366,7 @@ The resample crate now has a first `nearest` module based on inspected Pyresampl
 - `NearestAreaResampler` resamples 2D `DataGrid` datasets from a source `AreaDefinition` to a destination `AreaDefinition` using projection-coordinate pixel centers.
 - `resample_area_nearest_lazy` can consume a 2D f64 `LazyDataArray` source by loading source chunks on demand and returning the current eager `DataGrid` result.
 - Current area/swath nearest resampling attaches destination x/y projection coordinate axes to the returned `DataGrid`.
+- Current eager nearest resampling preserves source coordinates that do not depend on old x/y/crs dimensions, then replaces x/y with destination projection axes.
 - It supports an optional radius of influence and configurable fill value, including edge-pixel nearest behavior for target pixels just outside the source extent.
 - `resample_swath_nearest` can resample coordinate-backed `SwathDefinition` data to lon/lat `AreaDefinition` grids with brute-force nearest lookup for small/test cases.
 - Current nearest area/swath resampling propagates source mask bits to destination pixels selected from masked source pixels.
