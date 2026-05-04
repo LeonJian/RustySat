@@ -307,9 +307,9 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
   - `[x]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
   - `[x]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
-- `[ ]` M3-reader: Prioritize Himawari AHI first. Implement the AHI reader path, minimal format/file-handler foundations needed for AHI HSD or an AHI L1B sample, and Scene load path sufficient for an AHI sample to output a basic image.
+- `[~]` M3-reader: Prioritize Himawari AHI first. Implement the AHI reader path, minimal format/file-handler foundations needed for AHI HSD or an AHI L1B sample, and Scene load path sufficient for an AHI sample to output a basic image.
   - `[x]` M3-reader-a: Inspect root `HS_D_users_guide_en_v12.pdf` and Satpy `satpy/readers/ahi_hsd.py`; add AHI HSD binary header parsing foundations.
-  - `[ ]` M3-reader-b: Add AHI HSD file-handler skeleton with filename/YAML inventory integration and segment metadata.
+  - `[x]` M3-reader-b: Add AHI HSD file-handler skeleton with filename/YAML inventory integration and segment metadata.
   - `[ ]` M3-reader-c: Load raw AHI count arrays for a tiny local/synthetic HSD fixture, preserving dtype and metadata.
   - `[ ]` M3-reader-d: Apply first visible/IR calibration path needed for basic image output.
   - `[ ]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
@@ -399,6 +399,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
 | `FakeReader` in-memory inventory + dataset loading for Scene planning tests | Real satellite file I/O (NetCDF/HDF/GeoTIFF/etc.) |
 | `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
+| AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | AHI HSD raw count loading, calibration, segment assembly, navigation arrays, and Scene load integration |
 
 ### rusty_sat_resample
 

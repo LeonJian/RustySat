@@ -5,17 +5,26 @@
 //! - `satpy/satpy/readers/ahi_hsd.py` defines the NumPy dtypes for HSD header
 //!   blocks 1-5 and reads them in sequence before dataset loading.
 //!
-//! This module is intentionally limited to fixed-size initial header parsing.
-//! It does not read image data, calibration update blocks, or segment arrays
-//! yet.
+//! This module is intentionally limited to fixed-size initial header parsing
+//! plus a file-handler inventory skeleton. It does not read image data,
+//! calibration update blocks, or segment arrays yet.
 
-use rusty_sat_core::{Result, RustySatError};
+use crate::filename_pattern::PatternValue;
+use crate::yaml_reader::FileMatch;
+use crate::Reader;
+use rusty_sat_core::{
+    DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError, WavelengthRange,
+};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 const BASIC_INFO_LEN: usize = 282;
 const DATA_INFO_LEN: usize = 50;
 const PROJECTION_INFO_LEN: usize = 127;
 const NAVIGATION_INFO_LEN: usize = 139;
 const CALIBRATION_INFO_LEN: usize = 35;
+const INITIAL_HEADER_PREFIX_LEN: u64 = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AhiHsdHeader {
@@ -94,6 +103,216 @@ pub struct AhiCalibrationInfo {
     pub outside_scan_pixel_count_value: u16,
     pub gain_count_to_radiance: f64,
     pub offset_count_to_radiance: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AhiSegmentInfo {
+    pub segment_number: u8,
+    pub total_segments: u8,
+}
+
+impl AhiSegmentInfo {
+    pub fn new(segment_number: u8, total_segments: u8) -> Result<Self> {
+        if segment_number == 0 {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD segment number must be greater than zero",
+            ));
+        }
+        if total_segments == 0 {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD total segments must be greater than zero",
+            ));
+        }
+        if segment_number > total_segments {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD segment number cannot exceed total segments",
+            ));
+        }
+        Ok(Self {
+            segment_number,
+            total_segments,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AhiHsdFileHandler {
+    filename: PathBuf,
+    file_type: String,
+    header: AhiHsdHeader,
+    segment: AhiSegmentInfo,
+}
+
+impl AhiHsdFileHandler {
+    pub fn from_header_bytes(
+        filename: impl Into<PathBuf>,
+        file_type: impl Into<String>,
+        segment: AhiSegmentInfo,
+        bytes: &[u8],
+    ) -> Result<Self> {
+        let file_type = file_type.into();
+        if file_type.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD file type cannot be empty",
+            ));
+        }
+        Ok(Self {
+            filename: filename.into(),
+            file_type,
+            header: parse_initial_hsd_header(bytes)?,
+            segment,
+        })
+    }
+
+    pub fn from_file_match_and_header_bytes(file_match: &FileMatch, bytes: &[u8]) -> Result<Self> {
+        let segment_number = required_filename_u8(file_match, "segment")?;
+        let total_segments = required_filename_u8(file_match, "total_segments")?;
+        Self::from_header_bytes(
+            file_match.filename(),
+            file_match.file_type(),
+            AhiSegmentInfo::new(segment_number, total_segments)?,
+            bytes,
+        )
+    }
+
+    pub fn from_path(
+        filename: impl Into<PathBuf>,
+        file_type: impl Into<String>,
+        segment: AhiSegmentInfo,
+    ) -> Result<Self> {
+        let filename = filename.into();
+        let mut bytes = Vec::new();
+        File::open(&filename)
+            .map_err(|err| {
+                RustySatError::invalid_input(format!(
+                    "failed to open AHI HSD file '{}': {err}",
+                    filename.display()
+                ))
+            })?
+            .take(INITIAL_HEADER_PREFIX_LEN)
+            .read_to_end(&mut bytes)
+            .map_err(|err| {
+                RustySatError::invalid_input(format!(
+                    "failed to read AHI HSD header from '{}': {err}",
+                    filename.display()
+                ))
+            })?;
+        Self::from_header_bytes(filename, file_type, segment, &bytes)
+    }
+
+    pub fn filename(&self) -> &Path {
+        &self.filename
+    }
+
+    pub fn file_type(&self) -> &str {
+        &self.file_type
+    }
+
+    pub fn header(&self) -> &AhiHsdHeader {
+        &self.header
+    }
+
+    pub fn segment(&self) -> AhiSegmentInfo {
+        self.segment
+    }
+
+    pub fn band_name(&self) -> String {
+        format!("B{:02}", self.header.calibration.band_number)
+    }
+
+    pub fn dataset_id(&self) -> Result<DataId> {
+        let wavelength = self.header.calibration.central_wavelength;
+        DataId::new(self.band_name())?
+            .with_qualifier(
+                "wavelength",
+                WavelengthRange::micrometers(wavelength, wavelength, wavelength)?,
+            )?
+            .with_qualifier("calibration", "counts")
+    }
+
+    pub fn dataset_stub(&self) -> Result<Dataset> {
+        let mut dataset = Dataset::new(self.dataset_id()?);
+        dataset.insert_attr("reader", "ahi_hsd")?;
+        dataset.insert_attr("file_type", self.file_type.clone())?;
+        dataset.insert_attr("filename", self.filename.to_string_lossy().to_string())?;
+        dataset.insert_attr(
+            "platform_name",
+            MetadataValue::string(self.header.basic.satellite.clone()),
+        )?;
+        dataset.insert_attr("sensor", "ahi")?;
+        dataset.insert_attr("band_name", self.band_name())?;
+        dataset.insert_attr("segment_number", i64::from(self.segment.segment_number))?;
+        dataset.insert_attr("total_segments", i64::from(self.segment.total_segments))?;
+        dataset.insert_attr("columns", i64::from(self.header.data.columns))?;
+        dataset.insert_attr("lines", i64::from(self.header.data.lines))?;
+        dataset.insert_attr("bits_per_pixel", i64::from(self.header.data.bits_per_pixel))?;
+        dataset.insert_attr(
+            "central_wavelength",
+            MetadataValue::float(self.header.calibration.central_wavelength)?,
+        )?;
+        Ok(dataset)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AhiHsdReader {
+    name: String,
+    handlers: Vec<AhiHsdFileHandler>,
+}
+
+impl AhiHsdReader {
+    pub fn new(handlers: impl IntoIterator<Item = AhiHsdFileHandler>) -> Result<Self> {
+        Self::with_name("ahi_hsd", handlers)
+    }
+
+    pub fn with_name(
+        name: impl Into<String>,
+        handlers: impl IntoIterator<Item = AhiHsdFileHandler>,
+    ) -> Result<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD reader name cannot be empty",
+            ));
+        }
+        Ok(Self {
+            name,
+            handlers: handlers.into_iter().collect(),
+        })
+    }
+
+    pub fn handlers(&self) -> &[AhiHsdFileHandler] {
+        &self.handlers
+    }
+
+    pub fn inventory(&self) -> Result<ReaderInventory> {
+        ReaderInventory::new(self.name.clone(), self.available_dataset_ids())
+    }
+}
+
+impl Reader for AhiHsdReader {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn available_dataset_ids(&self) -> Vec<DataId> {
+        self.handlers
+            .iter()
+            .filter_map(|handler| handler.dataset_id().ok())
+            .collect()
+    }
+
+    fn load(&self, id: &DataId) -> Result<Dataset> {
+        for handler in &self.handlers {
+            if handler.dataset_id()? == *id {
+                return handler.dataset_stub();
+            }
+        }
+        Err(RustySatError::not_found(format!(
+            "AHI HSD dataset '{}'",
+            id.name()
+        )))
+    }
 }
 
 pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
@@ -285,9 +504,25 @@ fn truncated_field(field: &str) -> RustySatError {
     RustySatError::invalid_input(format!("AHI HSD field '{field}' is truncated"))
 }
 
+fn required_filename_u8(file_match: &FileMatch, key: &str) -> Result<u8> {
+    match file_match.filename_info().get(key) {
+        Some(PatternValue::Integer(value)) => u8::try_from(*value).map_err(|_| {
+            RustySatError::invalid_input(format!("AHI HSD filename field '{key}' must fit in u8"))
+        }),
+        Some(value) => Err(RustySatError::invalid_input(format!(
+            "AHI HSD filename field '{key}' must be an integer, got {value:?}"
+        ))),
+        None => Err(RustySatError::invalid_input(format!(
+            "AHI HSD filename field '{key}' is required"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yaml_reader::YamlMetadataReader;
+    use rusty_sat_core::{DataValue, MetadataValue};
 
     #[test]
     fn parses_initial_ahi_hsd_header_blocks() {
@@ -319,6 +554,101 @@ mod tests {
 
         assert!(err.to_string().contains("truncated"));
     }
+
+    #[test]
+    fn file_handler_from_yaml_match_tracks_segment_metadata() {
+        let reader = YamlMetadataReader::from_str(AHI_HSD_STYLE_YAML).unwrap();
+        let matches = reader
+            .match_filenames(["/data/HS_H08_FLDK_B03_S0110.DAT"])
+            .unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_file_match_and_header_bytes(&matches[0], &synthetic_header())
+                .unwrap();
+        let id = handler.dataset_id().unwrap();
+
+        assert_eq!(handler.file_type(), "hsd_b03");
+        assert_eq!(handler.segment(), AhiSegmentInfo::new(1, 10).unwrap());
+        assert_eq!(handler.band_name(), "B03");
+        assert_eq!(id.name(), "B03");
+        assert_eq!(
+            id.qualifier("calibration"),
+            Some(&DataValue::Text("counts".to_string()))
+        );
+        assert!(id.qualifier("wavelength").is_some());
+    }
+
+    #[test]
+    fn ahi_hsd_reader_inventory_and_stub_load() {
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "/data/HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &synthetic_header(),
+        )
+        .unwrap();
+        let reader = AhiHsdReader::new([handler]).unwrap();
+        let id = reader.available_dataset_ids().pop().unwrap();
+
+        let inventory = reader.inventory().unwrap();
+        let dataset = reader.load(&id).unwrap();
+
+        assert_eq!(reader.name(), "ahi_hsd");
+        assert!(inventory.available_dataset_ids().contains(&id));
+        assert!(dataset.array().is_none());
+        assert_eq!(
+            dataset.attr("segment_number"),
+            Some(&MetadataValue::Integer(1))
+        );
+        assert_eq!(
+            dataset.attr("total_segments"),
+            Some(&MetadataValue::Integer(10))
+        );
+        assert_eq!(
+            dataset
+                .attr("platform_name")
+                .and_then(MetadataValue::as_str),
+            Some("Himawari-8")
+        );
+        assert_eq!(dataset.attr("columns"), Some(&MetadataValue::Integer(10)));
+        assert_eq!(dataset.attr("lines"), Some(&MetadataValue::Integer(20)));
+    }
+
+    #[test]
+    fn file_handler_requires_segment_filename_fields() {
+        let reader = YamlMetadataReader::from_str(
+            r#"
+reader:
+  name: ahi_hsd
+file_types:
+  hsd_b03:
+    file_patterns: ['HS_H08_FLDK_B03.DAT']
+"#,
+        )
+        .unwrap();
+        let matches = reader.match_filenames(["HS_H08_FLDK_B03.DAT"]).unwrap();
+
+        let err =
+            AhiHsdFileHandler::from_file_match_and_header_bytes(&matches[0], &synthetic_header())
+                .unwrap_err();
+
+        assert!(err.to_string().contains("segment"));
+    }
+
+    const AHI_HSD_STYLE_YAML: &str = r#"
+reader:
+  name: ahi_hsd
+  sensors: [ahi]
+file_types:
+  hsd_b03:
+    file_patterns: ['HS_H08_{area:4s}_B03_S{segment:02d}{total_segments:02d}.DAT']
+datasets:
+  B03:
+    name: B03
+    file_type: hsd_b03
+    wavelength: [0.63, 0.64, 0.65]
+    calibration: counts
+"#;
 
     fn synthetic_header() -> Vec<u8> {
         let mut bytes = vec![
