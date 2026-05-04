@@ -423,7 +423,7 @@ impl AhiHsdFileHandler {
         self.calibrated_dataset_from_bytes(&bytes, calibration)
     }
 
-    fn dataset_id_for_calibration(&self, calibration: AhiCalibration) -> Result<DataId> {
+    pub fn dataset_id_for_calibration(&self, calibration: AhiCalibration) -> Result<DataId> {
         let wavelength = self.header.calibration.central_wavelength;
         DataId::new(self.band_name())?
             .with_qualifier(
@@ -536,15 +536,31 @@ impl AhiHsdFileHandler {
 pub struct AhiHsdReader {
     name: String,
     handlers: Vec<AhiHsdFileHandler>,
+    calibration: AhiCalibration,
 }
 
 impl AhiHsdReader {
     pub fn new(handlers: impl IntoIterator<Item = AhiHsdFileHandler>) -> Result<Self> {
-        Self::with_name("ahi_hsd", handlers)
+        Self::with_name_and_calibration("ahi_hsd", AhiCalibration::Counts, handlers)
     }
 
     pub fn with_name(
         name: impl Into<String>,
+        handlers: impl IntoIterator<Item = AhiHsdFileHandler>,
+    ) -> Result<Self> {
+        Self::with_name_and_calibration(name, AhiCalibration::Counts, handlers)
+    }
+
+    pub fn with_calibration(
+        calibration: AhiCalibration,
+        handlers: impl IntoIterator<Item = AhiHsdFileHandler>,
+    ) -> Result<Self> {
+        Self::with_name_and_calibration("ahi_hsd", calibration, handlers)
+    }
+
+    pub fn with_name_and_calibration(
+        name: impl Into<String>,
+        calibration: AhiCalibration,
         handlers: impl IntoIterator<Item = AhiHsdFileHandler>,
     ) -> Result<Self> {
         let name = name.into();
@@ -556,11 +572,16 @@ impl AhiHsdReader {
         Ok(Self {
             name,
             handlers: handlers.into_iter().collect(),
+            calibration,
         })
     }
 
     pub fn handlers(&self) -> &[AhiHsdFileHandler] {
         &self.handlers
+    }
+
+    pub fn calibration(&self) -> AhiCalibration {
+        self.calibration
     }
 
     pub fn inventory(&self) -> Result<ReaderInventory> {
@@ -576,14 +597,14 @@ impl Reader for AhiHsdReader {
     fn available_dataset_ids(&self) -> Vec<DataId> {
         self.handlers
             .iter()
-            .filter_map(|handler| handler.dataset_id().ok())
+            .filter_map(|handler| handler.dataset_id_for_calibration(self.calibration).ok())
             .collect()
     }
 
     fn load(&self, id: &DataId) -> Result<Dataset> {
         for handler in &self.handlers {
-            if handler.dataset_id()? == *id {
-                return handler.dataset_stub();
+            if handler.dataset_id_for_calibration(self.calibration)? == *id {
+                return handler.load_calibrated_dataset(self.calibration);
             }
         }
         Err(RustySatError::not_found(format!(
@@ -904,7 +925,10 @@ fn required_filename_u8(file_match: &FileMatch, key: &str) -> Result<u8> {
 mod tests {
     use super::*;
     use crate::yaml_reader::YamlMetadataReader;
-    use rusty_sat_core::{DataValue, MetadataValue};
+    use rusty_sat_core::{DataQuery, DataValue, MetadataValue, Scene};
+    use rusty_sat_writers::SimpleImageWriter;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_initial_ahi_hsd_header_blocks() {
@@ -973,7 +997,7 @@ mod tests {
         let id = reader.available_dataset_ids().pop().unwrap();
 
         let inventory = reader.inventory().unwrap();
-        let dataset = reader.load(&id).unwrap();
+        let dataset = reader.handlers()[0].dataset_stub().unwrap();
 
         assert_eq!(reader.name(), "ahi_hsd");
         assert!(inventory.available_dataset_ids().contains(&id));
@@ -994,6 +1018,45 @@ mod tests {
         );
         assert_eq!(dataset.attr("columns"), Some(&MetadataValue::Integer(10)));
         assert_eq!(dataset.attr("lines"), Some(&MetadataValue::Integer(20)));
+    }
+
+    #[test]
+    fn ahi_hsd_reader_drives_scene_load_and_png_output() {
+        let hsd_path = temp_path("ahi_hsd_scene", "DAT");
+        let png_path = temp_path("ahi_hsd_scene", "png");
+        fs::write(
+            &hsd_path,
+            synthetic_full_hsd_file_with_visible_calibration(),
+        )
+        .unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let reader =
+            AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler]).unwrap();
+        let inventory = reader.inventory().unwrap();
+        let mut scene = Scene::new();
+        let plan = scene
+            .plan_reader_loads([DataQuery::named("B03").unwrap()], [&inventory])
+            .unwrap();
+        let id = plan
+            .reader_datasets()
+            .get(reader.name())
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+
+        scene.insert_dataset(reader.load(&id).unwrap());
+        scene
+            .save_dataset(&id, &SimpleImageWriter::default(), &png_path)
+            .unwrap();
+
+        assert!(png_path.metadata().unwrap().len() > 0);
+        fs::remove_file(hsd_path).ok();
+        fs::remove_file(png_path).ok();
     }
 
     #[test]
@@ -1333,6 +1396,14 @@ datasets:
             bytes.extend(value.to_le_bytes());
         }
         bytes
+    }
+
+    fn temp_path(name: &str, extension: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rusty_sat_{name}_{nanos}.{extension}"))
     }
 
     fn write_u8(bytes: &mut [u8], offset: usize, value: u8) {

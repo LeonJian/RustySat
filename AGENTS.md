@@ -289,7 +289,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M1 | Step0-10a early vertical slice | Done |
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
-| M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Ready to start; M2-image can already produce PNG output from self-made data |
+| M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed AHI HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
@@ -307,12 +307,12 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
   - `[x]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
   - `[x]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
-- `[~]` M3-reader: Prioritize Himawari AHI first. Implement the AHI reader path, minimal format/file-handler foundations needed for AHI HSD or an AHI L1B sample, and Scene load path sufficient for an AHI sample to output a basic image.
+- `[x]` M3-reader: Prioritize Himawari AHI first. Implement the AHI reader path, minimal format/file-handler foundations needed for AHI HSD or an AHI L1B sample, and Scene load path sufficient for an AHI sample to output a basic image.
   - `[x]` M3-reader-a: Inspect root `HS_D_users_guide_en_v12.pdf` and Satpy `satpy/readers/ahi_hsd.py`; add AHI HSD binary header parsing foundations.
   - `[x]` M3-reader-b: Add AHI HSD file-handler skeleton with filename/YAML inventory integration and segment metadata.
   - `[x]` M3-reader-c: Load raw AHI count arrays for a tiny local/synthetic HSD fixture, preserving dtype and metadata.
   - `[x]` M3-reader-d: Apply first visible/IR calibration path needed for basic image output.
-  - `[ ]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
+  - `[x]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
@@ -399,9 +399,11 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
 | `FakeReader` in-memory inventory + dataset loading for Scene planning tests | Real satellite file I/O (NetCDF/HDF/GeoTIFF/etc.) |
 | `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
-| AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Full AHI HSD calibration, segment assembly, navigation arrays, bzip2-compressed file handling, and Scene load integration |
+| AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Production AHI HSD segment assembly, navigation arrays, bzip2-compressed file handling, and full Satpy YAML instantiation |
 | AHI HSD handler can load uncompressed local/synthetic block-12 raw counts into a `u16` `DataArray` and mask Satpy error/outside-scan count values | Streaming/chunked HSD reads; current raw-count path materializes the requested file/byte buffer |
 | AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance, reflectance, and brightness-temperature datasets following Satpy's first-pass formulas | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
+| `AhiHsdReader` can expose a configured calibration, load a local uncompressed HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
+| Current calibrated HSD datasets use `f32` for Satpy-display parity and memory efficiency | Final scientific/HDR HSD paths must add `f64` calibrated output and writer-preserving float/16-bit policies |
 
 ### rusty_sat_resample
 
