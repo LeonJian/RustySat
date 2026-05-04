@@ -51,9 +51,10 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 ## Git Rules
 
 - The repository root should be a Git repository for Rusty Sat work.
-- Start each new roadmap item or lettered substep on a fresh branch named after the feature itself, for example `w2-m2d2-16-bit-png-hdr`.
-- Do not merge a completed roadmap branch immediately. First start the next roadmap item on its own new feature-named branch, then merge the previously completed branch after the user has had a chance to review that completed branch.
-- Before starting a new roadmap branch, confirm the previous branch is committed and the current roadmap status in this file is updated.
+- Roadmap-only planning edits stay on the current branch and do not require a new feature branch.
+- Start each implementation feature or lettered implementation substep on a fresh branch named after the feature itself, for example `w2-m2d2-16-bit-png-hdr`.
+- Do not merge a completed feature branch immediately. First start the next implementation feature on its own new feature-named branch, then merge the previously completed branch after the user has had a chance to review that completed branch.
+- Before starting a new feature branch, confirm the previous branch is committed and the current roadmap status in this file is updated.
 - Commit every completed roadmap step or substep.
 - Keep commits small and named after the completed step, for example `step 3a data query matching`.
 - Do not commit generated build artifacts, `.DS_Store`, or `target/`.
@@ -288,7 +289,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M1 | Step0-10a early vertical slice | Done |
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
-| M3-reader | R0.1, R0.2, R0.8 partial, R1.1 ABI L1B partial, SC1 load path, W2 output path | Blocked until M2-image produces PNG output |
+| M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Ready to start; M2-image can already produce PNG output from self-made data |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
@@ -306,7 +307,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
   - `[x]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
   - `[x]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
-- `[ ]` M3-reader: NetCDF base plus ABI L1B reader and Scene load path sufficient for a GOES ABI sample to output a basic image.
+- `[ ]` M3-reader: Prioritize Himawari AHI first. Implement the AHI reader path, minimal format/file-handler foundations needed for AHI HSD or an AHI L1B sample, and Scene load path sufficient for an AHI sample to output a basic image.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
