@@ -6,8 +6,9 @@ pub mod text_grid;
 pub mod yaml_reader;
 
 pub use ahi_hsd::{
-    parse_initial_hsd_header, AhiBasicInfo, AhiCalibrationInfo, AhiDataInfo, AhiHsdFileHandler,
-    AhiHsdHeader, AhiHsdReader, AhiNavigationInfo, AhiProjectionInfo, AhiSegmentInfo,
+    parse_initial_hsd_header, AhiBandCalibration, AhiBasicInfo, AhiCalibration, AhiCalibrationInfo,
+    AhiDataInfo, AhiHsdFileHandler, AhiHsdHeader, AhiHsdReader, AhiNavigationInfo,
+    AhiProjectionInfo, AhiSegmentBlockInfo, AhiSegmentInfo,
 };
 pub use text_grid::{
     lazy_text_grid, load_text_grid, parse_text_grid, TextGridChunkSource, TextGridReader,
