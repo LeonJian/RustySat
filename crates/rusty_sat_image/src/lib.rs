@@ -53,6 +53,14 @@ pub struct Image {
     pixels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image16 {
+    mode: ImageMode,
+    height: usize,
+    width: usize,
+    pixels: Vec<u16>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatImage<T: ImageFloat = f32> {
     mode: ImageMode,
@@ -144,6 +152,63 @@ impl Image {
     }
 
     pub fn into_pixels(self) -> Vec<u8> {
+        self.pixels
+    }
+}
+
+impl Image16 {
+    pub fn new(mode: ImageMode, height: usize, width: usize) -> Result<Self> {
+        Self::from_pixels(
+            mode,
+            height,
+            width,
+            vec![0; checked_pixel_len(mode, height, width)?],
+        )
+    }
+
+    pub fn from_pixels(
+        mode: ImageMode,
+        height: usize,
+        width: usize,
+        pixels: Vec<u16>,
+    ) -> Result<Self> {
+        if height == 0 || width == 0 {
+            return Err(RustySatError::invalid_input(
+                "image dimensions must be non-zero",
+            ));
+        }
+        let expected = checked_pixel_len(mode, height, width)?;
+        if pixels.len() != expected {
+            return Err(RustySatError::invalid_input(format!(
+                "16-bit image has {} pixels but {mode:?} shape ({height}, {width}) requires {expected} values",
+                pixels.len()
+            )));
+        }
+        Ok(Self {
+            mode,
+            height,
+            width,
+            pixels,
+        })
+    }
+
+    pub fn mode(&self) -> ImageMode {
+        self.mode
+    }
+
+    pub fn shape(&self) -> (usize, usize) {
+        (self.height, self.width)
+    }
+
+    pub fn channels(&self) -> usize {
+        self.mode.channels()
+    }
+
+    pub fn pixels(&self) -> &[u16] {
+        &self.pixels
+    }
+
+    pub fn into_pixels(self) -> Vec<u16> {
         self.pixels
     }
 }
@@ -392,6 +457,17 @@ mod tests {
     fn validates_pixel_buffer_length() {
         assert!(Image::from_pixels(ImageMode::Rgba, 2, 2, vec![0; 15]).is_err());
         assert!(Image::new(ImageMode::Luma, 0, 2).is_err());
+    }
+
+    #[test]
+    fn constructs_16_bit_image() {
+        let image = Image16::from_pixels(ImageMode::Rgb, 1, 2, vec![0, 1, 2, 3, 4, 65535]).unwrap();
+
+        assert_eq!(image.mode(), ImageMode::Rgb);
+        assert_eq!(image.shape(), (1, 2));
+        assert_eq!(image.channels(), 3);
+        assert_eq!(image.pixels(), &[0, 1, 2, 3, 4, 65535]);
+        assert!(Image16::from_pixels(ImageMode::Rgb, 1, 2, vec![0; 5]).is_err());
     }
 
     #[test]

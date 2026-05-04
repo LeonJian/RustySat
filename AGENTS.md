@@ -51,8 +51,8 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 ## Git Rules
 
 - The repository root should be a Git repository for Rusty Sat work.
-- Start each new roadmap item or lettered substep on a fresh branch, using the `codex/` prefix unless the user requests a different branch name.
-- Do not merge a completed roadmap branch immediately. First start the next roadmap item on its own new branch, then merge the previously completed branch. This keeps every roadmap slice reviewable while preserving forward progress.
+- Start each new roadmap item or lettered substep on a fresh branch named after the feature itself, for example `w2-m2d2-16-bit-png-hdr`.
+- Do not merge a completed roadmap branch immediately. First start the next roadmap item on its own new feature-named branch, then merge the previously completed branch after the user has had a chance to review that completed branch.
 - Before starting a new roadmap branch, confirm the previous branch is committed and the current roadmap status in this file is updated.
 - Commit every completed roadmap step or substep.
 - Keep commits small and named after the completed step, for example `step 3a data query matching`.
@@ -244,7 +244,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[ ]` W1: Writer framework completion: writer trait, image-writer base, extension-based factory, and writer YAML config.
 - `[~]` W2: Simple image writer: PNG/JPEG output, format detection, transparency/fill/mode handling, PNG metadata, and 8-bit/16-bit PNG output paths.
   - `[x]` W2-m2d: PNG writer using the Rust `image` crate with format detection and u8 Luma/RGB/RGBA image support.
-  - `[@]` W2-m2d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output.
+  - `[x]` W2-m2d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output.
   - `[ ]` W2-next: JPEG output, transparency/fill/mode polish, PNG metadata parity, and broader Satpy `PillowWriter` behavior.
 - `[ ]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
   - `[ ]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
@@ -285,7 +285,7 @@ Before starting or closing a milestone, check this table and update both the mil
 |-----------|---------------------------|----------------------|
 | M1 | Step0-10a early vertical slice | Done |
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
-| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and planned 16-bit path), SC4 partial (`Scene.save_dataset`) | Roadmap currently selected with `[@]`: W2-m2d2, SC4 |
+| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Roadmap currently selected with `[@]`: SC4 |
 | M3-reader | R0.1, R0.2, R0.8 partial, R1.1 ABI L1B partial, SC1 load path, W2 output path | Blocked until M2-image produces PNG output |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
@@ -302,7 +302,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M2-image-b2: Add `f64` image/enhancement buffer path or generic float buffer abstraction before relying on this image foundation for scientific corrections. Roadmap: I1-m2prec.
   - `[x]` M2-image-c: Add RGB compositor vertical slice for three matching single-band datasets. Roadmap: C0.
   - `[x]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
-  - `[@]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
+  - `[x]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
   - `[ ]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
 - `[ ]` M3-reader: NetCDF base plus ABI L1B reader and Scene load path sufficient for a GOES ABI sample to output a basic image.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
@@ -413,14 +413,14 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| Store owned u8 `Image` pixels and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch with scale/offset history | 16-bit/HDR finalization, broader XRImage parity: gamma/invert, alpha/finalize policy, colorize, mode conversion, or save helpers |
+| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch with scale/offset history | Broader XRImage parity: gamma/invert, alpha/finalize policy, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 
 | Can | Cannot |
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
-| `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers and save 2D datasets through current luma finalization | 16-bit/HDR PNG, PNG metadata parity, alpha/fill polish beyond existing image buffers |
+| `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers, write u16 PNG from finalized `Image16` buffers, and save 2D datasets through current luma finalization | PNG metadata parity, alpha/fill polish beyond existing image buffers |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
 ### rusty_sat_cli
@@ -437,6 +437,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 - `encode_pgm_values` in PGM writer collects its `impl IntoIterator<Item = f64>` argument into an intermediate `Vec<f64>` before autoscaling and encoding. Callers that already have a `Vec<f64>` (e.g. `encode_pgm_array` non-f64 path via `values_as_f64()`) pay a second allocation of the same data. Accept `Vec<f64>` directly to let callers materialize once.
 - `dataset_metadata_pairs` and `dataset_attr_pairs` in nearest resampling clone every metadata key/value and attrs key/value into intermediate `Vec`s before re-inserting them into the resampled dataset. Iterate the source maps directly and clone individual entries inline.
 - Swath nearest resampling has no `owned` or `lazy` variant (unlike area resampling, which has both). Large-swath workflows (VIIRS ~3200×6400) would benefit from both: owned to free source memory incrementally, lazy to avoid materializing the full swath at once. Add when the first real swath reader lands (M4-resample).
-- `Image::from_luma_dataset` / `from_luma_array` forces a `FloatImage<f32>` intermediate allocation for every source dtype, including u8 and u16. For a 4K×4K u8 source (16 MB) this wastes 64 MB on the intermediate `Vec<f32>`, and the float round-trip (u8→f32→u8) adds CPU overhead. Add a direct integer→u8 fast path or a dtype-aware finalization path in W2-m2d2 (16-bit) or the image-enhancement milestone.
-- `write_png_image` accepts only `&Image` and copies pixel data into the PNG encoder's internal buffers via `save_buffer_with_format`. A consuming `write_png_image_owned(image: Image, …)` that hands `image.into_pixels()` directly to the PNG encoder would avoid the internal copy when the caller no longer needs the `Image`. Add alongside the 16-bit writer interface in W2-m2d2.
+- `Image::from_luma_dataset` / `from_luma_array` forces a `FloatImage<f32>` intermediate allocation for every source dtype, including u8 and u16. For a 4K×4K u8 source (16 MB) this wastes 64 MB on the intermediate `Vec<f32>`, and the float round-trip (u8→f32→u8) adds CPU overhead. Add a direct integer→u8 fast path or a dtype-aware finalization path in the image-enhancement milestone.
+- `write_png_image` accepts only `&Image` and copies pixel data into the PNG encoder's internal buffers via `save_buffer_with_format`. A consuming `write_png_image_owned(image: Image, …)` that hands `image.into_pixels()` directly to the PNG encoder would avoid the internal copy when the caller no longer needs the `Image`. Add during W2-next writer polish.
+- `write_png16_image` converts u16 samples to PNG-required big-endian bytes before encoding. This preserves 16-bit values, but duplicates the image byte size during encode. Future writer work should stream rows into the PNG encoder if the crate API permits it.
 - PNG compression level is not exposed to callers — `save_buffer_with_format` uses the `image`/`png` crate defaults. Expose a compression preset (Fast/Default/Best) on `SimpleImageWriter` when PNG metadata parity is addressed in W2-next.

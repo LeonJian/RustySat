@@ -272,6 +272,7 @@ name = "rusty_sat_writers"
 version = "0.1.0"
 dependencies = [
  "image",
+ "png",
  "rusty_sat_core",
  "rusty_sat_image",
 ]
