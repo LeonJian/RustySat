@@ -308,6 +308,11 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
   - `[x]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
 - `[ ]` M3-reader: Prioritize Himawari AHI first. Implement the AHI reader path, minimal format/file-handler foundations needed for AHI HSD or an AHI L1B sample, and Scene load path sufficient for an AHI sample to output a basic image.
+  - `[x]` M3-reader-a: Inspect root `HS_D_users_guide_en_v12.pdf` and Satpy `satpy/readers/ahi_hsd.py`; add AHI HSD binary header parsing foundations.
+  - `[ ]` M3-reader-b: Add AHI HSD file-handler skeleton with filename/YAML inventory integration and segment metadata.
+  - `[ ]` M3-reader-c: Load raw AHI count arrays for a tiny local/synthetic HSD fixture, preserving dtype and metadata.
+  - `[ ]` M3-reader-d: Apply first visible/IR calibration path needed for basic image output.
+  - `[ ]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
