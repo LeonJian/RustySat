@@ -879,6 +879,10 @@ impl Dataset {
         self.data.as_ref()
     }
 
+    pub fn into_array(self) -> Option<AnyDataArray> {
+        self.data
+    }
+
     pub fn set_data(&mut self, data: DataGrid) {
         self.data = Some(data.into());
     }
@@ -1540,6 +1544,18 @@ mod tests {
         dataset.set_array(DataArray::<i16>::from_vec(vec![3], vec![-1, 0, 1]).unwrap());
         assert_eq!(dataset.array().unwrap().dtype(), DataType::I16);
         assert_eq!(dataset.array().unwrap().shape(), &[3]);
+    }
+
+    #[test]
+    fn dataset_can_consume_runtime_typed_array_values() {
+        let data_id = DataId::new("quality_flags").unwrap();
+        let array = DataArray::<u8>::from_vec(vec![2], vec![7, 8]).unwrap();
+        let dataset = Dataset::new(data_id).with_array(array);
+
+        let array = dataset.into_array().expect("dataset array");
+
+        assert_eq!(array.dtype(), DataType::U8);
+        assert_eq!(array.into_f64_values(), vec![7.0, 8.0]);
     }
 
     #[test]

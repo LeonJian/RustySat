@@ -659,6 +659,50 @@ impl AnyDataArray {
             Self::I16(array) => array.values().iter().map(|value| value.to_f64()).collect(),
         }
     }
+
+    pub fn into_f64_values(self) -> Vec<f64> {
+        match self {
+            Self::F32(array) => numeric_values_into_f64(array.into_values()),
+            Self::F64(array) => array.into_values(),
+            Self::U8(array) => numeric_values_into_f64(array.into_values()),
+            Self::U16(array) => numeric_values_into_f64(array.into_values()),
+            Self::I16(array) => numeric_values_into_f64(array.into_values()),
+        }
+    }
+
+    pub fn into_mask(self) -> Option<ValidityMask> {
+        match self {
+            Self::F32(array) => array.into_parts().2,
+            Self::F64(array) => array.into_parts().2,
+            Self::U8(array) => array.into_parts().2,
+            Self::U16(array) => array.into_parts().2,
+            Self::I16(array) => array.into_parts().2,
+        }
+    }
+
+    pub fn into_f64_values_and_mask(self) -> (Vec<f64>, Option<ValidityMask>) {
+        match self {
+            Self::F32(array) => into_numeric_f64_values_and_mask(array),
+            Self::F64(array) => {
+                let (values, _, mask) = array.into_parts();
+                (values, mask)
+            }
+            Self::U8(array) => into_numeric_f64_values_and_mask(array),
+            Self::U16(array) => into_numeric_f64_values_and_mask(array),
+            Self::I16(array) => into_numeric_f64_values_and_mask(array),
+        }
+    }
+}
+
+fn numeric_values_into_f64<T: NumericElement>(values: Vec<T>) -> Vec<f64> {
+    values.into_iter().map(NumericElement::to_f64).collect()
+}
+
+fn into_numeric_f64_values_and_mask<T: NumericElement>(
+    array: DataArray<T>,
+) -> (Vec<f64>, Option<ValidityMask>) {
+    let (values, _, mask) = array.into_parts();
+    (numeric_values_into_f64(values), mask)
 }
 
 impl From<DataArray<f32>> for AnyDataArray {
@@ -1053,5 +1097,43 @@ mod tests {
         assert_eq!(coords.len(), 1);
         assert_eq!(coords.get("acq_time").unwrap().values(), &[123.0]);
         assert_eq!(mask.unwrap().masked_count(), 1);
+    }
+
+    #[test]
+    fn runtime_typed_array_consumes_into_f64_values_without_copying_f64() {
+        let f64_array =
+            AnyDataArray::from(DataArray::<f64>::from_vec(vec![2], vec![1.5, 2.5]).unwrap());
+        let u16_array =
+            AnyDataArray::from(DataArray::<u16>::from_vec(vec![2], vec![3, 4]).unwrap());
+
+        assert_eq!(f64_array.into_f64_values(), vec![1.5, 2.5]);
+        assert_eq!(u16_array.into_f64_values(), vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn runtime_typed_array_consumes_mask() {
+        let array = AnyDataArray::from(
+            DataArray::<u8>::from_vec(vec![3], vec![1, 2, 3])
+                .unwrap()
+                .with_mask(ValidityMask::from_masked_flags([false, true, false]))
+                .unwrap(),
+        );
+
+        assert_eq!(array.into_mask().unwrap().masked_count(), 1);
+    }
+
+    #[test]
+    fn runtime_typed_array_consumes_values_and_mask_together() {
+        let array = AnyDataArray::from(
+            DataArray::<i16>::from_vec(vec![2], vec![-1, 2])
+                .unwrap()
+                .with_mask(ValidityMask::from_masked_flags([true, false]))
+                .unwrap(),
+        );
+
+        let (values, mask) = array.into_f64_values_and_mask();
+
+        assert_eq!(values, vec![-1.0, 2.0]);
+        assert_eq!(mask.unwrap().is_masked(0), Some(true));
     }
 }

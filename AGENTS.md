@@ -326,6 +326,8 @@ Before starting or closing a milestone, check this table and update both the mil
 - Split growing modules into focused files before they become hard to review.
 - Keep tests close to the module they validate; move larger fixtures or broad parity suites into separate test files.
 - Prefer APIs that mutate in place or consume owned inputs when the caller no longer needs the source data. Avoid cloning large arrays, masks, metadata, or coordinate maps unless the borrowed API contract requires it; document unavoidable allocations in tests or implementation notes.
+- For large-array operations such as composites, resampling, enhancement, and writing, add a consuming or in-place API in the same step as the borrowed API whenever the caller can reasonably give up ownership. Borrowed convenience APIs are acceptable for tests and small data, but they must not be the only path for full-disk imagery.
+- When you intentionally leave a known memory or performance inefficiency in place (because the fix belongs to a later roadmap step, or the current vertical slice doesn't justify the complexity), add it to the **Known Inefficiencies** section below with the reason and the planned fix step.
 
 ## Upstream Satpy Tracking
 
@@ -360,10 +362,10 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Can | Cannot |
 |-----|--------|
 | Store owned nD arrays (`f32`/`f64`/`u8`/`u16`/`i16`) via `DataArray<T>` | Zero-copy from file memory maps; all data is owned `Vec<T>` |
-| Runtime-typed `AnyDataArray` with method dispatch across 5 variants | In-place mutation of array values (no `&mut self` transform API) |
+| Runtime-typed `AnyDataArray` with method dispatch across 5 variants and consuming value/mask extraction helpers | In-place mutation of array values (no `&mut self` transform API) |
 | Named dimensions (1D–4D defaults), coordinates (1D/2D/scalar), packed `ValidityMask`, `ChunkShape` | Real lazy loading; `LazyDataArray` is contract-only, no file-backed source |
 | `DataId`/`DataQuery` matching, scoring, best-match, ambiguity detection, ordered modifier-chain prefix matching, less-modified query creation, and ancillary-variable dataset filtering | Composite/modifier execution from these queries |
-| `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs) | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
+| `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs) and borrowed/consuming array access | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
 | `Dataset` typed ancillary variable links by `DataId`, with find/replace helpers modeled after Satpy `anc_vars.py` | Embedding full ancillary arrays inside attrs; only typed links are stored |
 | `Scene` insert/remove datasets, plan reader loads, register composites/modifiers | Actual composite/modifier execution, resampling delegation, save/show |
 
@@ -398,7 +400,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| Execute `RgbCompositor` for three matching 2D single-band runtime-typed datasets into a band-major `bands,y,x` f64 dataset with Satpy-like common-channel mask behavior | Full `CompositeBase`/`GenericCompositor` parity, metadata combination, optional prerequisites, YAML composite loading, or Scene dependency execution |
+| Execute `RgbCompositor` for three matching 2D single-band runtime-typed datasets into a band-major `bands,y,x` f64 dataset with Satpy-like common-channel mask behavior; large callers should use the consuming `compose_rgb_owned` path | Full `CompositeBase`/`GenericCompositor` parity, metadata combination, optional prerequisites, YAML composite loading, or Scene dependency execution |
 | Define `CompositeRecipe` and `ModifierRecipe` in `rusty_sat_core` | Execute registered composite/modifier recipes through `Scene` |
 
 ### rusty_sat_image
@@ -427,3 +429,4 @@ Early tests should focus on construction and API shape. Later tests should compa
 - `AnyDataArray` dispatch uses exhaustive 5-arm match on every method — correct but verbose; a macro could reduce boilerplate.
 - `SourceChunkCache` in nearest resampler is bounded with a small FIFO cache. Future work should make cache sizing configurable and consider LRU/tile traversal for better hit rates on large scenes.
 - `autoscale_lazy` in PGM writer reads all chunks twice (once for min/max, once for write) — should be single-pass with stripe-level caching.
+- `RgbCompositor::compose` is the borrowed convenience path and keeps three source arrays alive while allocating the f64 output. Use `RgbCompositor::compose_rgb_owned` for large full-disk imagery; future Scene composite execution should prefer owned transfer when dependency outputs are no longer needed.

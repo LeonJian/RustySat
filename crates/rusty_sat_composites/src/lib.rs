@@ -69,6 +69,36 @@ impl RgbCompositor {
         dataset.insert_attr("mode", MetadataValue::string("RGB"))?;
         Ok(dataset)
     }
+
+    pub fn compose_rgb_owned(self, inputs: Vec<Dataset>) -> Result<Dataset> {
+        let input_arrays = require_three_owned_arrays(inputs)?;
+        let input_refs = [&input_arrays[0], &input_arrays[1], &input_arrays[2]];
+        let (height, width) = require_matching_yx_shapes(&input_refs)?;
+        let pixel_count = height
+            .checked_mul(width)
+            .ok_or_else(|| RustySatError::invalid_input("RGB composite shape is too large"))?;
+        let mut values = Vec::with_capacity(pixel_count * 3);
+        let mut masks = Vec::with_capacity(3);
+
+        for array in input_arrays {
+            let (array_values, mask) = array.into_f64_values_and_mask();
+            values.extend(array_values);
+            masks.push(mask);
+        }
+
+        let mut array =
+            DataArray::<f64>::from_vec_named(vec![3, height, width], ["bands", "y", "x"], values)?
+                .with_coordinate("bands", Coordinate::axis("bands", vec![0.0, 1.0, 2.0])?)?;
+        if let Some(mask) =
+            build_rgb_mask_from_owned_masks(&masks, pixel_count, self.common_channel_mask)
+        {
+            array.set_mask(mask)?;
+        }
+
+        let mut dataset = Dataset::new(DataId::new(self.name)?).with_array(array);
+        dataset.insert_attr("mode", MetadataValue::string("RGB"))?;
+        Ok(dataset)
+    }
 }
 
 impl Compositor for RgbCompositor {
@@ -115,6 +145,26 @@ fn require_three_arrays(inputs: &[Dataset]) -> Result<[&AnyDataArray; 3]> {
 
 fn missing_array_error(name: &str) -> RustySatError {
     RustySatError::invalid_input(format!("dataset '{name}' has no array data"))
+}
+
+fn require_three_owned_arrays(inputs: Vec<Dataset>) -> Result<[AnyDataArray; 3]> {
+    if inputs.len() != 3 {
+        return Err(RustySatError::invalid_input(format!(
+            "RGB compositor requires exactly 3 input datasets, got {}",
+            inputs.len()
+        )));
+    }
+    let mut arrays = Vec::with_capacity(3);
+    for dataset in inputs {
+        let name = dataset.id().name().to_string();
+        let array = dataset
+            .into_array()
+            .ok_or_else(|| missing_array_error(&name))?;
+        arrays.push(array);
+    }
+    arrays.try_into().map_err(|_| {
+        RustySatError::invalid_input("RGB compositor requires exactly 3 input datasets")
+    })
 }
 
 fn require_matching_yx_shapes(arrays: &[&AnyDataArray; 3]) -> Result<(usize, usize)> {
@@ -178,6 +228,44 @@ fn build_rgb_mask(
         for (band, array) in arrays.iter().enumerate() {
             for pixel_index in 0..pixel_count {
                 if is_masked(array, pixel_index) {
+                    output_mask.set_masked(band * pixel_count + pixel_index, true);
+                }
+            }
+        }
+    }
+    Some(output_mask)
+}
+
+fn build_rgb_mask_from_owned_masks(
+    masks: &[Option<ValidityMask>],
+    pixel_count: usize,
+    common_channel_mask: bool,
+) -> Option<ValidityMask> {
+    if masks.iter().all(Option::is_none) {
+        return None;
+    }
+
+    let mut output_mask = ValidityMask::all_valid(pixel_count * 3);
+    if common_channel_mask {
+        for pixel_index in 0..pixel_count {
+            let masked = masks.iter().any(|mask| {
+                mask.as_ref()
+                    .and_then(|mask| mask.is_masked(pixel_index))
+                    .unwrap_or(false)
+            });
+            if masked {
+                for band in 0..3 {
+                    output_mask.set_masked(band * pixel_count + pixel_index, true);
+                }
+            }
+        }
+    } else {
+        for (band, mask) in masks.iter().enumerate() {
+            let Some(mask) = mask else {
+                continue;
+            };
+            for pixel_index in 0..pixel_count {
+                if mask.is_masked(pixel_index).unwrap_or(false) {
                     output_mask.set_masked(band * pixel_count + pixel_index, true);
                 }
             }
@@ -329,6 +417,38 @@ mod tests {
         assert_eq!(mask.is_masked(1), Some(true));
         assert_eq!(mask.is_masked(3), Some(false));
         assert_eq!(mask.is_masked(5), Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn rgb_compositor_owned_consumes_inputs() -> Result<()> {
+        let compositor = RgbCompositor::new("rgb")?;
+        let inputs = vec![
+            dataset(
+                "red",
+                DataArray::<u8>::from_vec_named([1, 2], ["y", "x"], vec![1, 2])?,
+            ),
+            dataset(
+                "green",
+                DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![3.0, 4.0])?,
+            ),
+            dataset(
+                "blue",
+                DataArray::<i16>::from_vec_named([1, 2], ["y", "x"], vec![5, 6])?
+                    .with_mask(ValidityMask::from_masked_flags([false, true]))?,
+            ),
+        ];
+
+        let output = compositor.compose_rgb_owned(inputs)?;
+        let array = output.array().expect("owned RGB output array");
+        let mask = array.mask().expect("owned RGB common mask");
+
+        assert_eq!(array.shape(), &[3, 1, 2]);
+        assert_eq!(array.values_as_f64(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(mask.masked_count(), 3);
+        assert_eq!(mask.is_masked(1), Some(true));
+        assert_eq!(mask.is_masked(3), Some(true));
+        assert_eq!(mask.is_masked(5), Some(true));
         Ok(())
     }
 
