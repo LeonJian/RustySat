@@ -5,3 +5,5 @@
 /deps/
 
 **/.DS_Store
+*.pdf
+/.claude
