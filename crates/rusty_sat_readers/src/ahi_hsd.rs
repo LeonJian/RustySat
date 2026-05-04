@@ -13,7 +13,8 @@ use crate::filename_pattern::PatternValue;
 use crate::yaml_reader::FileMatch;
 use crate::Reader;
 use rusty_sat_core::{
-    DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError, WavelengthRange,
+    DataArray, DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError,
+    ValidityMask, WavelengthRange,
 };
 use std::fs::File;
 use std::io::Read;
@@ -33,6 +34,7 @@ pub struct AhiHsdHeader {
     pub projection: AhiProjectionInfo,
     pub navigation: AhiNavigationInfo,
     pub calibration: AhiCalibrationInfo,
+    pub segment: Option<AhiSegmentBlockInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +105,15 @@ pub struct AhiCalibrationInfo {
     pub outside_scan_pixel_count_value: u16,
     pub gain_count_to_radiance: f64,
     pub offset_count_to_radiance: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AhiSegmentBlockInfo {
+    pub header_block_number: u8,
+    pub block_length: u16,
+    pub total_segments: u8,
+    pub segment_sequence_number: u8,
+    pub first_line_number: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +243,91 @@ impl AhiHsdFileHandler {
 
     pub fn dataset_stub(&self) -> Result<Dataset> {
         let mut dataset = Dataset::new(self.dataset_id()?);
+        self.attach_common_attrs(&mut dataset)?;
+        Ok(dataset)
+    }
+
+    pub fn counts_dataset_from_bytes(&self, bytes: &[u8]) -> Result<Dataset> {
+        let values = self.raw_count_values_from_bytes(bytes)?;
+        let mask = ValidityMask::from_masked_flags(values.iter().map(|value| {
+            *value == self.header.calibration.error_pixel_count_value
+                || *value == self.header.calibration.outside_scan_pixel_count_value
+        }));
+        let array = DataArray::<u16>::from_vec_named(
+            vec![
+                usize::from(self.header.data.lines),
+                usize::from(self.header.data.columns),
+            ],
+            ["y", "x"],
+            values,
+        )?
+        .with_mask(mask)?;
+
+        let mut dataset = Dataset::new(self.dataset_id()?);
+        self.attach_common_attrs(&mut dataset)?;
+        dataset.insert_attr("calibration", "counts")?;
+        dataset.set_array(array);
+        Ok(dataset)
+    }
+
+    pub fn raw_count_values_from_bytes(&self, bytes: &[u8]) -> Result<Vec<u16>> {
+        if self.header.data.bits_per_pixel != 16 {
+            return Err(RustySatError::unsupported(format!(
+                "AHI HSD raw count loading for {} bits per pixel",
+                self.header.data.bits_per_pixel
+            )));
+        }
+        if self.header.data.compression_flag != 0 {
+            return Err(RustySatError::unsupported(format!(
+                "AHI HSD data compression flag {}",
+                self.header.data.compression_flag
+            )));
+        }
+        let rows = usize::from(self.header.data.lines);
+        let cols = usize::from(self.header.data.columns);
+        let pixel_count = rows
+            .checked_mul(cols)
+            .ok_or_else(|| RustySatError::invalid_input("AHI HSD pixel count overflow"))?;
+        let data_offset = usize::try_from(self.header.basic.total_header_length).map_err(|_| {
+            RustySatError::invalid_input("AHI HSD total header length does not fit in usize")
+        })?;
+        let byte_count = pixel_count
+            .checked_mul(2)
+            .ok_or_else(|| RustySatError::invalid_input("AHI HSD data byte count overflow"))?;
+        let data_end = data_offset
+            .checked_add(byte_count)
+            .ok_or_else(|| RustySatError::invalid_input("AHI HSD data range overflow"))?;
+        let data = bytes.get(data_offset..data_end).ok_or_else(|| {
+            RustySatError::invalid_input(format!(
+                "AHI HSD data block is truncated: need {byte_count} bytes at offset {data_offset}"
+            ))
+        })?;
+        Ok(data
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect())
+    }
+
+    pub fn load_counts_dataset(&self) -> Result<Dataset> {
+        let mut bytes = Vec::new();
+        File::open(&self.filename)
+            .map_err(|err| {
+                RustySatError::invalid_input(format!(
+                    "failed to open AHI HSD file '{}': {err}",
+                    self.filename.display()
+                ))
+            })?
+            .read_to_end(&mut bytes)
+            .map_err(|err| {
+                RustySatError::invalid_input(format!(
+                    "failed to read AHI HSD file '{}': {err}",
+                    self.filename.display()
+                ))
+            })?;
+        self.counts_dataset_from_bytes(&bytes)
+    }
+
+    fn attach_common_attrs(&self, dataset: &mut Dataset) -> Result<()> {
         dataset.insert_attr("reader", "ahi_hsd")?;
         dataset.insert_attr("file_type", self.file_type.clone())?;
         dataset.insert_attr("filename", self.filename.to_string_lossy().to_string())?;
@@ -243,6 +339,9 @@ impl AhiHsdFileHandler {
         dataset.insert_attr("band_name", self.band_name())?;
         dataset.insert_attr("segment_number", i64::from(self.segment.segment_number))?;
         dataset.insert_attr("total_segments", i64::from(self.segment.total_segments))?;
+        if let Some(segment) = &self.header.segment {
+            dataset.insert_attr("first_line_number", i64::from(segment.first_line_number))?;
+        }
         dataset.insert_attr("columns", i64::from(self.header.data.columns))?;
         dataset.insert_attr("lines", i64::from(self.header.data.lines))?;
         dataset.insert_attr("bits_per_pixel", i64::from(self.header.data.bits_per_pixel))?;
@@ -250,7 +349,7 @@ impl AhiHsdFileHandler {
             "central_wavelength",
             MetadataValue::float(self.header.calibration.central_wavelength)?,
         )?;
-        Ok(dataset)
+        Ok(())
     }
 }
 
@@ -345,6 +444,10 @@ pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
         CALIBRATION_INFO_LEN,
         "calibration information",
     )?)?;
+    let segment = parse_optional_segment_info(
+        bytes,
+        calibration_offset + usize::from(calibration.block_length),
+    )?;
 
     Ok(AhiHsdHeader {
         basic,
@@ -352,6 +455,7 @@ pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
         projection,
         navigation,
         calibration,
+        segment,
     })
 }
 
@@ -454,6 +558,51 @@ impl AhiCalibrationInfo {
             offset_count_to_radiance: read_f64_le(bytes, 27, "calibration offset")?,
         })
     }
+}
+
+impl AhiSegmentBlockInfo {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            header_block_number: read_u8(bytes, 0, "segment hblock_number")?,
+            block_length: read_u16_le(bytes, 1, "segment blocklength")?,
+            total_segments: read_u8(bytes, 3, "segment total segments")?,
+            segment_sequence_number: read_u8(bytes, 4, "segment sequence number")?,
+            first_line_number: read_u16_le(bytes, 5, "segment first line number")?,
+        })
+    }
+}
+
+fn parse_optional_segment_info(
+    bytes: &[u8],
+    block6_offset: usize,
+) -> Result<Option<AhiSegmentBlockInfo>> {
+    let Some(block6_prefix_end) = block6_offset.checked_add(3) else {
+        return Ok(None);
+    };
+    let Some(block6_prefix) = bytes.get(block6_offset..block6_prefix_end) else {
+        return Ok(None);
+    };
+    let block6_length = usize::from(read_u16_le(
+        block6_prefix,
+        1,
+        "inter-calibration blocklength",
+    )?);
+    let Some(block7_offset) = block6_offset.checked_add(block6_length) else {
+        return Ok(None);
+    };
+    let Some(block7_prefix_end) = block7_offset.checked_add(3) else {
+        return Ok(None);
+    };
+    let Some(block7_prefix) = bytes.get(block7_offset..block7_prefix_end) else {
+        return Ok(None);
+    };
+    let block7_length = usize::from(read_u16_le(block7_prefix, 1, "segment blocklength")?);
+    Ok(Some(AhiSegmentBlockInfo::parse(take_block(
+        bytes,
+        block7_offset,
+        block7_length.max(7),
+        "segment information",
+    )?)?))
 }
 
 fn take_block<'a>(bytes: &'a [u8], offset: usize, min_len: usize, name: &str) -> Result<&'a [u8]> {
@@ -635,6 +784,57 @@ file_types:
         assert!(err.to_string().contains("segment"));
     }
 
+    #[test]
+    fn loads_raw_hsd_count_array_from_uncompressed_bytes() {
+        let bytes = synthetic_full_hsd_file();
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let dataset = handler.counts_dataset_from_bytes(&bytes).unwrap();
+        let array = dataset.array().unwrap();
+
+        assert_eq!(
+            handler.header().segment.as_ref().unwrap().total_segments,
+            10
+        );
+        assert_eq!(array.shape(), &[2, 3]);
+        assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
+        let rusty_sat_core::AnyDataArray::U16(array) = array else {
+            panic!("expected u16 raw count array");
+        };
+        assert_eq!(array.values(), &[1, 65535, 2, 65534, 3, 4]);
+        assert_eq!(array.is_masked(0), Some(false));
+        assert_eq!(array.is_masked(1), Some(true));
+        assert_eq!(array.is_masked(3), Some(true));
+        assert_eq!(
+            dataset.attr("first_line_number"),
+            Some(&MetadataValue::Integer(1))
+        );
+    }
+
+    #[test]
+    fn raw_hsd_count_loading_rejects_truncated_data_block() {
+        let bytes = synthetic_full_hsd_file();
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let err = handler
+            .counts_dataset_from_bytes(&bytes[..bytes.len() - 2])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("data block is truncated"));
+    }
+
     const AHI_HSD_STYLE_YAML: &str = r#"
 reader:
   name: ahi_hsd
@@ -719,6 +919,33 @@ datasets:
         write_f64(&mut bytes, cal + 19, 0.01);
         write_f64(&mut bytes, cal + 27, -1.0);
 
+        bytes
+    }
+
+    fn synthetic_full_hsd_file() -> Vec<u8> {
+        let mut bytes = synthetic_header();
+        write_u16(&mut bytes, BASIC_INFO_LEN + 5, 3);
+        write_u16(&mut bytes, BASIC_INFO_LEN + 7, 2);
+        write_u32(&mut bytes, 74, 12);
+
+        let mut block6 = vec![0; 259];
+        write_u8(&mut block6, 0, 6);
+        write_u16(&mut block6, 1, 259);
+        bytes.extend(block6);
+
+        let mut block7 = vec![0; 47];
+        write_u8(&mut block7, 0, 7);
+        write_u16(&mut block7, 1, 47);
+        write_u8(&mut block7, 3, 10);
+        write_u8(&mut block7, 4, 1);
+        write_u16(&mut block7, 5, 1);
+        bytes.extend(block7);
+
+        let total_header_length = bytes.len() as u32;
+        write_u32(&mut bytes, 70, total_header_length);
+        for value in [1_u16, 65535, 2, 65534, 3, 4] {
+            bytes.extend(value.to_le_bytes());
+        }
         bytes
     }
 
