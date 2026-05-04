@@ -5,9 +5,11 @@
 //! - `satpy/satpy/readers/ahi_hsd.py` defines the NumPy dtypes for HSD header
 //!   blocks 1-5 and reads them in sequence before dataset loading.
 //!
-//! This module is intentionally limited to fixed-size initial header parsing
-//! plus a file-handler inventory skeleton. It does not read image data,
-//! calibration update blocks, or segment arrays yet.
+//! This module is intentionally limited to fixed-size initial header parsing,
+//! uncompressed raw-count loading, and first-pass calibration. Satpy's display
+//! calibration path uses float32-like arithmetic for memory-efficient imagery;
+//! Rusty Sat also exposes f64 calibration helpers for future scientific/HDR
+//! output paths where precision preservation matters more than display memory.
 
 use crate::filename_pattern::PatternValue;
 use crate::yaml_reader::FileMatch;
@@ -25,6 +27,9 @@ const DATA_INFO_LEN: usize = 50;
 const PROJECTION_INFO_LEN: usize = 127;
 const NAVIGATION_INFO_LEN: usize = 139;
 const CALIBRATION_INFO_LEN: usize = 35;
+const BAND_CALIBRATION_EXTENSION_LEN: usize = 112;
+const VISIBLE_CALIBRATION_INFO_LEN: usize = CALIBRATION_INFO_LEN + BAND_CALIBRATION_EXTENSION_LEN;
+const INFRARED_CALIBRATION_INFO_LEN: usize = CALIBRATION_INFO_LEN + BAND_CALIBRATION_EXTENSION_LEN;
 const INITIAL_HEADER_PREFIX_LEN: u64 = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -331,6 +336,38 @@ impl AhiHsdFileHandler {
         Ok(dataset)
     }
 
+    pub fn calibrated_dataset_from_bytes_f64(
+        &self,
+        bytes: &[u8],
+        calibration: AhiCalibration,
+    ) -> Result<Dataset> {
+        if calibration == AhiCalibration::Counts {
+            return self.counts_dataset_from_bytes(bytes);
+        }
+        let values = self.raw_count_values_from_bytes(bytes)?;
+        let mask = ValidityMask::from_masked_flags(values.iter().map(|value| {
+            *value == self.header.calibration.error_pixel_count_value
+                || *value == self.header.calibration.outside_scan_pixel_count_value
+        }));
+        let calibrated_values = self.calibrate_counts_to_f64(&values, calibration)?;
+        let array = DataArray::<f64>::from_vec_named(
+            vec![
+                usize::from(self.header.data.lines),
+                usize::from(self.header.data.columns),
+            ],
+            ["y", "x"],
+            calibrated_values,
+        )?
+        .with_mask(mask)?;
+
+        let mut dataset = Dataset::new(self.dataset_id_for_calibration(calibration)?);
+        self.attach_common_attrs(&mut dataset)?;
+        dataset.insert_attr("calibration", calibration.name())?;
+        dataset.insert_attr("precision", "f64")?;
+        dataset.set_array(array);
+        Ok(dataset)
+    }
+
     pub fn calibrate_counts_to_f32(
         &self,
         counts: &[u16],
@@ -343,6 +380,22 @@ impl AhiHsdFileHandler {
             AhiCalibration::Reflectance => self.radiance_to_reflectance_f32(radiance),
             AhiCalibration::BrightnessTemperature => {
                 self.radiance_to_brightness_temperature_f32(radiance)
+            }
+        }
+    }
+
+    pub fn calibrate_counts_to_f64(
+        &self,
+        counts: &[u16],
+        calibration: AhiCalibration,
+    ) -> Result<Vec<f64>> {
+        let radiance = self.counts_to_radiance_f64(counts);
+        match calibration {
+            AhiCalibration::Counts => Ok(counts.iter().map(|value| f64::from(*value)).collect()),
+            AhiCalibration::Radiance => Ok(radiance),
+            AhiCalibration::Reflectance => self.radiance_to_reflectance_f64(radiance),
+            AhiCalibration::BrightnessTemperature => {
+                self.radiance_to_brightness_temperature_f64(radiance)
             }
         }
     }
@@ -386,25 +439,21 @@ impl AhiHsdFileHandler {
     }
 
     pub fn load_counts_dataset(&self) -> Result<Dataset> {
-        let mut bytes = Vec::new();
-        File::open(&self.filename)
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "failed to open AHI HSD file '{}': {err}",
-                    self.filename.display()
-                ))
-            })?
-            .read_to_end(&mut bytes)
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "failed to read AHI HSD file '{}': {err}",
-                    self.filename.display()
-                ))
-            })?;
+        let bytes = self.read_file_bytes()?;
         self.counts_dataset_from_bytes(&bytes)
     }
 
     pub fn load_calibrated_dataset(&self, calibration: AhiCalibration) -> Result<Dataset> {
+        let bytes = self.read_file_bytes()?;
+        self.calibrated_dataset_from_bytes(&bytes, calibration)
+    }
+
+    pub fn load_calibrated_dataset_f64(&self, calibration: AhiCalibration) -> Result<Dataset> {
+        let bytes = self.read_file_bytes()?;
+        self.calibrated_dataset_from_bytes_f64(&bytes, calibration)
+    }
+
+    fn read_file_bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         File::open(&self.filename)
             .map_err(|err| {
@@ -420,7 +469,7 @@ impl AhiHsdFileHandler {
                     self.filename.display()
                 ))
             })?;
-        self.calibrated_dataset_from_bytes(&bytes, calibration)
+        Ok(bytes)
     }
 
     pub fn dataset_id_for_calibration(&self, calibration: AhiCalibration) -> Result<DataId> {
@@ -442,15 +491,25 @@ impl AhiHsdFileHandler {
             .collect()
     }
 
+    fn counts_to_radiance_f64(&self, counts: &[u16]) -> Vec<f64> {
+        let gain = self.header.calibration.gain_count_to_radiance;
+        let offset = self.header.calibration.offset_count_to_radiance;
+        counts
+            .iter()
+            .map(|value| f64::from(*value) * gain + offset)
+            .collect()
+    }
+
     fn radiance_to_reflectance_f32(&self, radiance: Vec<f32>) -> Result<Vec<f32>> {
-        let AhiBandCalibration::Visible {
-            coeff_rad_to_albedo,
-            ..
-        } = self.required_visible_calibration()?
-        else {
-            unreachable!("required_visible_calibration only returns visible calibration");
-        };
-        let coeff = *coeff_rad_to_albedo as f32;
+        let coeff = self.required_visible_albedo_coeff()? as f32;
+        Ok(radiance
+            .into_iter()
+            .map(|value| (value * coeff * 100.0).max(0.0))
+            .collect())
+    }
+
+    fn radiance_to_reflectance_f64(&self, radiance: Vec<f64>) -> Result<Vec<f64>> {
+        let coeff = self.required_visible_albedo_coeff()?;
         Ok(radiance
             .into_iter()
             .map(|value| (value * coeff * 100.0).max(0.0))
@@ -458,18 +517,24 @@ impl AhiHsdFileHandler {
     }
 
     fn radiance_to_brightness_temperature_f32(&self, radiance: Vec<f32>) -> Result<Vec<f32>> {
-        let AhiBandCalibration::Infrared {
+        Ok(self
+            .radiance_to_brightness_temperature_f64(
+                radiance.into_iter().map(f64::from).collect::<Vec<_>>(),
+            )?
+            .into_iter()
+            .map(|value| value as f32)
+            .collect())
+    }
+
+    fn radiance_to_brightness_temperature_f64(&self, radiance: Vec<f64>) -> Result<Vec<f64>> {
+        let (
             c0_rad_to_tb,
             c1_rad_to_tb,
             c2_rad_to_tb,
             speed_of_light,
             planck_constant,
             boltzmann_constant,
-            ..
-        } = self.required_infrared_calibration()?
-        else {
-            unreachable!("required_infrared_calibration only returns infrared calibration");
-        };
+        ) = self.required_infrared_coefficients()?;
         let cwl = self.header.calibration.central_wavelength * 1.0e-6;
         let a = (planck_constant * speed_of_light) / (boltzmann_constant * cwl);
         let b_const = (2.0 * planck_constant * speed_of_light.powi(2)) / (1.0e6 * cwl.powi(5));
@@ -477,18 +542,21 @@ impl AhiHsdFileHandler {
             .into_iter()
             .map(|value| {
                 if value == 0.0 {
-                    return f32::NAN;
+                    return f64::NAN;
                 }
-                let b = b_const / f64::from(value) + 1.0;
+                let b = b_const / value + 1.0;
                 let te = a / b.ln();
-                (c0_rad_to_tb + c1_rad_to_tb * te + c2_rad_to_tb * te.powi(2)).max(0.0) as f32
+                (c0_rad_to_tb + c1_rad_to_tb * te + c2_rad_to_tb * te.powi(2)).max(0.0)
             })
             .collect())
     }
 
-    fn required_visible_calibration(&self) -> Result<&AhiBandCalibration> {
+    fn required_visible_albedo_coeff(&self) -> Result<f64> {
         match &self.header.calibration.band_calibration {
-            Some(calibration @ AhiBandCalibration::Visible { .. }) => Ok(calibration),
+            Some(AhiBandCalibration::Visible {
+                coeff_rad_to_albedo,
+                ..
+            }) => Ok(*coeff_rad_to_albedo),
             _ => Err(RustySatError::unsupported(format!(
                 "AHI HSD reflectance calibration for band {} without visible block-5 coefficients",
                 self.header.calibration.band_number
@@ -496,9 +564,24 @@ impl AhiHsdFileHandler {
         }
     }
 
-    fn required_infrared_calibration(&self) -> Result<&AhiBandCalibration> {
+    fn required_infrared_coefficients(&self) -> Result<(f64, f64, f64, f64, f64, f64)> {
         match &self.header.calibration.band_calibration {
-            Some(calibration @ AhiBandCalibration::Infrared { .. }) => Ok(calibration),
+            Some(AhiBandCalibration::Infrared {
+                c0_rad_to_tb,
+                c1_rad_to_tb,
+                c2_rad_to_tb,
+                speed_of_light,
+                planck_constant,
+                boltzmann_constant,
+                ..
+            }) => Ok((
+                *c0_rad_to_tb,
+                *c1_rad_to_tb,
+                *c2_rad_to_tb,
+                *speed_of_light,
+                *planck_constant,
+                *boltzmann_constant,
+            )),
             _ => Err(RustySatError::unsupported(format!(
                 "AHI HSD brightness-temperature calibration for band {} without infrared block-5 coefficients",
                 self.header.calibration.band_number
@@ -785,7 +868,12 @@ impl AhiCalibration {
 }
 
 fn parse_band_calibration(bytes: &[u8], band_number: u16) -> Result<Option<AhiBandCalibration>> {
-    if bytes.len() < CALIBRATION_INFO_LEN + 112 {
+    let expected_len = if band_number <= 6 {
+        VISIBLE_CALIBRATION_INFO_LEN
+    } else {
+        INFRARED_CALIBRATION_INFO_LEN
+    };
+    if bytes.len() < expected_len {
         return Ok(None);
     }
     if band_number <= 6 {
@@ -860,8 +948,11 @@ fn parse_optional_segment_info(
 }
 
 fn take_block<'a>(bytes: &'a [u8], offset: usize, min_len: usize, name: &str) -> Result<&'a [u8]> {
+    let end = offset.checked_add(min_len).ok_or_else(|| {
+        RustySatError::invalid_input(format!("AHI HSD {name} block range overflow"))
+    })?;
     bytes
-        .get(offset..offset + min_len)
+        .get(offset..end)
         .ok_or_else(|| RustySatError::invalid_input(format!("AHI HSD {name} block is truncated")))
 }
 
@@ -1171,6 +1262,34 @@ file_types:
     }
 
     #[test]
+    fn calibrates_hsd_counts_to_f64_when_precision_is_requested() {
+        let bytes = synthetic_full_hsd_file_with_visible_calibration();
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let reflectance = handler
+            .calibrated_dataset_from_bytes_f64(&bytes, AhiCalibration::Reflectance)
+            .unwrap();
+
+        assert_eq!(
+            reflectance
+                .attr("precision")
+                .and_then(MetadataValue::as_str),
+            Some("f64")
+        );
+        let rusty_sat_core::AnyDataArray::F64(reflectance) = reflectance.array().unwrap() else {
+            panic!("expected f64 reflectance array");
+        };
+        assert_eq!(reflectance.values()[2], 50.0);
+        assert_eq!(reflectance.is_masked(1), Some(true));
+    }
+
+    #[test]
     fn calibrates_infrared_hsd_counts_to_brightness_temperature() {
         let bytes = synthetic_full_hsd_file_with_infrared_calibration();
         let handler = AhiHsdFileHandler::from_header_bytes(
@@ -1428,6 +1547,11 @@ datasets:
 
     fn write_string(bytes: &mut [u8], offset: usize, len: usize, value: &str) {
         let raw = value.as_bytes();
-        bytes[offset..offset + raw.len().min(len)].copy_from_slice(&raw[..raw.len().min(len)]);
+        let count = raw.len().min(len);
+        let end = offset
+            .checked_add(count)
+            .expect("test string range overflow");
+        debug_assert!(end <= bytes.len());
+        bytes[offset..end].copy_from_slice(&raw[..count]);
     }
 }

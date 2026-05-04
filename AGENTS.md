@@ -401,9 +401,9 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
 | AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Production AHI HSD segment assembly, navigation arrays, bzip2-compressed file handling, and full Satpy YAML instantiation |
 | AHI HSD handler can load uncompressed local/synthetic block-12 raw counts into a `u16` `DataArray` and mask Satpy error/outside-scan count values | Streaming/chunked HSD reads; current raw-count path materializes the requested file/byte buffer |
-| AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance, reflectance, and brightness-temperature datasets following Satpy's first-pass formulas | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
+| AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
 | `AhiHsdReader` can expose a configured calibration, load a local uncompressed HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
-| Current calibrated HSD datasets use `f32` for Satpy-display parity and memory efficiency | Final scientific/HDR HSD paths must add `f64` calibrated output and writer-preserving float/16-bit policies |
+| Current reader inventory/load path still uses `f32` by default for memory-efficient display output | Final scientific/HDR HSD workflows need writer-preserving float/16-bit policies and public selection of the f64 calibrated path |
 
 ### rusty_sat_resample
 
