@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 mod chunked_array;
 mod data_array;
@@ -1007,6 +1008,10 @@ impl Dataset {
     }
 }
 
+pub trait DatasetWriter {
+    fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySource {
     UserProvided,
@@ -1365,6 +1370,19 @@ impl Scene {
         self.datasets.get(id)
     }
 
+    pub fn save_dataset(
+        &self,
+        id: &DataId,
+        writer: &impl DatasetWriter,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let dataset = self
+            .datasets
+            .get(id)
+            .ok_or_else(|| RustySatError::not_found(format!("dataset '{}' in Scene", id.name())))?;
+        writer.save_dataset(dataset, path.as_ref())
+    }
+
     pub fn remove_dataset(&mut self, id: &DataId) -> Option<Dataset> {
         self.wishlist.remove(id);
         self.dependency_graph.remove(id);
@@ -1470,6 +1488,8 @@ fn reader_for_dataset(id: &DataId, inventories: &[&ReaderInventory]) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn constructs_empty_scene() {
@@ -1517,6 +1537,26 @@ mod tests {
             &DependencySource::UserProvided
         );
         assert!(scene.dependency_graph().leaves().contains(&data_id));
+    }
+
+    #[test]
+    fn scene_saves_dataset_with_writer() {
+        let data_id = DataId::new("VIS006").unwrap();
+        let dataset = Dataset::new(data_id.clone());
+        let mut scene = Scene::new();
+        scene.insert_dataset(dataset);
+        let writer = RecordingWriter::default();
+        let path = PathBuf::from("out.png");
+
+        scene.save_dataset(&data_id, &writer, &path).unwrap();
+
+        assert_eq!(
+            writer.saved.borrow().as_ref(),
+            Some(&(data_id, path.clone()))
+        );
+        assert!(scene
+            .save_dataset(&DataId::new("missing").unwrap(), &writer, &path)
+            .is_err());
     }
 
     #[test]
@@ -2239,5 +2279,17 @@ mod tests {
             }
         }
         candidates
+    }
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        saved: RefCell<Option<(DataId, PathBuf)>>,
+    }
+
+    impl DatasetWriter for RecordingWriter {
+        fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
+            *self.saved.borrow_mut() = Some((dataset.id().clone(), path.to_path_buf()));
+            Ok(())
+        }
     }
 }

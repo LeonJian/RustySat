@@ -11,7 +11,7 @@ pub use pgm::{
 };
 pub use simple_image::{write_png16_image, write_png_image, SimpleImageWriter};
 
-use rusty_sat_core::{Dataset, Result, RustySatError};
+use rusty_sat_core::{Dataset, DatasetWriter, Result, RustySatError};
 use rusty_sat_image::Image;
 
 pub trait Writer {
@@ -29,6 +29,18 @@ pub trait Writer {
             "{} dataset writer",
             self.name()
         )))
+    }
+}
+
+impl DatasetWriter for PgmWriter {
+    fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
+        PgmWriter::save_dataset(self, dataset, path)
+    }
+}
+
+impl DatasetWriter for SimpleImageWriter {
+    fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
+        Writer::save_dataset(self, dataset, path)
     }
 }
 

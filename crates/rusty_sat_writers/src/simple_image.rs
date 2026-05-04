@@ -166,7 +166,7 @@ fn u16_pixels_to_png_bytes(pixels: &[u16]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::{DataArray, DataId};
+    use rusty_sat_core::{DataArray, DataId, Scene};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -252,10 +252,12 @@ mod tests {
     #[test]
     fn writes_16_bit_rgba_png_image() -> Result<()> {
         let path = temp_png_path("writes_16_bit_rgba_png_image");
-        let image = Image16::from_pixels(ImageMode::Rgba, 1, 2, vec![
-            65535, 0, 0, 65535,
-            0, 65535, 0, 32768,
-        ])?;
+        let image = Image16::from_pixels(
+            ImageMode::Rgba,
+            1,
+            2,
+            vec![65535, 0, 0, 65535, 0, 65535, 0, 32768],
+        )?;
 
         SimpleImageWriter::default().save_image16(&image, &path)?;
 
@@ -263,10 +265,7 @@ mod tests {
             .map_err(|err| RustySatError::invalid_input(err.to_string()))?
             .into_rgba16();
         assert_eq!(decoded.dimensions(), (2, 1));
-        assert_eq!(
-            decoded.as_raw(),
-            &[65535, 0, 0, 65535, 0, 65535, 0, 32768]
-        );
+        assert_eq!(decoded.as_raw(), &[65535, 0, 0, 65535, 0, 65535, 0, 32768]);
         fs::remove_file(path).ok();
         Ok(())
     }
@@ -284,6 +283,28 @@ mod tests {
             .map_err(|err| RustySatError::invalid_input(err.to_string()))?
             .into_luma8();
         assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &[0, 255]);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn scene_saves_dataset_as_luma_png() -> Result<()> {
+        let path = temp_png_path("scene_saves_dataset_as_luma_png");
+        let data_id = DataId::new("VIS006")?;
+        let dataset = Dataset::new(data_id.clone()).with_array(DataArray::<u8>::from_vec_named(
+            [1, 2],
+            ["y", "x"],
+            vec![0, 10],
+        )?);
+        let mut scene = Scene::new();
+        scene.insert_dataset(dataset);
+
+        scene.save_dataset(&data_id, &SimpleImageWriter::default(), &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_luma8();
         assert_eq!(decoded.as_raw(), &[0, 255]);
         fs::remove_file(path).ok();
         Ok(())

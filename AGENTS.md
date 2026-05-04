@@ -265,7 +265,9 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[ ]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
 - `[ ]` SC2: Scene spatial operations: finest/coarsest area, crop, aggregate, slice, copy, same-area/proj checks, and area iteration.
 - `[ ]` SC3: Scene resampling pipeline and integration with all resamplers.
-- `[@]` SC4: Scene save/show/to-xarray APIs.
+- `[~]` SC4: Scene save/show/to-xarray APIs.
+  - `[x]` SC4-m2e: Add `Scene::save_dataset` wrapper for self-made datasets through a Rust-native writer contract.
+  - `[ ]` SC4-next: Add `show`, `to_xarray`/export model, writer selection helpers, filename templating, and broader Satpy save API parity.
 - `[ ]` SC5: Composite/modifier Scene integration and dependency execution.
 - `[ ]` SC6: Multi-scene support and optional animation output.
 
@@ -285,7 +287,7 @@ Before starting or closing a milestone, check this table and update both the mil
 |-----------|---------------------------|----------------------|
 | M1 | Step0-10a early vertical slice | Done |
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
-| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Roadmap currently selected with `[@]`: SC4 |
+| M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
 | M3-reader | R0.1, R0.2, R0.8 partial, R1.1 ABI L1B partial, SC1 load path, W2 output path | Blocked until M2-image produces PNG output |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
@@ -296,14 +298,14 @@ Before starting or closing a milestone, check this table and update both the mil
 
 - `[x]` M1: Early vertical slice: text grid data can become a grayscale PGM image.
 - `[x]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
-- `[~]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
+- `[x]` M2-image: After P0 foundations, implement partial image model, crude stretch, RGB composite, PNG writer, and `Scene.save_dataset` so self-made data can produce color PNG.
   - `[x]` M2-image-a: Review Trollimage `XRImage`, Satpy `PillowWriter`, and `GenericCompositor`; add an owned u8 image buffer with mask-aware luma conversion from datasets. Roadmap: I1.
   - `[x]` M2-image-b: Add crude stretch foundations for float image data following Trollimage per-band min/max behavior. Roadmap: I1.
   - `[x]` M2-image-b2: Add `f64` image/enhancement buffer path or generic float buffer abstraction before relying on this image foundation for scientific corrections. Roadmap: I1-m2prec.
   - `[x]` M2-image-c: Add RGB compositor vertical slice for three matching single-band datasets. Roadmap: C0.
   - `[x]` M2-image-d: Add PNG writer using the Rust `image` crate, with format detection and luma/RGB/RGBA support. Roadmap: W2.
   - `[x]` M2-image-d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output. Roadmap: W2.
-  - `[ ]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
+  - `[x]` M2-image-e: Add `Scene.save_dataset` wrapper for self-made datasets and generated images. Roadmap: SC4.
 - `[ ]` M3-reader: NetCDF base plus ABI L1B reader and Scene load path sufficient for a GOES ABI sample to output a basic image.
 - `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
@@ -373,7 +375,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `DataId`/`DataQuery` matching, scoring, best-match, ambiguity detection, ordered modifier-chain prefix matching, less-modified query creation, and ancillary-variable dataset filtering | Composite/modifier execution from these queries |
 | `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs) and borrowed/consuming array access | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
 | `Dataset` typed ancillary variable links by `DataId`, with find/replace helpers modeled after Satpy `anc_vars.py` | Embedding full ancillary arrays inside attrs; only typed links are stored |
-| `Scene` insert/remove datasets, plan reader loads, register composites/modifiers | Actual composite/modifier execution, resampling delegation, save/show |
+| `Scene` insert/remove datasets, plan reader loads, register composites/modifiers, and save a dataset through the `DatasetWriter` contract | Actual composite/modifier execution, resampling delegation, show/to-xarray |
 
 ### rusty_sat_config
 
@@ -420,7 +422,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Can | Cannot |
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
-| `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers, write u16 PNG from finalized `Image16` buffers, and save 2D datasets through current luma finalization | PNG metadata parity, alpha/fill polish beyond existing image buffers |
+| `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers, write u16 PNG from finalized `Image16` buffers, save 2D datasets through current luma finalization, and work through `Scene::save_dataset` | PNG metadata parity, alpha/fill polish beyond existing image buffers |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
 ### rusty_sat_cli
