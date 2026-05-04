@@ -3,11 +3,13 @@
 use std::path::Path;
 
 pub mod pgm;
+pub mod simple_image;
 
 pub use pgm::{
     encode_pgm, encode_pgm_array, encode_pgm_from_f64, write_pgm, write_pgm_array, LinearScale,
     PgmWriter,
 };
+pub use simple_image::{write_png_image, SimpleImageWriter};
 
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use rusty_sat_image::Image;
