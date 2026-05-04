@@ -250,6 +250,28 @@ mod tests {
     }
 
     #[test]
+    fn writes_16_bit_rgba_png_image() -> Result<()> {
+        let path = temp_png_path("writes_16_bit_rgba_png_image");
+        let image = Image16::from_pixels(ImageMode::Rgba, 1, 2, vec![
+            65535, 0, 0, 65535,
+            0, 65535, 0, 32768,
+        ])?;
+
+        SimpleImageWriter::default().save_image16(&image, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_rgba16();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(
+            decoded.as_raw(),
+            &[65535, 0, 0, 65535, 0, 65535, 0, 32768]
+        );
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
     fn saves_dataset_as_luma_png() -> Result<()> {
         let path = temp_png_path("saves_dataset_as_luma_png");
         let dataset = Dataset::new(DataId::new("VIS006")?).with_array(
