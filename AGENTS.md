@@ -51,6 +51,9 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 ## Git Rules
 
 - The repository root should be a Git repository for Rusty Sat work.
+- Start each new roadmap item or lettered substep on a fresh branch, using the `codex/` prefix unless the user requests a different branch name.
+- Do not merge a completed roadmap branch immediately. First start the next roadmap item on its own new branch, then merge the previously completed branch. This keeps every roadmap slice reviewable while preserving forward progress.
+- Before starting a new roadmap branch, confirm the previous branch is committed and the current roadmap status in this file is updated.
 - Commit every completed roadmap step or substep.
 - Keep commits small and named after the completed step, for example `step 3a data query matching`.
 - Do not commit generated build artifacts, `.DS_Store`, or `target/`.
@@ -434,3 +437,6 @@ Early tests should focus on construction and API shape. Later tests should compa
 - `encode_pgm_values` in PGM writer collects its `impl IntoIterator<Item = f64>` argument into an intermediate `Vec<f64>` before autoscaling and encoding. Callers that already have a `Vec<f64>` (e.g. `encode_pgm_array` non-f64 path via `values_as_f64()`) pay a second allocation of the same data. Accept `Vec<f64>` directly to let callers materialize once.
 - `dataset_metadata_pairs` and `dataset_attr_pairs` in nearest resampling clone every metadata key/value and attrs key/value into intermediate `Vec`s before re-inserting them into the resampled dataset. Iterate the source maps directly and clone individual entries inline.
 - Swath nearest resampling has no `owned` or `lazy` variant (unlike area resampling, which has both). Large-swath workflows (VIIRS ~3200×6400) would benefit from both: owned to free source memory incrementally, lazy to avoid materializing the full swath at once. Add when the first real swath reader lands (M4-resample).
+- `Image::from_luma_dataset` / `from_luma_array` forces a `FloatImage<f32>` intermediate allocation for every source dtype, including u8 and u16. For a 4K×4K u8 source (16 MB) this wastes 64 MB on the intermediate `Vec<f32>`, and the float round-trip (u8→f32→u8) adds CPU overhead. Add a direct integer→u8 fast path or a dtype-aware finalization path in W2-m2d2 (16-bit) or the image-enhancement milestone.
+- `write_png_image` accepts only `&Image` and copies pixel data into the PNG encoder's internal buffers via `save_buffer_with_format`. A consuming `write_png_image_owned(image: Image, …)` that hands `image.into_pixels()` directly to the PNG encoder would avoid the internal copy when the caller no longer needs the `Image`. Add alongside the 16-bit writer interface in W2-m2d2.
+- PNG compression level is not exposed to callers — `save_buffer_with_format` uses the `image`/`png` crate defaults. Expose a compression preset (Fast/Default/Best) on `SimpleImageWriter` when PNG metadata parity is addressed in W2-next.
