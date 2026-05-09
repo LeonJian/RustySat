@@ -345,7 +345,9 @@ pub fn sample_nearest_from_neighbour_info(
             mask_flags.push(missing_policy.masks_missing());
             continue;
         };
-        let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
+        let source_masked = source_grid
+            .is_masked(source_index)
+            .expect("source_index is validated against source_size");
         values.push(source_grid.values()[source_index]);
         mask_flags.push(source_masked);
     }
