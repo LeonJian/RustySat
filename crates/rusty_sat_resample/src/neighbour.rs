@@ -262,7 +262,10 @@ pub fn get_area_neighbour_info(
     let valid_output_index = vec![true; target_size];
     let mut index_array = Vec::with_capacity(target_size);
     let mut distance_array = Vec::with_capacity(target_size);
-    let missing_index = source_size;
+    // Sentinel must equal valid_input_count() so that
+    // NeighbourInfo::missing_neighbour_index() stays consistent
+    // when valid_input_index is later narrowed by masking.
+    let missing_index = valid_input_index.iter().filter(|v| **v).count();
 
     for (target_x, target_y) in target.iter_projection_coords() {
         let Some((source_index, distance)) = nearest_area_pixel(source, target_x, target_y) else {
