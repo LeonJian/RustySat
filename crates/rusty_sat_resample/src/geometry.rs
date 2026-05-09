@@ -52,10 +52,6 @@ impl CoordinateDefinition {
         Ok(Self { shape, lons, lats })
     }
 
-    pub fn shape_vec(&self) -> Vec<usize> {
-        self.shape.clone()
-    }
-
     pub fn lons(&self) -> &[f64] {
         &self.lons
     }
@@ -214,6 +210,14 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("does not match shape"));
+    }
+
+    #[test]
+    fn coordinate_definition_rejects_non_finite_coordinates() {
+        let err =
+            CoordinateDefinition::from_lonlats(vec![1], vec![f64::NAN], vec![35.0]).unwrap_err();
+
+        assert!(err.to_string().contains("coordinates must be finite"));
     }
 
     #[test]

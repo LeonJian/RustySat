@@ -221,6 +221,14 @@ impl GeometryDefinition for AreaDefinition {
     fn shape(&self) -> Vec<usize> {
         vec![self.height, self.width]
     }
+
+    fn ndim(&self) -> usize {
+        2
+    }
+
+    fn size(&self) -> usize {
+        self.height * self.width
+    }
 }
 
 fn shape_from_extent_and_resolution(

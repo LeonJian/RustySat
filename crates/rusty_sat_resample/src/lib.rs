@@ -41,11 +41,16 @@ mod tests {
         assert_eq!(area.shape(), (10, 20));
         assert_eq!(GeometryDefinition::kind(&area), GeometryKind::Area);
         assert_eq!(GeometryDefinition::shape(&area), vec![10, 20]);
+        assert_eq!(GeometryDefinition::ndim(&area), 2);
         assert_eq!(GeometryDefinition::size(&area), 200);
+        assert!(!GeometryDefinition::is_empty(&area));
 
         let swath = SwathDefinition::new(5, 6).unwrap();
         assert_eq!(swath.shape(), (5, 6));
         assert_eq!(GeometryDefinition::kind(&swath), GeometryKind::Swath);
         assert_eq!(GeometryDefinition::shape(&swath), vec![5, 6]);
+        assert_eq!(GeometryDefinition::ndim(&swath), 2);
+        assert_eq!(GeometryDefinition::size(&swath), 30);
+        assert!(!GeometryDefinition::is_empty(&swath));
     }
 }

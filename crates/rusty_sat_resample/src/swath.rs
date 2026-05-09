@@ -130,6 +130,14 @@ impl GeometryDefinition for SwathDefinition {
     fn shape(&self) -> Vec<usize> {
         vec![self.height, self.width]
     }
+
+    fn ndim(&self) -> usize {
+        2
+    }
+
+    fn size(&self) -> usize {
+        self.height * self.width
+    }
 }
 
 pub fn load_swath_from_str(yaml: &str, swath_id: &str) -> Result<SwathDefinition> {
@@ -305,6 +313,15 @@ fn validate_coordinates(height: usize, width: usize, lons: &[f64], lats: &[f64])
             width
         )));
     }
+    if lons
+        .iter()
+        .chain(lats.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err(RustySatError::invalid_input(
+            "swath coordinates must be finite",
+        ));
+    }
     Ok(())
 }
 
@@ -407,6 +424,13 @@ mod tests {
         let err = SwathDefinition::from_lonlats(2, 2, vec![1.0, 2.0], vec![1.0]).unwrap_err();
 
         assert!(matches!(err, RustySatError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn rejects_non_finite_coordinates() {
+        let err = SwathDefinition::from_lonlats(1, 1, vec![f64::INFINITY], vec![0.0]).unwrap_err();
+
+        assert!(err.to_string().contains("coordinates must be finite"));
     }
 
     #[test]
