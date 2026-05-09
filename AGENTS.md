@@ -203,7 +203,9 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` S1-m4a: Add shared geometry definition foundations (`GeometryDefinition`, `CoordinateDefinition`, and `GridDefinition`) after inspecting Pyresample `geometry.py`.
   - `[x]` S1-m4b: Add projection-definition/area helpers (`ProjectionDefinition`, pixel size, upper-left pixel center, pixel offsets, and projection-coordinate iterators) needed by KD-tree setup.
   - `[ ]` S1-next: Add stacked/dynamic areas and geocentric/spherical geometry pieces needed by KD-tree resampling.
-- `[@]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
+- `[~]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
+  - `[x]` S2-m4c: Add Pyresample-style neighbour-info data model and projection-coordinate area-to-area nearest neighbour query foundation.
+  - `[ ]` S2-next: Add real KD-tree backend, neighbour sampling helpers, great-circle/geocentric distances, and chunked parallel processing.
 - `[ ]` S3: Bilinear, cubic, and spline interpolation.
 - `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
 - `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
@@ -319,7 +321,7 @@ Before starting or closing a milestone, check this table and update both the mil
 - `[~]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
   - `[x]` M4-resample-a: Add Pyresample-style shared geometry definition foundations. Roadmap: S1.
   - `[x]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
-  - `[ ]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
+  - `[x]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
   - `[ ]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
   - `[ ]` M4-resample-e: Add `Scene::resample` integration for current nearest/KD-tree path. Roadmap: SC3.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
@@ -432,6 +434,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
+| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, and area-to-area nearest neighbour query foundation | Real KD-tree backend, multi-neighbour queries, swath neighbour info, geocentric/great-circle distances |
 | `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
 
 ### rusty_sat_composites
