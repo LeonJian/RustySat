@@ -4,6 +4,7 @@
 //! - `deps/pyresample/pyresample/geometry.py`
 //! - `deps/pyresample/docs/source/concepts/geometries.rst`
 
+use crate::geometry::{GeometryDefinition, GeometryKind};
 use crate::ProjCrs;
 use rusty_sat_core::{Coordinate, DataArray, NumericElement, Result, RustySatError};
 use serde_norway::{Mapping, Value};
@@ -118,6 +119,16 @@ impl SwathDefinition {
         array.set_coordinate("longitude", self.longitude_coordinate()?)?;
         array.set_coordinate("latitude", self.latitude_coordinate()?)?;
         Ok(array)
+    }
+}
+
+impl GeometryDefinition for SwathDefinition {
+    fn kind(&self) -> GeometryKind {
+        GeometryKind::Swath
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        vec![self.height, self.width]
     }
 }
 

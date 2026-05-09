@@ -191,7 +191,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[ ]` R0.7: Instrument/product base modules for EUMETSAT, VII/VIIRS, SEVIRI, ABI, FCI, FY-4, LI, Landsat, HRIT JMA, and VIIRS/ATMS SDR.
   - `[ ]` R0.8: YAML reader completion: safe Python-tag representation, FileHandler instantiation, composite IDs, groups/bound groups, and delayed loading.
   - `[ ]` R0.9: Filename matching and grouping: `group_files`, multi-time grouping, and advanced matching.
-- `[ ]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
+- `[@]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
 - `[ ]` R2: LEO L1B readers, including VIIRS, MODIS, AVHRR, EPS, AAPP, OLCI, SLSTR, FY-3, ATMS, MetOp-SG, EarthCARE, PACE, MAIA, SCMI, and Satpy CF re-read.
 - `[ ]` R3: L2 product readers, including VIIRS L2/EDR, CLAVR-x, CMSAF, MIRS, NUCAPS, ACSPO, AMSR2, CALIOP, NWC SAF, IASI, TROPOMI, SeaDAS, Sentinel SAFE/SAR/MSI, GeoCAT, MERIS, OLCI, and SLSTR.
 - `[ ]` R4: Microwave, radio, lightning, and auxiliary readers.
@@ -199,8 +199,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ### S: Resampling
 
-- `[ ]` S1: Pyresample core geometry completion: `BaseDefinition`, coordinate/grid/projection definitions, full `AreaDefinition`, stacked/dynamic areas, full `SwathDefinition`, spherical coordinates, polygons/arcs, overlap utilities, grid filters, and spherical area math.
-- `[ ]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
+- `[~]` S1: Pyresample core geometry completion: `BaseDefinition`, coordinate/grid/projection definitions, full `AreaDefinition`, stacked/dynamic areas, full `SwathDefinition`, spherical coordinates, polygons/arcs, overlap utilities, grid filters, and spherical area math.
+  - `[x]` S1-m4a: Add shared geometry definition foundations (`GeometryDefinition`, `CoordinateDefinition`, and `GridDefinition`) after inspecting Pyresample `geometry.py`.
+  - `[ ]` S1-next: Add projection-definition/area completeness, stacked/dynamic areas, and geocentric/spherical geometry pieces needed by KD-tree resampling.
+- `[@]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
 - `[ ]` S3: Bilinear, cubic, and spline interpolation.
 - `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
 - `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
@@ -265,7 +267,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 - `[ ]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
 - `[ ]` SC2: Scene spatial operations: finest/coarsest area, crop, aggregate, slice, copy, same-area/proj checks, and area iteration.
-- `[ ]` SC3: Scene resampling pipeline and integration with all resamplers.
+- `[@]` SC3: Scene resampling pipeline and integration with all resamplers.
 - `[~]` SC4: Scene save/show/to-xarray APIs.
   - `[x]` SC4-m2e: Add `Scene::save_dataset` wrapper for self-made datasets through a Rust-native writer contract.
   - `[ ]` SC4-next: Add `show`, `to_xarray`/export model, writer selection helpers, filename templating, and broader Satpy save API parity.
@@ -290,7 +292,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed AHI HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
-| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Needs real CRS transform/KD-tree foundations beyond current nearest metadata-only path |
+| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Started with S1 geometry foundations; still needs KD-tree, NetCDF/FCI-or-equivalent reader slice, and Scene resampling API |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
@@ -313,7 +315,12 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M3-reader-c: Load raw AHI count arrays for a tiny local/synthetic HSD fixture, preserving dtype and metadata.
   - `[x]` M3-reader-d: Apply first visible/IR calibration path needed for basic image output.
   - `[x]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
-- `[ ]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
+- `[~]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
+  - `[x]` M4-resample-a: Add Pyresample-style shared geometry definition foundations. Roadmap: S1.
+  - `[ ]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
+  - `[ ]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
+  - `[ ]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
+  - `[ ]` M4-resample-e: Add `Scene::resample` integration for current nearest/KD-tree path. Roadmap: SC3.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
@@ -419,8 +426,9 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation | Stacked/dynamic areas, spherical polygon math, overlap utilities |
-| `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading | Real geocentric resolution, aggregation, boundary extraction |
+| Shared Pyresample-style geometry foundations: `GeometryDefinition`, `CoordinateDefinition`, and `GridDefinition` for shape/size/dimensionality and finite lon/lat-backed coordinate arrays | Full Pyresample equality/hash/cartesian-coordinate behavior |
+| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation, and shared geometry trait implementation | Stacked/dynamic areas, spherical polygon math, overlap utilities |
+| `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
 | `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |

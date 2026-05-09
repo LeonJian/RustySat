@@ -5,6 +5,7 @@
 //! - `deps/pyresample/docs/source/concepts/geometries.rst`
 //! - `satpy/utils/coord2area_def.py`
 
+use crate::geometry::{GeometryDefinition, GeometryKind};
 use crate::ProjCrs;
 use rusty_sat_core::{Result, RustySatError};
 use serde_norway::{Mapping, Value};
@@ -209,6 +210,16 @@ impl AreaDefinition {
         (0..self.height)
             .map(|y| self.area_extent[3] - (y as f64 + 0.5) * pixel_size_y)
             .collect()
+    }
+}
+
+impl GeometryDefinition for AreaDefinition {
+    fn kind(&self) -> GeometryKind {
+        GeometryKind::Area
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        vec![self.height, self.width]
     }
 }
 
