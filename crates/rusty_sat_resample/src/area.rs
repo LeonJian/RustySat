@@ -5,7 +5,7 @@
 //! - `deps/pyresample/docs/source/concepts/geometries.rst`
 //! - `satpy/utils/coord2area_def.py`
 
-use crate::geometry::{GeometryDefinition, GeometryKind};
+use crate::geometry::{GeometryDefinition, GeometryKind, ProjectionDefinition};
 use crate::ProjCrs;
 use rusty_sat_core::{Result, RustySatError};
 use serde_norway::{Mapping, Value};
@@ -187,6 +187,14 @@ impl AreaDefinition {
         (self.height, self.width)
     }
 
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
     pub fn area_extent(&self) -> [f64; 4] {
         self.area_extent
     }
@@ -198,18 +206,67 @@ impl AreaDefinition {
         )
     }
 
+    pub fn pixel_size_x(&self) -> f64 {
+        self.pixel_size().0
+    }
+
+    pub fn pixel_size_y(&self) -> f64 {
+        self.pixel_size().1
+    }
+
+    pub fn upper_left_extent(&self) -> (f64, f64) {
+        ProjectionDefinition::upper_left_extent(self)
+    }
+
+    pub fn pixel_upper_left(&self) -> (f64, f64) {
+        ProjectionDefinition::pixel_upper_left(self)
+    }
+
+    pub fn pixel_offset(&self) -> (f64, f64) {
+        ProjectionDefinition::pixel_offset(self)
+    }
+
+    pub fn projection_x_coord(&self, x: usize) -> Result<f64> {
+        if x >= self.width {
+            return Err(RustySatError::invalid_input(format!(
+                "x index {x} is outside area width {}",
+                self.width
+            )));
+        }
+        Ok(self.area_extent[0] + (x as f64 + 0.5) * self.pixel_size_x())
+    }
+
+    pub fn projection_y_coord(&self, y: usize) -> Result<f64> {
+        if y >= self.height {
+            return Err(RustySatError::invalid_input(format!(
+                "y index {y} is outside area height {}",
+                self.height
+            )));
+        }
+        Ok(self.area_extent[3] - (y as f64 + 0.5) * self.pixel_size_y())
+    }
+
+    pub fn iter_projection_x_coords(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        let pixel_size_x = self.pixel_size_x();
+        (0..self.width).map(move |x| self.area_extent[0] + (x as f64 + 0.5) * pixel_size_x)
+    }
+
+    pub fn iter_projection_y_coords(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        let pixel_size_y = self.pixel_size_y();
+        (0..self.height).map(move |y| self.area_extent[3] - (y as f64 + 0.5) * pixel_size_y)
+    }
+
+    pub fn iter_projection_coords(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.iter_projection_y_coords()
+            .flat_map(move |y| self.iter_projection_x_coords().map(move |x| (x, y)))
+    }
+
     pub fn projection_x_coords(&self) -> Vec<f64> {
-        let (pixel_size_x, _) = self.pixel_size();
-        (0..self.width)
-            .map(|x| self.area_extent[0] + (x as f64 + 0.5) * pixel_size_x)
-            .collect()
+        self.iter_projection_x_coords().collect()
     }
 
     pub fn projection_y_coords(&self) -> Vec<f64> {
-        let (_, pixel_size_y) = self.pixel_size();
-        (0..self.height)
-            .map(|y| self.area_extent[3] - (y as f64 + 0.5) * pixel_size_y)
-            .collect()
+        self.iter_projection_y_coords().collect()
     }
 }
 
@@ -228,6 +285,27 @@ impl GeometryDefinition for AreaDefinition {
 
     fn size(&self) -> usize {
         self.height * self.width
+    }
+}
+
+impl ProjectionDefinition for AreaDefinition {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn area_extent(&self) -> [f64; 4] {
+        self.area_extent
+    }
+
+    fn pixel_size(&self) -> (f64, f64) {
+        (
+            (self.area_extent[2] - self.area_extent[0]) / self.width as f64,
+            (self.area_extent[3] - self.area_extent[1]) / self.height as f64,
+        )
     }
 }
 
@@ -583,6 +661,45 @@ mod tests {
         assert_eq!(area.crs().unwrap().projection_name(), Some("stere"));
         assert_eq!(area.projection_x_coords()[..3], [-95.0, -85.0, -75.0]);
         assert_eq!(area.projection_y_coords()[..3], [45.0, 35.0, 25.0]);
+    }
+
+    #[test]
+    fn exposes_pyresample_style_projection_geometry_helpers() {
+        let area = AreaDefinition::from_parts(
+            "test_area",
+            "Test Area",
+            "test_proj",
+            BTreeMap::from([("proj".to_string(), "stere".to_string())]),
+            10,
+            20,
+            [-100.0, -50.0, 100.0, 50.0],
+        )
+        .unwrap();
+
+        assert_eq!(area.width(), 20);
+        assert_eq!(area.height(), 10);
+        assert_eq!(area.pixel_size_x(), 10.0);
+        assert_eq!(area.pixel_size_y(), 10.0);
+        assert_eq!(area.upper_left_extent(), (-100.0, 50.0));
+        assert_eq!(area.pixel_upper_left(), (-95.0, 45.0));
+        assert_eq!(area.pixel_offset(), (10.0, 5.0));
+        assert_eq!(area.projection_x_coord(2).unwrap(), -75.0);
+        assert_eq!(area.projection_y_coord(1).unwrap(), 35.0);
+        assert!(area.projection_x_coord(20).is_err());
+        assert!(area.projection_y_coord(10).is_err());
+
+        let x_coords: Vec<_> = area.iter_projection_x_coords().take(3).collect();
+        let y_coords: Vec<_> = area.iter_projection_y_coords().take(3).collect();
+        let xy_coords: Vec<_> = area.iter_projection_coords().take(4).collect();
+        assert_eq!(x_coords, vec![-95.0, -85.0, -75.0]);
+        assert_eq!(y_coords, vec![45.0, 35.0, 25.0]);
+        assert_eq!(
+            xy_coords,
+            vec![(-95.0, 45.0), (-85.0, 45.0), (-75.0, 45.0), (-65.0, 45.0)]
+        );
+        assert_eq!(ProjectionDefinition::width(&area), 20);
+        assert_eq!(ProjectionDefinition::height(&area), 10);
+        assert_eq!(ProjectionDefinition::pixel_upper_left(&area), (-95.0, 45.0));
     }
 
     #[test]

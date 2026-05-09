@@ -33,6 +33,36 @@ pub trait GeometryDefinition {
     }
 }
 
+pub trait ProjectionDefinition: GeometryDefinition {
+    fn width(&self) -> usize;
+
+    fn height(&self) -> usize;
+
+    fn area_extent(&self) -> [f64; 4];
+
+    fn pixel_size(&self) -> (f64, f64);
+
+    fn upper_left_extent(&self) -> (f64, f64) {
+        let extent = self.area_extent();
+        (extent[0], extent[3])
+    }
+
+    fn pixel_upper_left(&self) -> (f64, f64) {
+        let (pixel_size_x, pixel_size_y) = self.pixel_size();
+        let (upper_left_x, upper_left_y) = self.upper_left_extent();
+        (
+            upper_left_x + pixel_size_x / 2.0,
+            upper_left_y - pixel_size_y / 2.0,
+        )
+    }
+
+    fn pixel_offset(&self) -> (f64, f64) {
+        let (pixel_size_x, pixel_size_y) = self.pixel_size();
+        let extent = self.area_extent();
+        (-extent[0] / pixel_size_x, extent[3] / pixel_size_y)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoordinateDefinition {
     shape: Vec<usize>,

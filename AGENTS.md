@@ -201,7 +201,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 - `[~]` S1: Pyresample core geometry completion: `BaseDefinition`, coordinate/grid/projection definitions, full `AreaDefinition`, stacked/dynamic areas, full `SwathDefinition`, spherical coordinates, polygons/arcs, overlap utilities, grid filters, and spherical area math.
   - `[x]` S1-m4a: Add shared geometry definition foundations (`GeometryDefinition`, `CoordinateDefinition`, and `GridDefinition`) after inspecting Pyresample `geometry.py`.
-  - `[ ]` S1-next: Add projection-definition/area completeness, stacked/dynamic areas, and geocentric/spherical geometry pieces needed by KD-tree resampling.
+  - `[x]` S1-m4b: Add projection-definition/area helpers (`ProjectionDefinition`, pixel size, upper-left pixel center, pixel offsets, and projection-coordinate iterators) needed by KD-tree setup.
+  - `[ ]` S1-next: Add stacked/dynamic areas and geocentric/spherical geometry pieces needed by KD-tree resampling.
 - `[@]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
 - `[ ]` S3: Bilinear, cubic, and spline interpolation.
 - `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
@@ -317,7 +318,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
 - `[~]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
   - `[x]` M4-resample-a: Add Pyresample-style shared geometry definition foundations. Roadmap: S1.
-  - `[ ]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
+  - `[x]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
   - `[ ]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
   - `[ ]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
   - `[ ]` M4-resample-e: Add `Scene::resample` integration for current nearest/KD-tree path. Roadmap: SC3.
@@ -427,7 +428,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Can | Cannot |
 |-----|--------|
 | Shared Pyresample-style geometry foundations: `GeometryDefinition`, `CoordinateDefinition`, and `GridDefinition` for shape/size/dimensionality and finite lon/lat-backed coordinate arrays | Full Pyresample equality/hash/cartesian-coordinate behavior |
-| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation, and shared geometry trait implementation | Stacked/dynamic areas, spherical polygon math, overlap utilities |
+| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation, shared geometry/projection trait implementations, and allocation-free projection-coordinate iterators | Stacked/dynamic areas, spherical polygon math, overlap utilities |
 | `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
@@ -469,7 +470,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 - `encode_pgm_values` in PGM writer collects its `impl IntoIterator<Item = f64>` argument into an intermediate `Vec<f64>` before autoscaling and encoding. Callers that already have a `Vec<f64>` (e.g. `encode_pgm_array` non-f64 path via `values_as_f64()`) pay a second allocation of the same data. Accept `Vec<f64>` directly to let callers materialize once.
 - `dataset_metadata_pairs` and `dataset_attr_pairs` in nearest resampling clone every metadata key/value and attrs key/value into intermediate `Vec`s before re-inserting them into the resampled dataset. Iterate the source maps directly and clone individual entries inline.
 - Swath nearest resampling has no `owned` or `lazy` variant (unlike area resampling, which has both). Large-swath workflows (VIIRS ~3200×6400) would benefit from both: owned to free source memory incrementally, lazy to avoid materializing the full swath at once. Add when the first real swath reader lands (M4-resample).
-- `AreaDefinition::projection_x_coords()` / `projection_y_coords()` allocate `Vec<f64>` axes every call. This is acceptable for current coordinate attachment, but S1/S7 should add iterator or cached-axis paths for repeated large-area operations.
+- `AreaDefinition::projection_x_coords()` / `projection_y_coords()` still allocate `Vec<f64>` axes for compatibility. Prefer `iter_projection_x_coords()` / `iter_projection_y_coords()` / `iter_projection_coords()` in KD-tree and repeated large-area operations.
 - `GeometryDefinition::shape()` returns an owned `Vec<usize>` so `AreaDefinition` and `SwathDefinition` allocate when callers ask for trait-erased shapes. Their `ndim()` and `size()` implementations avoid this allocation; avoid calling `shape()` in KD-tree hot loops unless the trait is redesigned around borrowed/small-array shapes.
 - `SwathDefinition::longitude_coordinate()` / `latitude_coordinate()` clone full lon/lat arrays because `Coordinate` currently owns vectors. Add borrowed or shared coordinate storage before large production swath workflows.
 - `ValidityMask::masked_count()` scans the packed mask each call. Cache masked counts if profiling shows repeated calls on large arrays.

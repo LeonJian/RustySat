@@ -10,7 +10,9 @@ pub use area::{
     load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition, PixelResolution,
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
-pub use geometry::{CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition};
+pub use geometry::{
+    CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
+};
 pub use nearest::{
     resample_area_nearest, resample_area_nearest_lazy, resample_area_nearest_owned,
     resample_swath_nearest, NearestAreaResampler,
