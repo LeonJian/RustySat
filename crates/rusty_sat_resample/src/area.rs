@@ -256,9 +256,19 @@ impl AreaDefinition {
         (0..self.height).map(move |y| self.area_extent[3] - (y as f64 + 0.5) * pixel_size_y)
     }
 
-    pub fn iter_projection_coords(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
-        self.iter_projection_y_coords()
-            .flat_map(move |y| self.iter_projection_x_coords().map(move |x| (x, y)))
+    pub fn iter_projection_coords(&self) -> impl Iterator<Item = (f64, f64)> {
+        let width = self.width;
+        let height = self.height;
+        let extent = self.area_extent;
+        let pixel_size_x = self.pixel_size_x();
+        let pixel_size_y = self.pixel_size_y();
+        (0..height).flat_map(move |y| {
+            let y_coord = extent[3] - (y as f64 + 0.5) * pixel_size_y;
+            (0..width).map(move |x| {
+                let x_coord = extent[0] + (x as f64 + 0.5) * pixel_size_x;
+                (x_coord, y_coord)
+            })
+        })
     }
 
     pub fn projection_x_coords(&self) -> Vec<f64> {
@@ -700,6 +710,28 @@ mod tests {
         assert_eq!(ProjectionDefinition::width(&area), 20);
         assert_eq!(ProjectionDefinition::height(&area), 10);
         assert_eq!(ProjectionDefinition::pixel_upper_left(&area), (-95.0, 45.0));
+    }
+
+    #[test]
+    fn projection_coordinate_iterator_does_not_borrow_area() {
+        let area = AreaDefinition::from_parts(
+            "test_area",
+            "Test Area",
+            "test_proj",
+            BTreeMap::from([("proj".to_string(), "stere".to_string())]),
+            1,
+            2,
+            [-100.0, -50.0, 100.0, 50.0],
+        )
+        .unwrap();
+
+        let mut coords = area.iter_projection_coords();
+        let area_id = area.id();
+
+        assert_eq!(area_id, "test_area");
+        assert_eq!(coords.next(), Some((-50.0, 0.0)));
+        assert_eq!(coords.next(), Some((50.0, 0.0)));
+        assert_eq!(coords.next(), None);
     }
 
     #[test]
