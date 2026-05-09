@@ -7,10 +7,13 @@
 
 use crate::ProjCrs;
 use rusty_sat_core::{Result, RustySatError};
-use serde_yaml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+
+const MAX_AREA_YAML_BYTES: usize = 8 * 1024 * 1024;
+const MAX_AREA_YAML_DEPTH: usize = 96;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AreaDefinition {
@@ -252,8 +255,7 @@ pub fn load_area_from_str(yaml: &str, area_id: &str) -> Result<AreaDefinition> {
 }
 
 pub fn load_areas_from_str(yaml: &str) -> Result<BTreeMap<String, AreaDefinition>> {
-    let value: Value = serde_yaml::from_str(yaml)
-        .map_err(|err| RustySatError::invalid_input(format!("invalid area YAML: {err}")))?;
+    let value = parse_area_yaml_value(yaml)?;
     let mapping = value
         .as_mapping()
         .ok_or_else(|| RustySatError::invalid_input("area YAML root must be a mapping"))?;
@@ -266,6 +268,41 @@ pub fn load_areas_from_str(yaml: &str) -> Result<BTreeMap<String, AreaDefinition
         areas.insert(area_id.to_string(), area);
     }
     Ok(areas)
+}
+
+fn parse_area_yaml_value(yaml: &str) -> Result<Value> {
+    if yaml.len() > MAX_AREA_YAML_BYTES {
+        return Err(RustySatError::invalid_input(format!(
+            "area YAML exceeds size limit of {MAX_AREA_YAML_BYTES} bytes"
+        )));
+    }
+    let value: Value = serde_norway::from_str(yaml)
+        .map_err(|err| RustySatError::invalid_input(format!("invalid area YAML: {err}")))?;
+    validate_area_yaml_depth(&value, 0)?;
+    Ok(value)
+}
+
+fn validate_area_yaml_depth(value: &Value, depth: usize) -> Result<()> {
+    if depth > MAX_AREA_YAML_DEPTH {
+        return Err(RustySatError::invalid_input(format!(
+            "area YAML exceeds nesting depth limit of {MAX_AREA_YAML_DEPTH}"
+        )));
+    }
+    if let Some(sequence) = value.as_sequence() {
+        for child in sequence {
+            validate_area_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Some(mapping) = value.as_mapping() {
+        for (key, child) in mapping {
+            validate_area_yaml_depth(key, depth + 1)?;
+            validate_area_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Value::Tagged(tagged) = value {
+        validate_area_yaml_depth(&tagged.value, depth + 1)?;
+    }
+    Ok(())
 }
 
 fn parse_area(area_id: &str, value: &Value) -> Result<AreaDefinition> {

@@ -1085,6 +1085,14 @@ impl DependencyNode {
             .cloned()
             .collect()
     }
+
+    pub fn depends_on(&self, id: &DataId) -> bool {
+        self.dependencies.contains(id) || self.optional_dependencies.contains(id)
+    }
+
+    pub fn has_dependencies(&self) -> bool {
+        !self.dependencies.is_empty() || !self.optional_dependencies.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1179,18 +1187,14 @@ impl DependencyGraph {
     pub fn dependents_of(&self, id: &DataId) -> BTreeSet<DataId> {
         self.nodes
             .iter()
-            .filter_map(|(node_id, node)| {
-                node.all_dependencies()
-                    .contains(id)
-                    .then(|| node_id.clone())
-            })
+            .filter_map(|(node_id, node)| node.depends_on(id).then(|| node_id.clone()))
             .collect()
     }
 
     pub fn leaves(&self) -> BTreeSet<DataId> {
         self.nodes
             .iter()
-            .filter_map(|(id, node)| node.all_dependencies().is_empty().then(|| id.clone()))
+            .filter_map(|(id, node)| (!node.has_dependencies()).then(|| id.clone()))
             .collect()
     }
 }
@@ -1368,6 +1372,14 @@ impl Scene {
 
     pub fn get(&self, id: &DataId) -> Option<&Dataset> {
         self.datasets.get(id)
+    }
+
+    pub fn datasets(&self) -> &BTreeMap<DataId, Dataset> {
+        &self.datasets
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&DataId, &Dataset)> {
+        self.datasets.iter()
     }
 
     pub fn save_dataset(

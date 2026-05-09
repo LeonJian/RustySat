@@ -96,8 +96,9 @@ pub fn load_text_grid(filename: &str) -> Result<DataGrid> {
 
 pub fn lazy_text_grid(filename: &str, chunks: ChunkShape) -> Result<LazyDataArray<f64>> {
     let source = Arc::new(TextGridChunkSource::open(filename)?);
+    let shape = source.shape();
     LazyDataArray::from_shape(
-        vec![source.shape.0, source.shape.1],
+        vec![shape.0, shape.1],
         chunks,
         source as Arc<dyn ChunkSource<f64>>,
     )
@@ -106,14 +107,17 @@ pub fn lazy_text_grid(filename: &str, chunks: ChunkShape) -> Result<LazyDataArra
 #[derive(Debug, Clone)]
 pub struct TextGridChunkSource {
     filename: String,
-    shape: (usize, usize),
+    grid: Arc<DataGrid>,
 }
 
 impl TextGridChunkSource {
     pub fn open(filename: impl Into<String>) -> Result<Self> {
         let filename = filename.into();
-        let shape = scan_text_grid_shape(&filename)?;
-        Ok(Self { filename, shape })
+        let contents = fs::read_to_string(&filename).map_err(|err| {
+            RustySatError::not_found(format!("text grid file '{filename}': {err}"))
+        })?;
+        let grid = Arc::new(parse_text_grid(&contents)?);
+        Ok(Self { filename, grid })
     }
 
     pub fn filename(&self) -> &str {
@@ -121,7 +125,7 @@ impl TextGridChunkSource {
     }
 
     pub fn shape(&self) -> (usize, usize) {
-        self.shape
+        self.grid.shape()
     }
 }
 
@@ -137,31 +141,23 @@ impl ChunkSource<f64> for TextGridChunkSource {
                 "text grid chunk source requires 2D regions",
             ));
         };
-        let contents = fs::read_to_string(&self.filename).map_err(|err| {
-            RustySatError::not_found(format!("text grid file '{}': {err}", self.filename))
-        })?;
         let mut values = Vec::with_capacity(*height * *width);
         let y_end = *origin_y + *height;
         let x_end = *origin_x + *width;
-        let mut data_row_idx = 0usize;
-        for (line_idx, line) in contents.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+        let (grid_height, grid_width) = self.grid.shape();
+        if y_end > grid_height || x_end > grid_width {
+            return Err(RustySatError::invalid_input(format!(
+                "text grid chunk {:?}+{:?} exceeds shape {:?}",
+                region.origin(),
+                region.shape(),
+                self.grid.shape()
+            )));
+        }
+        for y in *origin_y..y_end {
+            let row_offset = y * grid_width;
+            for x in *origin_x..x_end {
+                values.push(self.grid.values()[row_offset + x]);
             }
-            let row = parse_row(line, line_idx + 1)?;
-            if row.len() != self.shape.1 {
-                return Err(RustySatError::invalid_input(format!(
-                    "row {} has {} columns but text grid shape requires {}",
-                    line_idx + 1,
-                    row.len(),
-                    self.shape.1
-                )));
-            }
-            if (*origin_y..y_end).contains(&data_row_idx) {
-                values.extend_from_slice(&row[*origin_x..x_end]);
-            }
-            data_row_idx += 1;
         }
         if values.len() != *height * *width {
             return Err(RustySatError::invalid_input(format!(
@@ -173,36 +169,6 @@ impl ChunkSource<f64> for TextGridChunkSource {
         }
         DataArray::from_vec_named(vec![*height, *width], ["y", "x"], values)
     }
-}
-
-fn scan_text_grid_shape(filename: &str) -> Result<(usize, usize)> {
-    let contents = fs::read_to_string(filename)
-        .map_err(|err| RustySatError::not_found(format!("text grid file '{filename}': {err}")))?;
-    let mut width = None;
-    let mut height = 0usize;
-    for (line_idx, line) in contents.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let row = parse_row(line, line_idx + 1)?;
-        match width {
-            Some(width) if width != row.len() => {
-                return Err(RustySatError::invalid_input(format!(
-                    "row {} has {} columns but previous rows had {}",
-                    line_idx + 1,
-                    row.len(),
-                    width
-                )));
-            }
-            None => width = Some(row.len()),
-            _ => {}
-        }
-        height += 1;
-    }
-    let width =
-        width.ok_or_else(|| RustySatError::invalid_input("text grid contains no numeric rows"))?;
-    Ok((height, width))
 }
 
 pub fn parse_text_grid(contents: &str) -> Result<DataGrid> {

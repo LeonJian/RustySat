@@ -564,10 +564,12 @@ fn nearest_swath_point(lons: &[f64], lats: &[f64], x: f64, y: f64) -> Option<(us
             if !lon.is_finite() || !lat.is_finite() {
                 return None;
             }
-            let distance = ((*lon - x).powi(2) + (*lat - y).powi(2)).sqrt();
-            Some((idx, distance))
+            let dx = *lon - x;
+            let dy = *lat - y;
+            Some((idx, dx * dx + dy * dy))
         })
         .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(idx, distance_squared)| (idx, distance_squared.sqrt()))
 }
 
 fn require_lonlat_area(area: &AreaDefinition) -> Result<()> {

@@ -31,6 +31,7 @@ const BAND_CALIBRATION_EXTENSION_LEN: usize = 112;
 const VISIBLE_CALIBRATION_INFO_LEN: usize = CALIBRATION_INFO_LEN + BAND_CALIBRATION_EXTENSION_LEN;
 const INFRARED_CALIBRATION_INFO_LEN: usize = CALIBRATION_INFO_LEN + BAND_CALIBRATION_EXTENSION_LEN;
 const INITIAL_HEADER_PREFIX_LEN: u64 = 4096;
+const MAX_HSD_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AhiHsdHeader {
@@ -454,21 +455,40 @@ impl AhiHsdFileHandler {
     }
 
     fn read_file_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        File::open(&self.filename)
+        let mut file = File::open(&self.filename).map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to open AHI HSD file '{}': {err}",
+                self.filename.display()
+            ))
+        })?;
+        let file_len = file
+            .metadata()
+            .map(|metadata| metadata.len())
             .map_err(|err| {
                 RustySatError::invalid_input(format!(
-                    "failed to open AHI HSD file '{}': {err}",
-                    self.filename.display()
-                ))
-            })?
-            .read_to_end(&mut bytes)
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "failed to read AHI HSD file '{}': {err}",
+                    "failed to inspect AHI HSD file '{}': {err}",
                     self.filename.display()
                 ))
             })?;
+        if file_len > MAX_HSD_FILE_BYTES {
+            return Err(RustySatError::invalid_input(format!(
+                "AHI HSD file '{}' is {file_len} bytes, exceeding the current safety limit of {MAX_HSD_FILE_BYTES} bytes",
+                self.filename.display()
+            )));
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(file_len as usize).map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to reserve memory for AHI HSD file '{}': {err}",
+                self.filename.display()
+            ))
+        })?;
+        file.read_to_end(&mut bytes).map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to read AHI HSD file '{}': {err}",
+                self.filename.display()
+            ))
+        })?;
         Ok(bytes)
     }
 
@@ -706,21 +726,23 @@ pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
         DATA_INFO_LEN,
         "data information",
     )?)?;
-    let projection_offset = data_offset + usize::from(data.block_length);
+    let projection_offset = checked_block_offset(data_offset, data.block_length, "projection")?;
     let projection = AhiProjectionInfo::parse(take_block(
         bytes,
         projection_offset,
         PROJECTION_INFO_LEN,
         "projection information",
     )?)?;
-    let navigation_offset = projection_offset + usize::from(projection.block_length);
+    let navigation_offset =
+        checked_block_offset(projection_offset, projection.block_length, "navigation")?;
     let navigation = AhiNavigationInfo::parse(take_block(
         bytes,
         navigation_offset,
         NAVIGATION_INFO_LEN,
         "navigation information",
     )?)?;
-    let calibration_offset = navigation_offset + usize::from(navigation.block_length);
+    let calibration_offset =
+        checked_block_offset(navigation_offset, navigation.block_length, "calibration")?;
     let calibration_prefix = take_block(
         bytes,
         calibration_offset,
@@ -740,7 +762,7 @@ pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
     )?)?;
     let segment = parse_optional_segment_info(
         bytes,
-        calibration_offset + usize::from(calibration.block_length),
+        checked_block_offset(calibration_offset, calibration.block_length, "segment")?,
     )?;
 
     Ok(AhiHsdHeader {
@@ -956,6 +978,14 @@ fn take_block<'a>(bytes: &'a [u8], offset: usize, min_len: usize, name: &str) ->
         .ok_or_else(|| RustySatError::invalid_input(format!("AHI HSD {name} block is truncated")))
 }
 
+fn checked_block_offset(offset: usize, block_length: u16, name: &str) -> Result<usize> {
+    offset
+        .checked_add(usize::from(block_length))
+        .ok_or_else(|| {
+            RustySatError::invalid_input(format!("AHI HSD {name} offset overflows usize"))
+        })
+}
+
 fn read_u8(bytes: &[u8], offset: usize, field: &str) -> Result<u8> {
     bytes
         .get(offset)
@@ -980,18 +1010,27 @@ fn read_f64_le(bytes: &[u8], offset: usize, field: &str) -> Result<f64> {
 }
 
 fn read_array<const N: usize>(bytes: &[u8], offset: usize, field: &str) -> Result<[u8; N]> {
+    let end = offset.checked_add(N).ok_or_else(|| {
+        RustySatError::invalid_input(format!("AHI HSD field '{field}' offset overflows usize"))
+    })?;
     bytes
-        .get(offset..offset + N)
+        .get(offset..end)
         .and_then(|value| value.try_into().ok())
         .ok_or_else(|| truncated_field(field))
 }
 
 fn read_fixed_string(bytes: &[u8], offset: usize, len: usize, field: &str) -> Result<String> {
+    let end = offset.checked_add(len).ok_or_else(|| {
+        RustySatError::invalid_input(format!("AHI HSD field '{field}' offset overflows usize"))
+    })?;
     let raw = bytes
-        .get(offset..offset + len)
+        .get(offset..end)
         .ok_or_else(|| truncated_field(field))?;
-    let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
-    Ok(String::from_utf8_lossy(&raw[..end]).trim().to_string())
+    let text_end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
+    let text = std::str::from_utf8(&raw[..text_end]).map_err(|err| {
+        RustySatError::invalid_input(format!("AHI HSD field '{field}' is not valid UTF-8: {err}"))
+    })?;
+    Ok(text.trim().to_string())
 }
 
 fn truncated_field(field: &str) -> RustySatError {
@@ -1530,28 +1569,32 @@ datasets:
     }
 
     fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
-        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        write_bytes(bytes, offset, &value.to_le_bytes());
     }
 
     fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
-        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        write_bytes(bytes, offset, &value.to_le_bytes());
     }
 
     fn write_f32(bytes: &mut [u8], offset: usize, value: f32) {
-        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        write_bytes(bytes, offset, &value.to_le_bytes());
     }
 
     fn write_f64(bytes: &mut [u8], offset: usize, value: f64) {
-        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        write_bytes(bytes, offset, &value.to_le_bytes());
     }
 
     fn write_string(bytes: &mut [u8], offset: usize, len: usize, value: &str) {
         let raw = value.as_bytes();
         let count = raw.len().min(len);
+        write_bytes(bytes, offset, &raw[..count]);
+    }
+
+    fn write_bytes(bytes: &mut [u8], offset: usize, raw: &[u8]) {
         let end = offset
-            .checked_add(count)
-            .expect("test string range overflow");
+            .checked_add(raw.len())
+            .expect("test byte range overflow");
         debug_assert!(end <= bytes.len());
-        bytes[offset..end].copy_from_slice(&raw[..count]);
+        bytes[offset..end].copy_from_slice(raw);
     }
 }

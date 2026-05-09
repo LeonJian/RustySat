@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 regex = "1.10"
 rusty_sat_core = { path = "../rusty_sat_core" }
-serde_yaml = "0.9"
+serde_norway = "0.9"
 
 [dev-dependencies]
 rusty_sat_writers = { path = "../rusty_sat_writers" }

@@ -353,6 +353,16 @@ When Satpy changes upstream:
 4. Implement the new behavior separately from unrelated work.
 5. Record the supported Satpy behavior in this file or a future `UPSTREAM_COMPAT.md`.
 
+### Tracked Upstream Changes (2026-05-09 audit, satpy main 4f1d7236b)
+
+| Date | Satpy Commit | Category | Change | Affected Rust Roadmap | Status |
+|------|-------------|----------|--------|----------------------|--------|
+| 2026-05-06 | `ca8e6d09e` | **core** | `open_dataset()` now accepts `str \| FSFile` (fsspec remote file support) | R0.1 `BaseFileHandler` trait | ⚠️ design input needed |
+| 2026-05-06 | `ea93a0d41` / `c47b792b1` | **composite** | VIIRS: new `day_cloud_type` / `day_cloud_type_distinction` composites; `night_microphysics` no longer uses DNB | C4 VIIRS composites | 📋 tracked |
+| 2026-05-06 | `f5f6fdc5c`–`97d6314dd` | **reader** | OMPS EDR reader rewritten for official NOAA NetCDF4 format | R3 L2 product readers | 📋 tracked |
+
+No tracked changes affect the currently completed M3-reader AHI HSD path.
+
 ## Testing Expectations
 
 Every step should leave the workspace passing:
@@ -381,14 +391,14 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `DataId`/`DataQuery` matching, scoring, best-match, ambiguity detection, ordered modifier-chain prefix matching, less-modified query creation, and ancillary-variable dataset filtering | Composite/modifier execution from these queries |
 | `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs) and borrowed/consuming array access | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
 | `Dataset` typed ancillary variable links by `DataId`, with find/replace helpers modeled after Satpy `anc_vars.py` | Embedding full ancillary arrays inside attrs; only typed links are stored |
-| `Scene` insert/remove datasets, plan reader loads, register composites/modifiers, and save a dataset through the `DatasetWriter` contract | Actual composite/modifier execution, resampling delegation, show/to-xarray |
+| `Scene` insert/remove datasets, borrowed dataset iteration, plan reader loads, register composites/modifiers, and save a dataset through the `DatasetWriter` contract | Actual composite/modifier execution, resampling delegation, show/to-xarray |
 
 ### rusty_sat_config
 
 | Can | Cannot |
 |-----|--------|
-| Load Satpy default config path (`satpy/satpy/etc`) | Format-specific config (reader YAML, composite YAML, enhancement YAML) |
-| Support `RUSTY_SAT_CONFIG_PATH` / `SATPY_CONFIG_PATH` env vars | Config search path merging, YAML recursive merge beyond basics |
+| Load Satpy default config path (`satpy/satpy/etc`) with `serde_norway`, byte-size limits, and YAML nesting-depth validation | Format-specific config (reader YAML, composite YAML, enhancement YAML) |
+| Support `RUSTY_SAT_CONFIG_PATH` / `SATPY_CONFIG_PATH` env vars | Full untrusted-YAML sandboxing; parser is still backed by `unsafe-libyaml-norway` |
 | Component config lookup (readers, writers, composites, enhancements) | |
 
 ### rusty_sat_readers
@@ -396,11 +406,11 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Can | Cannot |
 |-----|--------|
 | Parse filename patterns with `FilenamePattern` (trollsift-compatible: keys, parse, compose, globify, typed datetimes) | Full trollsift parity (every custom compose/conversion edge case) |
-| Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
+| Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) with byte-size/depth guardrails | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
 | `FakeReader` in-memory inventory + dataset loading for Scene planning tests | Real satellite file I/O (NetCDF/HDF/GeoTIFF/etc.) |
-| `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
+| `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture that caches the parsed fixture grid instead of rereading per chunk | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
 | AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Production AHI HSD segment assembly, navigation arrays, bzip2-compressed file handling, and full Satpy YAML instantiation |
-| AHI HSD handler can load uncompressed local/synthetic block-12 raw counts into a `u16` `DataArray` and mask Satpy error/outside-scan count values | Streaming/chunked HSD reads; current raw-count path materializes the requested file/byte buffer |
+| AHI HSD handler can load uncompressed local/synthetic block-12 raw counts into a `u16` `DataArray` and mask Satpy error/outside-scan count values with a whole-file byte safety limit | Streaming/chunked HSD reads; current raw-count path materializes the requested file/byte buffer |
 | AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
 | `AhiHsdReader` can expose a configured calibration, load a local uncompressed HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
 | Current reader inventory/load path still uses `f32` by default for memory-efficient display output | Final scientific/HDR HSD workflows need writer-preserving float/16-bit policies and public selection of the f64 calibrated path |
@@ -409,8 +419,8 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, YAML loading, projection-unit resolution derivation | Stacked/dynamic areas, spherical polygon math, overlap utilities |
-| `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, YAML loading | Real geocentric resolution, aggregation, boundary extraction |
+| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation | Stacked/dynamic areas, spherical polygon math, overlap utilities |
+| `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
 | `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
@@ -445,11 +455,15 @@ Early tests should focus on construction and API shape. Later tests should compa
 ### Known Inefficiencies (to address in future roadmap steps)
 
 - `Dataset::insert_metadata()` writes to both `self.metadata` and `self.attrs` — transitional dual-write; plan to remove flat `metadata` map entirely.
+- YAML parsing has byte-size and nesting-depth guardrails, but the current maintained `serde_norway` stack still uses `unsafe-libyaml-norway`. Revisit if a mature pure-Rust Serde YAML frontend becomes available without losing Satpy YAML compatibility.
 - `SourceChunkCache` in nearest resampler is bounded with a small FIFO cache. Future work should make cache sizing configurable and consider LRU/tile traversal for better hit rates on large scenes.
 - `autoscale_lazy` in PGM writer reads all chunks twice (once for min/max, once for write) — when the caller does not provide an explicit scale, the only way to avoid the double pass is to cache chunked f64 data during the first pass and encode from cache, trading memory for I/O.
 - `encode_pgm_values` in PGM writer collects its `impl IntoIterator<Item = f64>` argument into an intermediate `Vec<f64>` before autoscaling and encoding. Callers that already have a `Vec<f64>` (e.g. `encode_pgm_array` non-f64 path via `values_as_f64()`) pay a second allocation of the same data. Accept `Vec<f64>` directly to let callers materialize once.
 - `dataset_metadata_pairs` and `dataset_attr_pairs` in nearest resampling clone every metadata key/value and attrs key/value into intermediate `Vec`s before re-inserting them into the resampled dataset. Iterate the source maps directly and clone individual entries inline.
 - Swath nearest resampling has no `owned` or `lazy` variant (unlike area resampling, which has both). Large-swath workflows (VIIRS ~3200×6400) would benefit from both: owned to free source memory incrementally, lazy to avoid materializing the full swath at once. Add when the first real swath reader lands (M4-resample).
+- `AreaDefinition::projection_x_coords()` / `projection_y_coords()` allocate `Vec<f64>` axes every call. This is acceptable for current coordinate attachment, but S1/S7 should add iterator or cached-axis paths for repeated large-area operations.
+- `SwathDefinition::longitude_coordinate()` / `latitude_coordinate()` clone full lon/lat arrays because `Coordinate` currently owns vectors. Add borrowed or shared coordinate storage before large production swath workflows.
+- `ValidityMask::masked_count()` scans the packed mask each call. Cache masked counts if profiling shows repeated calls on large arrays.
 - `Image::from_luma_dataset` / `from_luma_array` forces a `FloatImage<f32>` intermediate allocation for every source dtype, including u8 and u16. For a 4K×4K u8 source (16 MB) this wastes 64 MB on the intermediate `Vec<f32>`, and the float round-trip (u8→f32→u8) adds CPU overhead. Add a direct integer→u8 fast path or a dtype-aware finalization path in the image-enhancement milestone.
 - `write_png_image` accepts only `&Image` and copies pixel data into the PNG encoder's internal buffers via `save_buffer_with_format`. A consuming `write_png_image_owned(image: Image, …)` that hands `image.into_pixels()` directly to the PNG encoder would avoid the internal copy when the caller no longer needs the `Image`. Add during W2-next writer polish.
 - `write_png16_image` converts u16 samples to PNG-required big-endian bytes before encoding. This preserves 16-bit values, but duplicates the image byte size during encode. Future writer work should stream rows into the PNG encoder if the crate API permits it.

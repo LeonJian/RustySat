@@ -11,9 +11,12 @@ use rusty_sat_core::{
     DataId, Dataset, MetadataValue, ModifierTuple, ReaderInventory, Result, RustySatError,
     WavelengthRange,
 };
-use serde_yaml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
+
+const MAX_READER_YAML_BYTES: usize = 8 * 1024 * 1024;
+const MAX_READER_YAML_DEPTH: usize = 96;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReaderInfo {
@@ -133,8 +136,7 @@ pub struct YamlReaderConfig {
 
 impl YamlReaderConfig {
     pub fn from_str(yaml: &str) -> Result<Self> {
-        let value: Value = serde_yaml::from_str(yaml)
-            .map_err(|err| RustySatError::invalid_input(format!("invalid reader YAML: {err}")))?;
+        let value = parse_reader_yaml_value(yaml)?;
         let mapping = value
             .as_mapping()
             .ok_or_else(|| RustySatError::invalid_input("reader YAML root must be a mapping"))?;
@@ -282,6 +284,41 @@ impl Reader for YamlMetadataReader {
             "YAML metadata reader does not load dataset arrays yet",
         ))
     }
+}
+
+fn parse_reader_yaml_value(yaml: &str) -> Result<Value> {
+    if yaml.len() > MAX_READER_YAML_BYTES {
+        return Err(RustySatError::invalid_input(format!(
+            "reader YAML exceeds size limit of {MAX_READER_YAML_BYTES} bytes"
+        )));
+    }
+    let value: Value = serde_norway::from_str(yaml)
+        .map_err(|err| RustySatError::invalid_input(format!("invalid reader YAML: {err}")))?;
+    validate_reader_yaml_depth(&value, 0)?;
+    Ok(value)
+}
+
+fn validate_reader_yaml_depth(value: &Value, depth: usize) -> Result<()> {
+    if depth > MAX_READER_YAML_DEPTH {
+        return Err(RustySatError::invalid_input(format!(
+            "reader YAML exceeds nesting depth limit of {MAX_READER_YAML_DEPTH}"
+        )));
+    }
+    if let Some(sequence) = value.as_sequence() {
+        for child in sequence {
+            validate_reader_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Some(mapping) = value.as_mapping() {
+        for (key, child) in mapping {
+            validate_reader_yaml_depth(key, depth + 1)?;
+            validate_reader_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Value::Tagged(tagged) = value {
+        validate_reader_yaml_depth(&tagged.value, depth + 1)?;
+    }
+    Ok(())
 }
 
 fn parse_reader_info(value: &Value) -> Result<ReaderInfo> {

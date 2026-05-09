@@ -6,8 +6,11 @@
 
 use crate::ProjCrs;
 use rusty_sat_core::{Coordinate, DataArray, NumericElement, Result, RustySatError};
-use serde_yaml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 use std::collections::BTreeMap;
+
+const MAX_SWATH_YAML_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SWATH_YAML_DEPTH: usize = 96;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwathDefinition {
@@ -125,8 +128,7 @@ pub fn load_swath_from_str(yaml: &str, swath_id: &str) -> Result<SwathDefinition
 }
 
 pub fn load_swaths_from_str(yaml: &str) -> Result<BTreeMap<String, SwathDefinition>> {
-    let value: Value = serde_yaml::from_str(yaml)
-        .map_err(|err| RustySatError::invalid_input(format!("invalid swath YAML: {err}")))?;
+    let value = parse_swath_yaml_value(yaml)?;
     let mapping = value
         .as_mapping()
         .ok_or_else(|| RustySatError::invalid_input("swath YAML root must be a mapping"))?;
@@ -138,6 +140,41 @@ pub fn load_swaths_from_str(yaml: &str) -> Result<BTreeMap<String, SwathDefiniti
         swaths.insert(swath_id.to_string(), parse_swath(swath_id, value)?);
     }
     Ok(swaths)
+}
+
+fn parse_swath_yaml_value(yaml: &str) -> Result<Value> {
+    if yaml.len() > MAX_SWATH_YAML_BYTES {
+        return Err(RustySatError::invalid_input(format!(
+            "swath YAML exceeds size limit of {MAX_SWATH_YAML_BYTES} bytes"
+        )));
+    }
+    let value: Value = serde_norway::from_str(yaml)
+        .map_err(|err| RustySatError::invalid_input(format!("invalid swath YAML: {err}")))?;
+    validate_swath_yaml_depth(&value, 0)?;
+    Ok(value)
+}
+
+fn validate_swath_yaml_depth(value: &Value, depth: usize) -> Result<()> {
+    if depth > MAX_SWATH_YAML_DEPTH {
+        return Err(RustySatError::invalid_input(format!(
+            "swath YAML exceeds nesting depth limit of {MAX_SWATH_YAML_DEPTH}"
+        )));
+    }
+    if let Some(sequence) = value.as_sequence() {
+        for child in sequence {
+            validate_swath_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Some(mapping) = value.as_mapping() {
+        for (key, child) in mapping {
+            validate_swath_yaml_depth(key, depth + 1)?;
+            validate_swath_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Value::Tagged(tagged) = value {
+        validate_swath_yaml_depth(&tagged.value, depth + 1)?;
+    }
+    Ok(())
 }
 
 fn parse_swath(swath_id: &str, value: &Value) -> Result<SwathDefinition> {

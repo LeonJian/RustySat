@@ -8,10 +8,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rusty_sat_core::{Result, RustySatError};
-use serde_yaml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 
 pub const DEFAULT_CONFIG_ENV: &str = "RUSTY_SAT_CONFIG_PATH";
 pub const SATPY_COMPAT_CONFIG_ENV: &str = "SATPY_CONFIG_PATH";
+const MAX_YAML_BYTES: usize = 8 * 1024 * 1024;
+const MAX_YAML_DEPTH: usize = 96;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigSearchPath {
@@ -136,9 +138,42 @@ pub fn load_yaml_file(path: &Path) -> Result<Value> {
     let content = fs::read_to_string(path).map_err(|err| {
         RustySatError::invalid_input(format!("failed to read {}: {err}", path.display()))
     })?;
-    serde_yaml::from_str(&content).map_err(|err| {
-        RustySatError::invalid_input(format!("failed to parse {}: {err}", path.display()))
-    })
+    parse_yaml_value(&content, &format!("{}", path.display()))
+}
+
+fn parse_yaml_value(yaml: &str, context: &str) -> Result<Value> {
+    if yaml.len() > MAX_YAML_BYTES {
+        return Err(RustySatError::invalid_input(format!(
+            "{context} exceeds YAML size limit of {MAX_YAML_BYTES} bytes"
+        )));
+    }
+    let value: Value = serde_norway::from_str(yaml)
+        .map_err(|err| RustySatError::invalid_input(format!("failed to parse {context}: {err}")))?;
+    validate_yaml_depth(&value, 0, context)?;
+    Ok(value)
+}
+
+fn validate_yaml_depth(value: &Value, depth: usize, context: &str) -> Result<()> {
+    if depth > MAX_YAML_DEPTH {
+        return Err(RustySatError::invalid_input(format!(
+            "{context} exceeds YAML nesting depth limit of {MAX_YAML_DEPTH}"
+        )));
+    }
+    if let Some(sequence) = value.as_sequence() {
+        for child in sequence {
+            validate_yaml_depth(child, depth + 1, context)?;
+        }
+    }
+    if let Some(mapping) = value.as_mapping() {
+        for (key, child) in mapping {
+            validate_yaml_depth(key, depth + 1, context)?;
+            validate_yaml_depth(child, depth + 1, context)?;
+        }
+    }
+    if let Value::Tagged(tagged) = value {
+        validate_yaml_depth(&tagged.value, depth + 1, context)?;
+    }
+    Ok(())
 }
 
 pub fn merge_yaml(base: &mut Value, overlay: Value) {
@@ -216,6 +251,17 @@ mod tests {
         assert_eq!(merged["reader"]["options"]["a"], Value::from(1));
         assert_eq!(merged["reader"]["options"]["b"], Value::from(3));
         assert_eq!(merged["reader"]["options"]["c"], Value::from(4));
+    }
+
+    #[test]
+    fn rejects_excessively_nested_yaml() {
+        let yaml = format!("root: {}", "[".repeat(MAX_YAML_DEPTH + 2))
+            + "0"
+            + &"]".repeat(MAX_YAML_DEPTH + 2);
+
+        let err = parse_yaml_value(&yaml, "test YAML").unwrap_err();
+
+        assert!(err.to_string().contains("nesting depth limit"));
     }
 
     #[test]
