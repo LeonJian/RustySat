@@ -18,7 +18,10 @@ pub use nearest::{
     resample_area_nearest, resample_area_nearest_lazy, resample_area_nearest_owned,
     resample_swath_nearest, NearestAreaResampler,
 };
-pub use neighbour::{get_area_neighbour_info, Neighbour, NeighbourInfo};
+pub use neighbour::{
+    get_area_neighbour_info, sample_nearest_from_neighbour_info, Neighbour, NeighbourInfo,
+    SampleMissingPolicy,
+};
 pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};
 
 use rusty_sat_core::{Dataset, Result, RustySatError};

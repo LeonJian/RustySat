@@ -10,7 +10,19 @@
 //! nearest query that future KD-tree code can replace internally.
 
 use crate::AreaDefinition;
-use rusty_sat_core::{Result, RustySatError};
+use rusty_sat_core::{DataGrid, Result, RustySatError, ValidityMask};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SampleMissingPolicy {
+    FillValue,
+    Mask,
+}
+
+impl SampleMissingPolicy {
+    fn masks_missing(self) -> bool {
+        matches!(self, Self::Mask)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Neighbour {
@@ -293,6 +305,60 @@ pub fn get_area_neighbour_info(
     )
 }
 
+pub fn sample_nearest_from_neighbour_info(
+    source_grid: &DataGrid,
+    output_shape: (usize, usize),
+    info: &NeighbourInfo,
+    fill_value: f64,
+    missing_policy: SampleMissingPolicy,
+) -> Result<DataGrid> {
+    if info.neighbours() != 1 {
+        return Err(RustySatError::unsupported(
+            "nearest neighbour sampling from multi-neighbour index arrays",
+        ));
+    }
+    if source_grid.values().len() != info.source_size() {
+        return Err(RustySatError::invalid_input(format!(
+            "source grid has {} values but neighbour info source size is {}",
+            source_grid.values().len(),
+            info.source_size()
+        )));
+    }
+    let output_size = output_shape
+        .0
+        .checked_mul(output_shape.1)
+        .ok_or_else(|| RustySatError::invalid_input("output shape size overflows usize"))?;
+    if output_size != info.target_size() {
+        return Err(RustySatError::invalid_input(format!(
+            "output shape {:?} has {output_size} pixels but neighbour info target size is {}",
+            output_shape,
+            info.target_size()
+        )));
+    }
+
+    let mut values = Vec::with_capacity(output_size);
+    let mut mask_flags = Vec::with_capacity(output_size);
+    for output_index in 0..output_size {
+        let Some((source_index, _distance)) = info.first_source_index_for_output(output_index)?
+        else {
+            values.push(fill_value);
+            mask_flags.push(missing_policy.masks_missing());
+            continue;
+        };
+        let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
+        values.push(source_grid.values()[source_index]);
+        mask_flags.push(source_masked);
+    }
+
+    let has_mask = mask_flags.iter().any(|masked| *masked);
+    let grid = DataGrid::new(output_shape.0, output_shape.1, values)?;
+    if has_mask {
+        grid.with_mask(ValidityMask::from_masked_flags(mask_flags))
+    } else {
+        Ok(grid)
+    }
+}
+
 fn nearest_area_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, f64)> {
     let extent = source.area_extent();
     let src_x = clamp_pixel_index(
@@ -426,5 +492,97 @@ mod tests {
             get_area_neighbour_info(&source, &target, None).unwrap_err(),
             RustySatError::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn samples_nearest_values_from_neighbour_info() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let target = area("target", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let source_grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let info = get_area_neighbour_info(&source, &target, None).unwrap();
+
+        let sampled = sample_nearest_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert!(sampled.mask().is_none());
+    }
+
+    #[test]
+    fn samples_fill_or_mask_for_missing_neighbours() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let target = area("target", 1, 1, [2.0, 2.0, 3.0, 3.0]);
+        let source_grid = DataGrid::new(1, 1, vec![7.0]).unwrap();
+        let info = get_area_neighbour_info(&source, &target, Some(0.25)).unwrap();
+
+        let filled = sample_nearest_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+        )
+        .unwrap();
+        let masked = sample_nearest_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            f64::NAN,
+            SampleMissingPolicy::Mask,
+        )
+        .unwrap();
+
+        assert_eq!(filled.values(), &[-999.0]);
+        assert!(filled.mask().is_none());
+        assert!(masked.values()[0].is_nan());
+        assert_eq!(masked.mask().unwrap().masked_count(), 1);
+    }
+
+    #[test]
+    fn sampling_propagates_source_mask() {
+        let source = area("source", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let target = area("target", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let source_grid = DataGrid::new(1, 2, vec![1.0, 2.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true]))
+            .unwrap();
+        let info = get_area_neighbour_info(&source, &target, None).unwrap();
+
+        let sampled = sample_nearest_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.values(), &[1.0, 2.0]);
+        assert_eq!(sampled.mask().unwrap().masked_count(), 1);
+        assert_eq!(sampled.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn sampling_validates_geometry_sizes() {
+        let source_grid = DataGrid::new(1, 1, vec![7.0]).unwrap();
+        let info =
+            NeighbourInfo::new(2, 1, 1, vec![true, true], vec![true], vec![0], vec![0.0]).unwrap();
+
+        let err = sample_nearest_from_neighbour_info(
+            &source_grid,
+            (1, 1),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("source grid has 1 values"));
     }
 }

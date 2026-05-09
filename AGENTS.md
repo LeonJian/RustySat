@@ -205,7 +205,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[ ]` S1-next: Add stacked/dynamic areas and geocentric/spherical geometry pieces needed by KD-tree resampling.
 - `[~]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
   - `[x]` S2-m4c: Add Pyresample-style neighbour-info data model and projection-coordinate area-to-area nearest neighbour query foundation.
-  - `[ ]` S2-next: Add real KD-tree backend, neighbour sampling helpers, great-circle/geocentric distances, and chunked parallel processing.
+  - `[x]` S2-m4c2: Add nearest sampled-output helper from `NeighbourInfo`, including fill-vs-mask missing handling and source-mask propagation.
+  - `[ ]` S2-next: Add real KD-tree backend, multi-neighbour sampling, great-circle/geocentric distances, and chunked parallel processing.
 - `[ ]` S3: Bilinear, cubic, and spline interpolation.
 - `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
 - `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
@@ -434,7 +435,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
-| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, and area-to-area nearest neighbour query foundation | Real KD-tree backend, multi-neighbour queries, swath neighbour info, geocentric/great-circle distances |
+| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, area-to-area nearest neighbour query foundation, and nearest sampled-output helper for `DataGrid` | Real KD-tree backend, multi-neighbour queries/sampling, swath neighbour info, geocentric/great-circle distances |
 | `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
 
 ### rusty_sat_composites
