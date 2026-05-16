@@ -2160,4 +2160,98 @@ variables:
 
         assert!(err.contains("shape"));
     }
+
+    #[test]
+    fn fixture_source_rejects_excessive_size() {
+        let fixture = "x".repeat(MAX_NETCDF_FIXTURE_YAML_BYTES + 1);
+
+        let err = NetCdfFixtureSource::from_str(&fixture)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("exceeds size limit"));
+    }
+
+    #[test]
+    fn fixture_source_rejects_excessive_depth() {
+        let fixture = "- ".repeat(MAX_NETCDF_FIXTURE_YAML_DEPTH + 2);
+
+        let err = NetCdfFixtureSource::from_str(&fixture)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("nesting depth"));
+    }
+
+    #[test]
+    fn fixture_source_rejects_non_mapping_root() {
+        let err = NetCdfFixtureSource::from_str("42").unwrap_err().to_string();
+
+        assert!(err.contains("root must be a mapping"));
+    }
+
+    #[test]
+    fn fixture_source_rejects_unsupported_dtype() {
+        let fixture = r#"
+variables:
+  bad:
+    dtype: int64
+    dimensions: [x]
+    shape: [1]
+    values: [1]
+"#;
+
+        let err = NetCdfFixtureSource::from_str(fixture)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("dtype 'int64'"));
+    }
+
+    #[test]
+    fn fixture_source_rejects_non_mapping_variable() {
+        let fixture = r#"
+variables:
+  bad: "not a mapping"
+"#;
+
+        let err = NetCdfFixtureSource::from_str(fixture)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("must be a mapping"));
+    }
+
+    #[test]
+    fn fixture_source_rejects_non_mapping_group_child() {
+        let fixture = r#"
+groups:
+  bad: "not a mapping"
+"#;
+
+        let err = NetCdfFixtureSource::from_str(fixture)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("must be a mapping"));
+    }
+
+    #[test]
+    fn fixture_source_from_path_reports_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "rusty_sat_netcdf_nonexistent_{}.yaml",
+            std::process::id()
+        ));
+        // Ensure the file does not exist.
+        let _ = fs::remove_file(&path);
+
+        let err = NetCdfFixtureSource::from_path(&path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("failed to") || err.contains("No such file"),
+            "unexpected error: {err}"
+        );
+    }
 }
