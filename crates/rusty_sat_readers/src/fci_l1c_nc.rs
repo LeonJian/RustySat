@@ -259,4 +259,99 @@ groups:
 
         assert!(reader.load(&id).is_err());
     }
+
+    #[test]
+    fn fci_fixture_reader_rejects_unknown_channel() {
+        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+
+        let err = FciL1cFixtureReader::from_source(
+            "fixture.yaml",
+            source,
+            NetCdfFileTypeInfo::new(),
+            ["vis_05"],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("vis_05"));
+    }
+
+    #[test]
+    fn fci_fixture_reader_rejects_empty_channels() {
+        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+
+        let err = FciL1cFixtureReader::from_source(
+            "fixture.yaml",
+            source,
+            NetCdfFileTypeInfo::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("at least one channel"));
+    }
+
+    #[test]
+    fn fci_fixture_reader_deduplicates_channels() {
+        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let reader = FciL1cFixtureReader::from_source(
+            "fixture.yaml",
+            source,
+            NetCdfFileTypeInfo::new(),
+            ["vis_04", "vis_04"],
+        )
+        .unwrap();
+
+        assert_eq!(reader.channels().len(), 1);
+        assert_eq!(reader.available_dataset_ids().len(), 1);
+    }
+
+    #[test]
+    fn fci_fixture_reader_loads_multiple_channels() {
+        let fixture = r#"
+groups:
+  data:
+    groups:
+      vis_04:
+        groups:
+          measured:
+            dimensions: {y: 1, x: 2}
+            variables:
+              effective_radiance:
+                dtype: u16
+                dimensions: [y, x]
+                shape: [1, 2]
+                values: [1, 2]
+      ir_38:
+        groups:
+          measured:
+            dimensions: {y: 1, x: 2}
+            variables:
+              effective_radiance:
+                dtype: u16
+                dimensions: [y, x]
+                shape: [1, 2]
+                values: [3, 4]
+"#;
+        let source = NetCdfFixtureSource::from_str(fixture).unwrap();
+        let reader = FciL1cFixtureReader::from_source(
+            "fixture.yaml",
+            source,
+            NetCdfFileTypeInfo::new(),
+            ["vis_04", "ir_38"],
+        )
+        .unwrap();
+
+        assert_eq!(reader.channels().len(), 2);
+        assert_eq!(reader.available_dataset_ids().len(), 2);
+
+        let vis_id = FciL1cFixtureReader::dataset_id("vis_04").unwrap();
+        let ir_id = FciL1cFixtureReader::dataset_id("ir_38").unwrap();
+        let vis_ds = reader.load(&vis_id).unwrap();
+        let ir_ds = reader.load(&ir_id).unwrap();
+
+        assert_eq!(vis_ds.array().unwrap().values_as_f64(), vec![1.0, 2.0]);
+        assert_eq!(ir_ds.array().unwrap().values_as_f64(), vec![3.0, 4.0]);
+    }
 }
