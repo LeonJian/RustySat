@@ -1382,6 +1382,10 @@ impl Scene {
         self.datasets.iter()
     }
 
+    pub fn into_datasets(self) -> impl Iterator<Item = Dataset> {
+        self.datasets.into_values()
+    }
+
     pub fn save_dataset(
         &self,
         id: &DataId,

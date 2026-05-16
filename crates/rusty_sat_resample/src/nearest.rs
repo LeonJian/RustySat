@@ -113,6 +113,48 @@ impl Resampler for NearestAreaResampler {
         resampled_dataset.insert_metadata("resampler", self.name())?;
         Ok(resampled_dataset)
     }
+
+    fn resample_owned(&self, dataset: Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let id = dataset.id().clone();
+        let metadata = dataset.metadata().clone();
+        let attrs = dataset.attrs().clone();
+        let source_grid = dataset
+            .into_array()
+            .and_then(|a| a.into_f64())
+            .ok_or_else(|| {
+                RustySatError::invalid_input("nearest resampling requires an f64 dataset grid")
+            })?;
+        if source_grid.shape() != self.source.shape() {
+            return Err(RustySatError::invalid_input(format!(
+                "dataset grid shape {:?} does not match source area shape {:?}",
+                source_grid.shape(),
+                self.source.shape()
+            )));
+        }
+        if self.source.projection() != destination.projection() {
+            return Err(RustySatError::unsupported(
+                "nearest area resampling between different projections",
+            ));
+        }
+        let resampled = resample_area_nearest_owned_with_policy(
+            source_grid,
+            &self.source,
+            destination,
+            self.radius_of_influence,
+            self.fill_value,
+            self.missing_value_policy,
+        )?;
+        let mut resampled_dataset = Dataset::new(id).with_data(resampled);
+        for (key, value) in metadata {
+            resampled_dataset.insert_metadata(key, value)?;
+        }
+        for (key, value) in attrs {
+            resampled_dataset.insert_attr(key, value)?;
+        }
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
 }
 
 fn dataset_metadata_pairs(
@@ -1009,6 +1051,32 @@ mod tests {
 
         assert!(result.data().unwrap().values()[0].is_nan());
         assert_eq!(result.data().unwrap().mask().unwrap().masked_count(), 1);
+    }
+
+    #[test]
+    fn resampler_trait_resample_owned_produces_same_output_as_borrowed() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let id = rusty_sat_core::DataId::new("image").unwrap();
+
+        let mut borrowed_ds = Dataset::new(id.clone())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        borrowed_ds.insert_metadata("units", "K").unwrap();
+        let mut owned_ds =
+            Dataset::new(id).with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        owned_ds.insert_metadata("units", "K").unwrap();
+
+        let resampler = NearestAreaResampler::new(source).with_fill_value(-999.0);
+
+        let borrowed = resampler.resample(&borrowed_ds, &destination).unwrap();
+        let owned = resampler.resample_owned(owned_ds, &destination).unwrap();
+
+        assert_eq!(
+            borrowed.data().unwrap().values(),
+            owned.data().unwrap().values()
+        );
+        assert_eq!(borrowed.metadata(), owned.metadata());
+        assert_eq!(borrowed.attrs(), owned.attrs());
     }
 
     #[test]

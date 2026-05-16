@@ -639,6 +639,13 @@ impl AnyDataArray {
         }
     }
 
+    pub fn into_f64(self) -> Option<DataArray<f64>> {
+        match self {
+            Self::F64(array) => Some(array),
+            _ => None,
+        }
+    }
+
     pub fn shape_2d(&self) -> Result<(usize, usize)> {
         let shape = self.shape();
         if shape.len() != 2 {
@@ -1108,6 +1115,29 @@ mod tests {
 
         assert_eq!(f64_array.into_f64_values(), vec![1.5, 2.5]);
         assert_eq!(u16_array.into_f64_values(), vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn runtime_typed_array_into_f64_consumes_full_grid() {
+        let grid = DataGrid::new(1, 2, vec![10.0, 20.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true]))
+            .unwrap()
+            .with_coordinate("acq_time", Coordinate::scalar(123.0))
+            .unwrap();
+        let array = AnyDataArray::from(grid);
+        let consumed: DataGrid = array.into_f64().unwrap();
+
+        assert_eq!(consumed.shape(), (1, 2));
+        assert_eq!(consumed.values(), &[10.0, 20.0]);
+        assert_eq!(consumed.mask().unwrap().masked_count(), 1);
+        assert_eq!(consumed.coord("acq_time").unwrap().values(), &[123.0]);
+    }
+
+    #[test]
+    fn runtime_typed_array_into_f64_rejects_non_f64() {
+        let array = AnyDataArray::from(DataArray::<u16>::from_vec(vec![2], vec![1, 2]).unwrap());
+        assert!(array.into_f64().is_none());
     }
 
     #[test]
