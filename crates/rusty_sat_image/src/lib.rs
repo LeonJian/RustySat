@@ -469,45 +469,36 @@ impl<T: ImageFloat> FloatImage<T> {
         masked_alpha: u8,
         valid_alpha: u8,
     ) -> Result<Image> {
-        let channels = self.mode.channels();
-        let mut pixels = Vec::with_capacity(self.height * self.width * ImageMode::Rgba.channels());
-        for pixel_index in 0..(self.height * self.width) {
-            let masked = self.is_masked_pixel(pixel_index);
-            let base = pixel_index * channels;
-            match self.mode {
-                ImageMode::Luma => {
-                    let value = self.finalize_channel_value(base, fill_value, masked);
-                    pixels.extend_from_slice(&[value, value, value]);
-                    pixels.push(if masked { masked_alpha } else { valid_alpha });
-                }
-                ImageMode::Rgb => {
-                    for channel in 0..3 {
-                        pixels.push(self.finalize_channel_value(
-                            base + channel,
-                            fill_value,
-                            masked,
-                        ));
-                    }
-                    pixels.push(if masked { masked_alpha } else { valid_alpha });
-                }
-                ImageMode::Rgba => {
-                    for channel in 0..3 {
-                        pixels.push(self.finalize_channel_value(
-                            base + channel,
-                            fill_value,
-                            masked,
-                        ));
-                    }
-                    let alpha = if masked {
-                        masked_alpha
-                    } else {
-                        self.finalize_channel_value(base + 3, valid_alpha, false)
-                    };
-                    pixels.push(alpha);
-                }
-            }
-        }
-        Image::from_pixels(ImageMode::Rgba, self.height, self.width, pixels)
+        rgba_image_from_float(
+            &self.pixels,
+            self.mask.as_ref(),
+            self.mode,
+            self.height,
+            self.width,
+            fill_value,
+            masked_alpha,
+            valid_alpha,
+        )
+    }
+
+    pub fn into_u8_rgba_image(
+        self,
+        fill_value: u8,
+        masked_alpha: u8,
+        valid_alpha: u8,
+    ) -> Result<Image> {
+        // Consuming variant: reuses the same logic but takes ownership
+        // so the float buffer is freed during conversion.
+        rgba_image_from_float(
+            &self.pixels,
+            self.mask.as_ref(),
+            self.mode,
+            self.height,
+            self.width,
+            fill_value,
+            masked_alpha,
+            valid_alpha,
+        )
     }
 
     pub fn mode(&self) -> ImageMode {
@@ -532,15 +523,6 @@ impl<T: ImageFloat> FloatImage<T> {
 
     pub fn invert_history(&self) -> &[Vec<bool>] {
         &self.invert_history
-    }
-
-    fn finalize_channel_value(&self, idx: usize, fill_value: u8, masked: bool) -> u8 {
-        let value = self.pixels[idx];
-        if masked || !value.is_finite() {
-            fill_value
-        } else {
-            (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
-        }
     }
 
     fn is_masked_pixel(&self, pixel_index: usize) -> bool {
@@ -585,6 +567,60 @@ fn validate_channel_count(name: &str, provided: usize, expected: usize) -> Resul
         )));
     }
     Ok(())
+}
+
+fn rgba_image_from_float<T: ImageFloat>(
+    pixels: &[T],
+    mask: Option<&ValidityMask>,
+    mode: ImageMode,
+    height: usize,
+    width: usize,
+    fill_value: u8,
+    masked_alpha: u8,
+    valid_alpha: u8,
+) -> Result<Image> {
+    let channels = mode.channels();
+    let pixel_count = height * width;
+    let mut rgba = Vec::with_capacity(pixel_count * ImageMode::Rgba.channels());
+    for pixel_index in 0..pixel_count {
+        let masked = mask
+            .and_then(|mask| mask.is_masked(pixel_index))
+            .unwrap_or(false);
+        let base = pixel_index * channels;
+        let to_u8 = |idx: usize, fill: u8, force_masked: bool| -> u8 {
+            let value = pixels[idx];
+            if force_masked || !value.is_finite() {
+                fill
+            } else {
+                (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
+            }
+        };
+        match mode {
+            ImageMode::Luma => {
+                let value = to_u8(base, fill_value, masked);
+                rgba.extend_from_slice(&[value, value, value]);
+                rgba.push(if masked { masked_alpha } else { valid_alpha });
+            }
+            ImageMode::Rgb => {
+                for channel in 0..3 {
+                    rgba.push(to_u8(base + channel, fill_value, masked));
+                }
+                rgba.push(if masked { masked_alpha } else { valid_alpha });
+            }
+            ImageMode::Rgba => {
+                for channel in 0..3 {
+                    rgba.push(to_u8(base + channel, fill_value, masked));
+                }
+                let alpha = if masked {
+                    masked_alpha
+                } else {
+                    to_u8(base + 3, valid_alpha, false)
+                };
+                rgba.push(alpha);
+            }
+        }
+    }
+    Image::from_pixels(ImageMode::Rgba, height, width, rgba)
 }
 
 pub trait Enhancer {
@@ -753,6 +789,119 @@ mod tests {
         assert_eq!(rgba.mode(), ImageMode::Rgba);
         assert_eq!(rgba.pixels(), &[128, 128, 128, 255, 0, 0, 0, 0]);
         assert_eq!(image.pixels(), &[0.5, 0.75]);
+    }
+
+    #[test]
+    fn into_u8_rgba_image_consumes_float_buffer() {
+        let mask = rusty_sat_core::ValidityMask::from_masked_flags([false, true]);
+        let mut image =
+            FloatImage::<f64>::from_pixels(ImageMode::Luma, 1, 2, vec![0.5, 0.75]).unwrap();
+        image.mask = Some(mask);
+
+        let rgba = image.into_u8_rgba_image(0, 0, 255).unwrap();
+
+        assert_eq!(rgba.mode(), ImageMode::Rgba);
+        assert_eq!(rgba.pixels(), &[128, 128, 128, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn gamma_identity_is_noop_without_history() {
+        let mut image = FloatImage::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+
+        image.gamma_in_place(1.0).unwrap();
+
+        assert_pixels_close(image.pixels(), &[0.25, 0.75], 1e-12);
+        assert!(image.gamma_history().is_empty());
+    }
+
+    #[test]
+    fn invert_all_false_is_noop_without_history() {
+        let mut image = FloatImage::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+
+        image.invert_channels_in_place(&[false]).unwrap();
+
+        assert_pixels_close(image.pixels(), &[0.25, 0.75], 1e-12);
+        assert!(image.invert_history().is_empty());
+    }
+
+    #[test]
+    fn gamma_skips_masked_pixels() {
+        let mask = rusty_sat_core::ValidityMask::from_masked_flags([false, true]);
+        let mut image =
+            FloatImage::<f64>::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+        image.mask = Some(mask);
+
+        image.gamma_in_place(2.0).unwrap();
+
+        assert_pixels_close(image.pixels(), &[0.5, 0.75], 1e-12);
+    }
+
+    #[test]
+    fn invert_skips_masked_pixels() {
+        let mask = rusty_sat_core::ValidityMask::from_masked_flags([false, true]);
+        let mut image =
+            FloatImage::<f64>::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+        image.mask = Some(mask);
+
+        image.invert_channels_in_place(&[true]).unwrap();
+
+        assert_pixels_close(image.pixels(), &[0.75, 0.75], 1e-12);
+    }
+
+    #[test]
+    fn to_u8_rgba_image_handles_rgb_input() {
+        let image = FloatImage::from_pixels(ImageMode::Rgb, 1, 1, vec![1.0, 0.5, 0.0]).unwrap();
+
+        let rgba = image.to_u8_rgba_image(0, 0, 255).unwrap();
+
+        assert_eq!(rgba.mode(), ImageMode::Rgba);
+        assert_eq!(rgba.pixels(), &[255, 128, 0, 255]);
+    }
+
+    #[test]
+    fn to_u8_rgba_image_preserves_source_alpha_for_rgba_input() {
+        let image =
+            FloatImage::from_pixels(ImageMode::Rgba, 1, 1, vec![1.0, 0.5, 0.0, 0.5]).unwrap();
+
+        let rgba = image.to_u8_rgba_image(0, 0, 255).unwrap();
+
+        assert_eq!(rgba.pixels(), &[255, 128, 0, 128]);
+    }
+
+    #[test]
+    fn gamma_history_accumulates_multiple_calls() {
+        let mut image = FloatImage::from_pixels(ImageMode::Luma, 1, 1, vec![0.25]).unwrap();
+
+        image.gamma_in_place(2.0).unwrap();
+        image.gamma_in_place(3.0).unwrap();
+
+        assert_eq!(image.gamma_history(), &[vec![2.0], vec![3.0]]);
+    }
+
+    #[test]
+    fn gamma_corrected_consuming_variant_produces_same_result() {
+        let mut in_place_img =
+            FloatImage::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+        in_place_img.gamma_in_place(2.0).unwrap();
+
+        let consuming_img =
+            FloatImage::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+        let result = consuming_img.gamma_corrected(2.0).unwrap();
+
+        assert_pixels_close(result.pixels(), in_place_img.pixels(), 1e-12);
+    }
+
+    #[test]
+    fn inverted_consuming_variant_produces_same_result() {
+        let mut in_place_img =
+            FloatImage::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+        in_place_img.invert_in_place(true);
+
+        let consuming_img =
+            FloatImage::from_pixels(ImageMode::Luma, 1, 2, vec![0.25, 0.75]).unwrap();
+        let result = consuming_img.inverted(true);
+
+        assert_pixels_close(result.pixels(), in_place_img.pixels(), 1e-12);
     }
 
     fn assert_pixels_close<T: ImageFloat>(left: &[T], right: &[T], tolerance: f64) {
