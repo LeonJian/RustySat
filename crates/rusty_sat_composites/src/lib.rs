@@ -8,9 +8,14 @@
 
 pub mod arithmetic;
 mod common;
+pub mod config;
 pub mod spectral;
 
 pub use arithmetic::{ArithmeticCompositor, ArithmeticOperation};
+pub use config::{
+    CompositeDefinition, CompositeDependency, CompositeRegistryConfig, EnhancementDefinition,
+    EnhancementOperation,
+};
 pub use spectral::{BandReplacementCompositor, SpectralBlender};
 
 use rusty_sat_core::{

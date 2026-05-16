@@ -229,6 +229,7 @@ name = "rusty_sat_composites"
 version = "0.1.0"
 dependencies = [
  "rusty_sat_core",
+ "serde_norway",
 ]
 
 [[package]]
