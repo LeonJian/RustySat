@@ -9,7 +9,9 @@
 //! operations over matching runtime-typed arrays, mask propagation, and owned
 //! variants that mutate the consumed left-hand buffer in place.
 
-use crate::common::{require_two_arrays, require_two_owned_arrays, ArrayInfo};
+use crate::common::{
+    extract_composite_metadata, require_two_arrays, require_two_owned_arrays, ArrayInfo,
+};
 use crate::Compositor;
 use rusty_sat_core::{
     AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
@@ -170,21 +172,6 @@ fn require_matching_arrays(left: &AnyDataArray, right: &AnyDataArray) -> Result<
         dims: left.dims().to_vec(),
         coords: left.coords().clone(),
     })
-}
-
-const PROPAGATED_METADATA_KEYS: &[&str] = &["units", "standard_name", "ancillary_variables"];
-
-fn extract_composite_metadata(
-    attrs: &BTreeMap<String, MetadataValue>,
-) -> Vec<(String, MetadataValue)> {
-    PROPAGATED_METADATA_KEYS
-        .iter()
-        .filter_map(|key| {
-            attrs
-                .get(*key)
-                .map(|value| (key.to_string(), value.clone()))
-        })
-        .collect()
 }
 
 fn build_binary_mask(
