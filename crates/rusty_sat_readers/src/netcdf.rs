@@ -379,7 +379,7 @@ impl FciL1cNetCdfHandler {
         let raw_array = self
             .file_handler
             .load_variable_array(&variable_path, source)?;
-        let array = mask_fci_counts_array(&raw_array, |key| {
+        let array = mask_fci_counts_array(raw_array, |key| {
             self.file_handler
                 .attr(&format!("{variable_path}/attr/{key}"))
         })?;
@@ -979,34 +979,46 @@ fn validate_fci_channel_name(channel: &str) -> Result<()> {
 }
 
 fn mask_fci_counts_array<'a>(
-    array: &AnyDataArray,
+    array: AnyDataArray,
     attr: impl Fn(&str) -> Option<&'a MetadataValue>,
 ) -> Result<AnyDataArray> {
     let (valid_min, valid_max) = valid_range(attr("valid_range"))?;
     let fill_value = attr("_FillValue").and_then(metadata_as_f64);
-    let values = array.values_as_f64();
-    let mut mask = array
-        .mask()
-        .cloned()
-        .unwrap_or_else(|| ValidityMask::all_valid(array.len()));
-    for (idx, value) in values.iter().copied().enumerate() {
-        if value < valid_min
-            || value > valid_max
-            || fill_value.is_some_and(|fill| nearly_equal(value, fill))
-        {
-            mask.set_masked(idx, true);
+    let existing_mask = array.mask().cloned();
+    let mut mask = existing_mask.unwrap_or_else(|| ValidityMask::all_valid(array.len()));
+    let min = valid_min;
+    let max = valid_max;
+    let fill = fill_value;
+
+    match &array {
+        AnyDataArray::U16(arr) => {
+            for (idx, &raw) in arr.values().iter().enumerate() {
+                let v = raw as f64;
+                if v < min || v > max || fill.is_some_and(|f| nearly_equal(v, f)) {
+                    mask.set_masked(idx, true);
+                }
+            }
+        }
+        _ => {
+            let values = array.values_as_f64();
+            for (idx, v) in values.iter().copied().enumerate() {
+                if v < min || v > max || fill.is_some_and(|f| nearly_equal(v, f)) {
+                    mask.set_masked(idx, true);
+                }
+            }
         }
     }
-    clone_array_with_mask(array, mask)
+
+    into_array_with_mask(array, mask)
 }
 
-fn clone_array_with_mask(array: &AnyDataArray, mask: ValidityMask) -> Result<AnyDataArray> {
+fn into_array_with_mask(array: AnyDataArray, mask: ValidityMask) -> Result<AnyDataArray> {
     match array {
-        AnyDataArray::F32(array) => Ok(array.clone().with_mask(mask)?.into()),
-        AnyDataArray::F64(array) => Ok(array.clone().with_mask(mask)?.into()),
-        AnyDataArray::U8(array) => Ok(array.clone().with_mask(mask)?.into()),
-        AnyDataArray::U16(array) => Ok(array.clone().with_mask(mask)?.into()),
-        AnyDataArray::I16(array) => Ok(array.clone().with_mask(mask)?.into()),
+        AnyDataArray::F32(array) => Ok(array.with_mask(mask)?.into()),
+        AnyDataArray::F64(array) => Ok(array.with_mask(mask)?.into()),
+        AnyDataArray::U8(array) => Ok(array.with_mask(mask)?.into()),
+        AnyDataArray::U16(array) => Ok(array.with_mask(mask)?.into()),
+        AnyDataArray::I16(array) => Ok(array.with_mask(mask)?.into()),
     }
 }
 
@@ -1551,5 +1563,147 @@ mod tests {
             .to_string();
 
         assert!(err.contains("not a measured channel"));
+    }
+
+    #[test]
+    fn load_variable_array_rejects_dimension_mismatch() {
+        let variable_path = "data/vis_04/measured/effective_radiance";
+        let source = InMemoryNetCdfSource::new(fci_like_root())
+            .with_array(
+                variable_path,
+                DataArray::<u16>::from_vec_named(vec![2, 3], ["z", "x"], vec![1, 2, 3, 4, 5, 6])
+                    .unwrap(),
+            )
+            .unwrap();
+        let handler = NetCdfFileHandler::from_source(
+            "fci.nc",
+            BTreeMap::new(),
+            NetCdfFileTypeInfo::new(),
+            &source,
+        )
+        .unwrap();
+
+        let err = handler
+            .load_variable_array(variable_path, &source)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("dimensions"));
+    }
+
+    #[test]
+    fn valid_range_returns_default_when_not_a_list() {
+        let result = valid_range(Some(&MetadataValue::Integer(5))).unwrap();
+
+        assert_eq!(result, (f64::NEG_INFINITY, f64::INFINITY));
+    }
+
+    #[test]
+    fn valid_range_rejects_min_greater_than_max() {
+        let result = valid_range(Some(&MetadataValue::List(vec![
+            MetadataValue::Integer(10),
+            MetadataValue::Integer(0),
+        ])));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("minimum cannot exceed maximum"));
+    }
+
+    #[test]
+    fn fci_counts_masking_respects_absent_valid_range() {
+        // root without valid_range attr on the variable
+        let effective_radiance =
+            NetCdfVariable::new("effective_radiance", "u16", ["y", "x"], [1, 2])
+                .unwrap()
+                .with_attr("units", "counts")
+                .unwrap();
+        let measured = NetCdfGroup::new("measured")
+            .unwrap()
+            .with_dimension("y", 1)
+            .unwrap()
+            .with_dimension("x", 2)
+            .unwrap()
+            .with_variable(effective_radiance)
+            .unwrap();
+        let channel = NetCdfGroup::new("vis_04")
+            .unwrap()
+            .with_group(measured)
+            .unwrap();
+        let data = NetCdfGroup::new("data")
+            .unwrap()
+            .with_group(channel)
+            .unwrap();
+        let root = NetCdfGroup::root().with_group(data).unwrap();
+        let variable_path = "data/vis_04/measured/effective_radiance";
+        let source = InMemoryNetCdfSource::new(root)
+            .with_array(
+                variable_path,
+                DataArray::<u16>::from_vec_named(vec![1, 2], ["y", "x"], vec![100, 200]).unwrap(),
+            )
+            .unwrap();
+        let handler = NetCdfFileHandler::from_source(
+            "fci.nc",
+            BTreeMap::new(),
+            NetCdfFileTypeInfo::new(),
+            &source,
+        )
+        .unwrap();
+        let fci = FciL1cNetCdfHandler::new(handler);
+
+        let dataset = fci.load_counts_dataset("vis_04", &source).unwrap();
+        let array = dataset.array().unwrap();
+
+        // without valid_range, all values survive
+        assert_eq!(array.mask().map(|m| m.masked_count()), Some(0));
+        assert_eq!(array.values_as_f64(), vec![100.0, 200.0]);
+    }
+
+    #[test]
+    fn fci_counts_masking_ignores_non_numeric_fill_value() {
+        let effective_radiance =
+            NetCdfVariable::new("effective_radiance", "u16", ["y", "x"], [1, 2])
+                .unwrap()
+                .with_attr("_FillValue", MetadataValue::String("missing".to_string()))
+                .unwrap();
+        let measured = NetCdfGroup::new("measured")
+            .unwrap()
+            .with_dimension("y", 1)
+            .unwrap()
+            .with_dimension("x", 2)
+            .unwrap()
+            .with_variable(effective_radiance)
+            .unwrap();
+        let channel = NetCdfGroup::new("vis_04")
+            .unwrap()
+            .with_group(measured)
+            .unwrap();
+        let data = NetCdfGroup::new("data")
+            .unwrap()
+            .with_group(channel)
+            .unwrap();
+        let root = NetCdfGroup::root().with_group(data).unwrap();
+        let variable_path = "data/vis_04/measured/effective_radiance";
+        let source = InMemoryNetCdfSource::new(root)
+            .with_array(
+                variable_path,
+                DataArray::<u16>::from_vec_named(vec![1, 2], ["y", "x"], vec![10, 20]).unwrap(),
+            )
+            .unwrap();
+        let handler = NetCdfFileHandler::from_source(
+            "fci.nc",
+            BTreeMap::new(),
+            NetCdfFileTypeInfo::new(),
+            &source,
+        )
+        .unwrap();
+        let fci = FciL1cNetCdfHandler::new(handler);
+
+        let dataset = fci.load_counts_dataset("vis_04", &source).unwrap();
+        let array = dataset.array().unwrap();
+
+        assert_eq!(array.mask().map(|m| m.masked_count()), Some(0));
     }
 }
