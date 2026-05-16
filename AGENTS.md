@@ -300,7 +300,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M1 | Step0-10a early vertical slice | Done |
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
-| M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed AHI HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
+| M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | NetCDF metadata index exists; still needs real backend/data loading, real KD-tree backend, and FCI-or-equivalent reader slice |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
