@@ -226,7 +226,9 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` I1-m2a: Owned image buffer construction and mask-aware luma finalization foundation for M2-image.
   - `[x]` I1-m2b: Crude stretch foundation with in-place float normalization and scale/offset history for M2-image.
   - `[x]` I1-m2prec: Add generic or parallel `f64` float image/enhancement path; keep `f32` only as an optimization/compatibility dtype, not the only enhancement dtype.
-  - `[@]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
+  - `[~]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
+    - `[x]` I1-m5a1: Add Trollimage-style gamma/invert operations for `FloatImage<f32/f64>` plus mask-aware RGBA finalization without forcing the working buffer to u8.
+    - `[ ]` I1-next2: Add band-aware dimensions, broader alpha/finalize policy, mode conversion, and save helpers.
 - `[ ]` I2: Colormap system: validation, colorize/palettize, RGB/RGBA conversion, merging, reversing/ranging, export, and YAML loading.
 - `[ ]` I3: Legacy `Image` compatibility where needed.
 - `[ ]` I4: Color-space conversion and utility ramps.
@@ -343,7 +345,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M4-resample-f: Add real KD-tree backend or accelerated nearest-neighbour structure for the current nearest path. Roadmap: S2.
     - `[x]` M4-resample-f1: Add exact 2D KD point index and route swath nearest through it. Roadmap: S2.
 - `[~]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
-  - `[ ]` M5-enhance-composite-a: Inspect Trollimage `XRImage` and Satpy enhancement chain behavior; add gamma/invert/alpha-finalize foundations without collapsing f64 paths to u8. Roadmap: I1/I5.
+  - `[x]` M5-enhance-composite-a: Inspect Trollimage `XRImage` and Satpy enhancement chain behavior; add gamma/invert/alpha-finalize foundations without collapsing f64 paths to u8. Roadmap: I1/I5.
   - `[ ]` M5-enhance-composite-b: Add arithmetic composite foundations such as normalized difference, ratio, sum, and difference with mask propagation and consuming APIs. Roadmap: C1.
   - `[ ]` M5-enhance-composite-c: Add spectral composite foundations for weighted blends and band replacement/mapping. Roadmap: C2.
   - `[ ]` M5-enhance-composite-d: Add YAML-driven enhancer/composite registration slice. Roadmap: I5/C0/C2.
@@ -473,7 +475,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 
 | Can | Cannot |
 |-----|--------|
-| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch with scale/offset history | Broader XRImage parity: gamma/invert, alpha/finalize policy, colorize, mode conversion, or save helpers |
+| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch, Trollimage-style gamma/invert, and mask-aware RGBA finalization | Broader XRImage parity: band-aware dimensions, broader alpha/finalize policy, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 
