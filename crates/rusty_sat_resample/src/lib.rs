@@ -5,6 +5,7 @@ pub mod crs;
 pub mod geometry;
 pub mod nearest;
 pub mod neighbour;
+pub mod scene;
 pub mod swath;
 
 pub use area::{
@@ -22,6 +23,7 @@ pub use neighbour::{
     get_area_neighbour_info, sample_nearest_from_neighbour_info, Neighbour, NeighbourInfo,
     SampleMissingPolicy,
 };
+pub use scene::SceneResampleExt;
 pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};
 
 use rusty_sat_core::{Dataset, Result, RustySatError};

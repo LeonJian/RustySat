@@ -271,7 +271,9 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 - `[ ]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
 - `[ ]` SC2: Scene spatial operations: finest/coarsest area, crop, aggregate, slice, copy, same-area/proj checks, and area iteration.
-- `[@]` SC3: Scene resampling pipeline and integration with all resamplers.
+- `[~]` SC3: Scene resampling pipeline and integration with all resamplers.
+  - `[x]` SC3-m4e: Add `SceneResampleExt` in `rusty_sat_resample` so callers can resample all currently loaded datasets through a Rust-native Scene-level workflow without making `rusty_sat_core` depend on resampling crates.
+  - `[ ]` SC3-next: Add Satpy-like `Scene::resample` parity: dataset selection, area choice helpers, resampler preparation/cache, and integration with future KD-tree/native/bilinear resamplers.
 - `[~]` SC4: Scene save/show/to-xarray APIs.
   - `[x]` SC4-m2e: Add `Scene::save_dataset` wrapper for self-made datasets through a Rust-native writer contract.
   - `[ ]` SC4-next: Add `show`, `to_xarray`/export model, writer selection helpers, filename templating, and broader Satpy save API parity.
@@ -296,7 +298,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed AHI HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
-| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Started with S1 geometry foundations; still needs KD-tree, NetCDF/FCI-or-equivalent reader slice, and Scene resampling API |
+| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Scene-level extension exists; still needs real KD-tree backend and NetCDF/FCI-or-equivalent reader slice |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
@@ -324,7 +326,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
   - `[x]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
   - `[ ]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
-  - `[ ]` M4-resample-e: Add `Scene::resample` integration for current nearest/KD-tree path. Roadmap: SC3.
+  - `[x]` M4-resample-e: Add Scene-level resampling integration for current nearest path. Roadmap: SC3.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
@@ -436,6 +438,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
 | `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, area-to-area nearest neighbour query foundation, and nearest sampled-output helper for `DataGrid` | Real KD-tree backend, multi-neighbour queries/sampling, swath neighbour info, geocentric/great-circle distances |
+| `SceneResampleExt`: Scene-level resampling extension in `rusty_sat_resample` for all currently loaded datasets through a supplied `Resampler` and destination area | Full Satpy `Scene.resample` parity: dataset selection, area helpers, resampler cache/preparation, and multiple resampler families |
 | `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
 
 ### rusty_sat_composites
