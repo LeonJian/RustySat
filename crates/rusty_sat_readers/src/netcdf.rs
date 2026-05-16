@@ -236,6 +236,50 @@ pub enum NetCdfContent {
     Attributes(BTreeMap<String, MetadataValue>),
 }
 
+impl NetCdfContent {
+    pub fn as_dtype(&self) -> Option<&str> {
+        match self {
+            Self::DType(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_shape(&self) -> Option<&[usize]> {
+        match self {
+            Self::Shape(shape) => Some(shape),
+            _ => None,
+        }
+    }
+
+    pub fn as_dimensions(&self) -> Option<&[String]> {
+        match self {
+            Self::Dimensions(dims) => Some(dims),
+            _ => None,
+        }
+    }
+
+    pub fn as_dimension_length(&self) -> Option<usize> {
+        match self {
+            Self::DimensionLength(len) => Some(*len),
+            _ => None,
+        }
+    }
+
+    pub fn as_attribute(&self) -> Option<&MetadataValue> {
+        match self {
+            Self::Attribute(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_attributes(&self) -> Option<&BTreeMap<String, MetadataValue>> {
+        match self {
+            Self::Attributes(attrs) => Some(attrs),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetCdfMetadata {
     content: BTreeMap<String, NetCdfContent>,
@@ -351,7 +395,7 @@ impl NetCdfMetadata {
     fn collect_dimensions(&mut self, path: &str, dimensions: &BTreeMap<String, usize>) {
         for (name, length) in dimensions {
             self.content.insert(
-                format!("{path}/dimension/{name}"),
+                join_path(path, &format!("dimension/{name}")),
                 NetCdfContent::DimensionLength(*length),
             );
         }
@@ -620,5 +664,146 @@ mod tests {
         .to_string();
 
         assert!(err.contains("NetCDF variable 'data/vis_05/measured/radiance'"));
+    }
+
+    // — accessor helpers —
+
+    #[test]
+    fn netcdf_content_accessors_return_none_for_wrong_variant() {
+        let group = NetCdfContent::Group;
+        assert!(group.as_dtype().is_none());
+        assert!(group.as_shape().is_none());
+        assert!(group.as_dimension_length().is_none());
+        assert!(group.as_attribute().is_none());
+        assert!(group.as_attributes().is_none());
+
+        let dtype = NetCdfContent::DType("f32".to_string());
+        assert_eq!(dtype.as_dtype(), Some("f32"));
+        assert!(dtype.as_shape().is_none());
+
+        let shape = NetCdfContent::Shape(vec![2, 3]);
+        assert_eq!(shape.as_shape(), Some(&[2, 3][..]));
+
+        let dims = NetCdfContent::Dimensions(vec!["y".to_string(), "x".to_string()]);
+        assert_eq!(
+            dims.as_dimensions(),
+            Some(&["y".to_string(), "x".to_string()][..])
+        );
+
+        let dim_len = NetCdfContent::DimensionLength(5);
+        assert_eq!(dim_len.as_dimension_length(), Some(5));
+
+        let attr = NetCdfContent::Attribute(MetadataValue::String("K".to_string()));
+        assert_eq!(
+            attr.as_attribute(),
+            Some(&MetadataValue::String("K".to_string()))
+        );
+
+        let attrs = NetCdfContent::Attributes(BTreeMap::from([(
+            "units".to_string(),
+            MetadataValue::String("K".to_string()),
+        )]));
+        let map = attrs.as_attributes().unwrap();
+        assert_eq!(
+            map.get("units"),
+            Some(&MetadataValue::String("K".to_string()))
+        );
+    }
+
+    // — get_attr returns None —
+
+    #[test]
+    fn get_attr_returns_none_for_non_attribute_key() {
+        let metadata = NetCdfMetadata::collect(&fci_like_root()).unwrap();
+
+        assert!(metadata
+            .get_attr("data/vis_04/measured/effective_radiance/shape")
+            .is_none());
+        assert!(metadata
+            .get_attr("data/vis_04/measured/effective_radiance/dtype")
+            .is_none());
+        assert!(metadata.get_attr("nonexistent").is_none());
+    }
+
+    // — root-level dimensions —
+
+    #[test]
+    fn collects_root_level_dimensions_without_leading_slash() {
+        let root = NetCdfGroup::root()
+            .with_dimension("y", 100)
+            .unwrap()
+            .with_dimension("x", 200)
+            .unwrap();
+
+        let metadata = NetCdfMetadata::collect(&root).unwrap();
+
+        assert_eq!(
+            metadata.get("dimension/y"),
+            Some(&NetCdfContent::DimensionLength(100))
+        );
+        assert_eq!(
+            metadata.get("dimension/x"),
+            Some(&NetCdfContent::DimensionLength(200))
+        );
+        // Sanity: root-level dimensions must not have a leading /.
+        assert!(!metadata.contains("/dimension/y"));
+    }
+
+    // — collect_required group attributes —
+
+    #[test]
+    fn collect_required_picks_up_group_attributes() {
+        let inner = NetCdfGroup::new("inner")
+            .unwrap()
+            .with_attr("description", "test group")
+            .unwrap();
+        let root = NetCdfGroup::root().with_group(inner).unwrap();
+
+        let metadata =
+            NetCdfMetadata::collect_required(&root, ["inner/attr/description"], &BTreeMap::new())
+                .unwrap();
+
+        assert_eq!(
+            metadata.get_attr("inner/attr/description"),
+            Some(&MetadataValue::String("test group".to_string()))
+        );
+    }
+
+    // — expand_required_variable_names —
+
+    #[test]
+    fn collect_required_expands_multiple_values_and_errors_on_missing() {
+        let mut replacements = BTreeMap::new();
+        replacements.insert(
+            "channel".to_string(),
+            vec!["vis_04".to_string(), "ir_38".to_string()],
+        );
+
+        let err = NetCdfMetadata::collect_required(
+            &fci_like_root(),
+            ["data/{channel}/measured/effective_radiance"],
+            &replacements,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("ir_38"),
+            "expected error mentioning the missing channel, got: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_required_rejects_empty_replacement_value() {
+        let mut replacements = BTreeMap::new();
+        replacements.insert("channel".to_string(), vec!["".to_string()]);
+
+        let err =
+            expand_required_variable_names(["data/{channel}/measured/radiance"], &replacements)
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("cannot contain an empty value"));
+        assert!(err.contains("channel"));
     }
 }
