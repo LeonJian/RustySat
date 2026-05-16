@@ -14,6 +14,258 @@
 use rusty_sat_core::{MetadataValue, Result, RustySatError};
 use std::collections::BTreeMap;
 
+pub trait NetCdfMetadataSource {
+    fn read_metadata_tree(&self, filename: &str, auto_mask_and_scale: bool) -> Result<NetCdfGroup>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InMemoryNetCdfSource {
+    root: NetCdfGroup,
+}
+
+impl InMemoryNetCdfSource {
+    pub fn new(root: NetCdfGroup) -> Self {
+        Self { root }
+    }
+}
+
+impl NetCdfMetadataSource for InMemoryNetCdfSource {
+    fn read_metadata_tree(
+        &self,
+        _filename: &str,
+        _auto_mask_and_scale: bool,
+    ) -> Result<NetCdfGroup> {
+        Ok(self.root.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetCdfFileTypeInfo {
+    required_netcdf_variables: Vec<String>,
+    variable_name_replacements: BTreeMap<String, Vec<String>>,
+}
+
+impl NetCdfFileTypeInfo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_required_variables(
+        mut self,
+        variables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        self.set_required_variables(variables)?;
+        Ok(self)
+    }
+
+    pub fn with_variable_name_replacement(
+        mut self,
+        key: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        self.insert_variable_name_replacement(key, values)?;
+        Ok(self)
+    }
+
+    pub fn set_required_variables(
+        &mut self,
+        variables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<()> {
+        self.required_netcdf_variables.clear();
+        for variable in variables {
+            let variable = variable.into();
+            validate_netcdf_path("required NetCDF variable", &variable)?;
+            self.required_netcdf_variables.push(variable);
+        }
+        Ok(())
+    }
+
+    pub fn insert_variable_name_replacement(
+        &mut self,
+        key: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<()> {
+        let key = key.into();
+        if key.trim().is_empty() {
+            return Err(RustySatError::invalid_input(
+                "NetCDF variable replacement key cannot be empty",
+            ));
+        }
+        if key.contains(['{', '}', '/']) {
+            return Err(RustySatError::invalid_input(
+                "NetCDF variable replacement key cannot contain braces or '/'",
+            ));
+        }
+        let values = values.into_iter().map(Into::into).collect::<Vec<_>>();
+        if values.is_empty() {
+            return Err(RustySatError::invalid_input(format!(
+                "NetCDF variable replacement '{key}' must have at least one value"
+            )));
+        }
+        for value in &values {
+            if value.trim().is_empty() {
+                return Err(RustySatError::invalid_input(format!(
+                    "NetCDF variable replacement '{key}' cannot contain an empty value"
+                )));
+            }
+        }
+        self.variable_name_replacements.insert(key, values);
+        Ok(())
+    }
+
+    pub fn required_netcdf_variables(&self) -> &[String] {
+        &self.required_netcdf_variables
+    }
+
+    pub fn variable_name_replacements(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.variable_name_replacements
+    }
+
+    pub fn has_required_variables(&self) -> bool {
+        !self.required_netcdf_variables.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetCdfFileHandler {
+    filename: String,
+    filename_info: BTreeMap<String, MetadataValue>,
+    filetype_info: NetCdfFileTypeInfo,
+    metadata: NetCdfMetadata,
+    auto_mask_and_scale: bool,
+}
+
+impl NetCdfFileHandler {
+    pub fn from_source(
+        filename: impl Into<String>,
+        filename_info: BTreeMap<String, MetadataValue>,
+        filetype_info: NetCdfFileTypeInfo,
+        source: &impl NetCdfMetadataSource,
+    ) -> Result<Self> {
+        Self::from_source_with_options(filename, filename_info, filetype_info, source, false)
+    }
+
+    pub fn from_source_with_options(
+        filename: impl Into<String>,
+        filename_info: BTreeMap<String, MetadataValue>,
+        filetype_info: NetCdfFileTypeInfo,
+        source: &impl NetCdfMetadataSource,
+        auto_mask_and_scale: bool,
+    ) -> Result<Self> {
+        let filename = validate_filename(filename)?;
+        let root = source.read_metadata_tree(&filename, auto_mask_and_scale)?;
+        Self::from_root_with_options(
+            filename,
+            filename_info,
+            filetype_info,
+            &root,
+            auto_mask_and_scale,
+        )
+    }
+
+    pub fn from_root(
+        filename: impl Into<String>,
+        filename_info: BTreeMap<String, MetadataValue>,
+        filetype_info: NetCdfFileTypeInfo,
+        root: &NetCdfGroup,
+    ) -> Result<Self> {
+        Self::from_root_with_options(filename, filename_info, filetype_info, root, false)
+    }
+
+    pub fn from_root_with_options(
+        filename: impl Into<String>,
+        filename_info: BTreeMap<String, MetadataValue>,
+        filetype_info: NetCdfFileTypeInfo,
+        root: &NetCdfGroup,
+        auto_mask_and_scale: bool,
+    ) -> Result<Self> {
+        let filename = validate_filename(filename)?;
+        let metadata = if filetype_info.has_required_variables() {
+            NetCdfMetadata::collect_required(
+                root,
+                filetype_info.required_netcdf_variables(),
+                filetype_info.variable_name_replacements(),
+            )?
+        } else {
+            NetCdfMetadata::collect(root)?
+        };
+        Ok(Self {
+            filename,
+            filename_info,
+            filetype_info,
+            metadata,
+            auto_mask_and_scale,
+        })
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn filename_info(&self) -> &BTreeMap<String, MetadataValue> {
+        &self.filename_info
+    }
+
+    pub fn filetype_info(&self) -> &NetCdfFileTypeInfo {
+        &self.filetype_info
+    }
+
+    pub fn metadata(&self) -> &NetCdfMetadata {
+        &self.metadata
+    }
+
+    pub fn auto_mask_and_scale(&self) -> bool {
+        self.auto_mask_and_scale
+    }
+
+    pub fn contains(&self, key: &str) -> bool {
+        self.metadata.contains(key)
+    }
+
+    pub fn get(&self, key: &str) -> Option<&NetCdfContent> {
+        self.metadata.get(key)
+    }
+
+    pub fn get_or_err(&self, key: &str) -> Result<&NetCdfContent> {
+        self.get(key)
+            .ok_or_else(|| RustySatError::not_found(format!("NetCDF key '{key}'")))
+    }
+
+    pub fn attr(&self, key: &str) -> Option<&MetadataValue> {
+        self.metadata.get_attr(key)
+    }
+
+    pub fn variable_shape(&self, variable_path: &str) -> Result<&[usize]> {
+        self.get_or_err(&format!("{variable_path}/shape"))?
+            .as_shape()
+            .ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "'{variable_path}/shape' is not a shape entry"
+                ))
+            })
+    }
+
+    pub fn variable_dimensions(&self, variable_path: &str) -> Result<&[String]> {
+        self.get_or_err(&format!("{variable_path}/dimensions"))?
+            .as_dimensions()
+            .ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "'{variable_path}/dimensions' is not a dimensions entry"
+                ))
+            })
+    }
+
+    pub fn variable_dtype(&self, variable_path: &str) -> Result<&str> {
+        self.get_or_err(&format!("{variable_path}/dtype"))?
+            .as_dtype()
+            .ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "'{variable_path}/dtype' is not a dtype entry"
+                ))
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetCdfVariable {
     name: String,
@@ -221,6 +473,12 @@ impl NetCdfGroup {
             .variables
             .get(variable_name)
             .map(|variable| (group, variable))
+    }
+}
+
+impl Default for NetCdfGroup {
+    fn default() -> Self {
+        Self::root()
     }
 }
 
@@ -539,6 +797,30 @@ fn validate_attr_name(key: impl Into<String>) -> Result<String> {
     Ok(key)
 }
 
+fn validate_filename(filename: impl Into<String>) -> Result<String> {
+    let filename = filename.into();
+    if filename.trim().is_empty() {
+        return Err(RustySatError::invalid_input(
+            "NetCDF filename cannot be empty",
+        ));
+    }
+    Ok(filename)
+}
+
+fn validate_netcdf_path(kind: &str, path: &str) -> Result<()> {
+    if path.trim().is_empty() {
+        return Err(RustySatError::invalid_input(format!(
+            "{kind} path cannot be empty"
+        )));
+    }
+    if path.split('/').any(str::is_empty) && !path.starts_with("/attr/") {
+        return Err(RustySatError::invalid_input(format!(
+            "{kind} path contains an empty component"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +1087,128 @@ mod tests {
 
         assert!(err.contains("cannot contain an empty value"));
         assert!(err.contains("channel"));
+    }
+
+    #[test]
+    fn file_handler_collects_full_metadata_like_satpy_when_no_required_list_is_set() {
+        let handler = NetCdfFileHandler::from_root(
+            "fci.nc",
+            BTreeMap::from([("repeat_cycle".to_string(), MetadataValue::Integer(1))]),
+            NetCdfFileTypeInfo::new(),
+            &fci_like_root(),
+        )
+        .unwrap();
+
+        assert_eq!(handler.filename(), "fci.nc");
+        assert_eq!(
+            handler.filename_info().get("repeat_cycle"),
+            Some(&MetadataValue::Integer(1))
+        );
+        assert!(handler.contains("data/vis_04/measured/effective_radiance"));
+        assert_eq!(
+            handler
+                .variable_shape("data/vis_04/measured/effective_radiance")
+                .unwrap(),
+            &[2, 3]
+        );
+        assert_eq!(
+            handler
+                .variable_dimensions("data/vis_04/measured/effective_radiance")
+                .unwrap(),
+            &["y".to_string(), "x".to_string()]
+        );
+        assert_eq!(
+            handler
+                .variable_dtype("data/vis_04/measured/effective_radiance")
+                .unwrap(),
+            "u16"
+        );
+        assert_eq!(
+            handler.attr("/attr/platform"),
+            Some(&MetadataValue::String("MTG-I1".to_string()))
+        );
+    }
+
+    #[test]
+    fn file_handler_collects_required_variables_with_replacements() {
+        let filetype_info = NetCdfFileTypeInfo::new()
+            .with_required_variables([
+                "data/{channel}/measured/effective_radiance",
+                "/attr/platform",
+            ])
+            .unwrap()
+            .with_variable_name_replacement("channel", ["vis_04"])
+            .unwrap();
+
+        let handler = NetCdfFileHandler::from_root(
+            "fci.nc",
+            BTreeMap::new(),
+            filetype_info,
+            &fci_like_root(),
+        )
+        .unwrap();
+
+        assert!(handler.contains("data/vis_04/measured/effective_radiance"));
+        assert!(handler.contains("/attr/platform"));
+        assert!(!handler.contains("data"));
+    }
+
+    #[derive(Debug)]
+    struct RecordingSource {
+        root: NetCdfGroup,
+        expected_auto_mask_and_scale: bool,
+    }
+
+    impl NetCdfMetadataSource for RecordingSource {
+        fn read_metadata_tree(
+            &self,
+            filename: &str,
+            auto_mask_and_scale: bool,
+        ) -> Result<NetCdfGroup> {
+            if filename != "fci.nc" {
+                return Err(RustySatError::invalid_input("unexpected filename"));
+            }
+            if auto_mask_and_scale != self.expected_auto_mask_and_scale {
+                return Err(RustySatError::invalid_input(
+                    "unexpected auto mask/scale setting",
+                ));
+            }
+            Ok(self.root.clone())
+        }
+    }
+
+    #[test]
+    fn file_handler_passes_auto_mask_and_scale_to_metadata_source() {
+        let source = RecordingSource {
+            root: fci_like_root(),
+            expected_auto_mask_and_scale: true,
+        };
+
+        let handler = NetCdfFileHandler::from_source_with_options(
+            "fci.nc",
+            BTreeMap::new(),
+            NetCdfFileTypeInfo::new(),
+            &source,
+            true,
+        )
+        .unwrap();
+
+        assert!(handler.auto_mask_and_scale());
+        assert!(handler.contains("data/vis_04/measured/effective_radiance"));
+    }
+
+    #[test]
+    fn file_type_info_validates_required_variables_and_replacements() {
+        let err = NetCdfFileTypeInfo::new()
+            .with_required_variables(["data//radiance"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty component"));
+
+        let err = NetCdfFileTypeInfo::new()
+            .with_variable_name_replacement("channel", Vec::<String>::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least one value"));
     }
 }

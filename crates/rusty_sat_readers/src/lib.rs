@@ -11,7 +11,10 @@ pub use ahi_hsd::{
     AhiDataInfo, AhiHsdFileHandler, AhiHsdHeader, AhiHsdReader, AhiNavigationInfo,
     AhiProjectionInfo, AhiSegmentBlockInfo, AhiSegmentInfo,
 };
-pub use netcdf::{NetCdfContent, NetCdfGroup, NetCdfMetadata, NetCdfVariable};
+pub use netcdf::{
+    InMemoryNetCdfSource, NetCdfContent, NetCdfFileHandler, NetCdfFileTypeInfo, NetCdfGroup,
+    NetCdfMetadata, NetCdfMetadataSource, NetCdfVariable,
+};
 pub use text_grid::{
     lazy_text_grid, load_text_grid, parse_text_grid, TextGridChunkSource, TextGridReader,
 };
