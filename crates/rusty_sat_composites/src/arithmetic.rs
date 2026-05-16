@@ -9,12 +9,11 @@
 //! operations over matching runtime-typed arrays, mask propagation, and owned
 //! variants that mutate the consumed left-hand buffer in place.
 
+use crate::common::{require_two_arrays, require_two_owned_arrays, ArrayInfo};
 use crate::Compositor;
 use rusty_sat_core::{
-    AnyDataArray, Coordinate, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError,
-    ValidityMask,
+    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
 };
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithmeticOperation {
@@ -151,52 +150,6 @@ impl Compositor for ArithmeticCompositor {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ArrayInfo {
-    shape: Vec<usize>,
-    dims: Vec<String>,
-    coords: BTreeMap<String, Coordinate>,
-}
-
-fn require_two_arrays(inputs: &[Dataset]) -> Result<[&AnyDataArray; 2]> {
-    if inputs.len() != 2 {
-        return Err(RustySatError::invalid_input(format!(
-            "arithmetic compositor requires exactly 2 input datasets, got {}",
-            inputs.len()
-        )));
-    }
-    let [left, right] = inputs else {
-        unreachable!("length checked above");
-    };
-    Ok([
-        left.array()
-            .ok_or_else(|| missing_array_error(left.id().name()))?,
-        right
-            .array()
-            .ok_or_else(|| missing_array_error(right.id().name()))?,
-    ])
-}
-
-fn require_two_owned_arrays(inputs: Vec<Dataset>) -> Result<[AnyDataArray; 2]> {
-    if inputs.len() != 2 {
-        return Err(RustySatError::invalid_input(format!(
-            "arithmetic compositor requires exactly 2 input datasets, got {}",
-            inputs.len()
-        )));
-    }
-    let mut arrays = Vec::with_capacity(2);
-    for dataset in inputs {
-        let name = dataset.id().name().to_string();
-        let array = dataset
-            .into_array()
-            .ok_or_else(|| missing_array_error(&name))?;
-        arrays.push(array);
-    }
-    arrays.try_into().map_err(|_| {
-        RustySatError::invalid_input("arithmetic compositor requires exactly 2 input datasets")
-    })
-}
-
 fn require_matching_arrays(left: &AnyDataArray, right: &AnyDataArray) -> Result<ArrayInfo> {
     if left.shape() != right.shape() {
         return Err(RustySatError::invalid_input(format!(
@@ -261,14 +214,10 @@ fn build_binary_mask(
     Some(output)
 }
 
-fn missing_array_error(name: &str) -> RustySatError {
-    RustySatError::invalid_input(format!("dataset '{name}' has no array data"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::{DataType, NumericElement};
+    use rusty_sat_core::{Coordinate, DataType, NumericElement};
 
     #[test]
     fn arithmetic_difference_matches_satpy_binary_shape() -> Result<()> {
