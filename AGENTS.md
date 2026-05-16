@@ -241,7 +241,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` C0: Composite core: `CompositeBase`, generic/single-band/RGB compositors, enhance-to-dataset helpers, band handling, and mode checks.
   - `[x]` C0-m2c: RGB compositor vertical slice for three matching single-band datasets, with Satpy-like common-channel mask behavior.
   - `[ ]` C0-next: Broader composite parity: `CompositeBase`, generic/single-band compositors, enhance-to-dataset helpers, band/mode checks, metadata combination, optional prerequisites, and YAML integration.
-- `[@]` C1: Arithmetic composites such as NDVI/EVI/diff/ratio/sum and channel-operation compositors.
+- `[x]` C1: Arithmetic composites such as NDVI/EVI/diff/ratio/sum and channel-operation compositors.
+  - `[x]` C1-m5b1: Add `ArithmeticCompositor` foundations for difference, ratio, sum, and normalized difference over matching runtime-typed arrays, with mask propagation and an owned path that mutates the consumed left-hand f64 buffer.
 - `[@]` C2: Spectral composites, weighted blends, and band replacement/mapping.
 - `[ ]` C3: SEVIRI composites and YAML parity.
 - `[ ]` C4: ABI, AHI, AMI, AGRI, and VIIRS composites plus YAML data.
@@ -346,7 +347,7 @@ Before starting or closing a milestone, check this table and update both the mil
     - `[x]` M4-resample-f1: Add exact 2D KD point index and route swath nearest through it. Roadmap: S2.
 - `[~]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
   - `[x]` M5-enhance-composite-a: Inspect Trollimage `XRImage` and Satpy enhancement chain behavior; add gamma/invert/alpha-finalize foundations without collapsing f64 paths to u8. Roadmap: I1/I5.
-  - `[ ]` M5-enhance-composite-b: Add arithmetic composite foundations such as normalized difference, ratio, sum, and difference with mask propagation and consuming APIs. Roadmap: C1.
+  - `[x]` M5-enhance-composite-b: Add arithmetic composite foundations such as normalized difference, ratio, sum, and difference with mask propagation and consuming APIs. Roadmap: C1.
   - `[ ]` M5-enhance-composite-c: Add spectral composite foundations for weighted blends and band replacement/mapping. Roadmap: C2.
   - `[ ]` M5-enhance-composite-d: Add YAML-driven enhancer/composite registration slice. Roadmap: I5/C0/C2.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
@@ -469,6 +470,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Can | Cannot |
 |-----|--------|
 | Execute `RgbCompositor` for three matching 2D single-band runtime-typed datasets into a band-major `bands,y,x` f64 dataset with Satpy-like common-channel mask behavior; large callers should use the consuming `compose_rgb_owned` path | Full `CompositeBase`/`GenericCompositor` parity, metadata combination, optional prerequisites, YAML composite loading, or Scene dependency execution |
+| Execute `ArithmeticCompositor` for matching runtime-typed arrays with difference, ratio, sum, and normalized-difference operations; masks are OR-propagated and large callers can use `compose_owned` to reuse the consumed left-hand f64 buffer for output | Full arithmetic YAML integration, metadata combination parity, multi-input/channel-operation compositors, or Scene dependency execution |
 | Define `CompositeRecipe` and `ModifierRecipe` in `rusty_sat_core` | Execute registered composite/modifier recipes through `Scene` |
 
 ### rusty_sat_image

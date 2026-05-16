@@ -6,6 +6,10 @@
 //!   image mode like `RGB`, and by default combines invalid pixels across all
 //!   color channels when no alpha band is present.
 
+pub mod arithmetic;
+
+pub use arithmetic::{ArithmeticCompositor, ArithmeticOperation};
+
 use rusty_sat_core::{
     AnyDataArray, Coordinate, DataArray, DataId, Dataset, MetadataValue, NumericElement, Result,
     RustySatError, ValidityMask,
