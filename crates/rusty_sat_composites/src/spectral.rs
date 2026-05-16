@@ -10,12 +10,14 @@
 //! patch one band in a band-major composite without rebuilding unrelated
 //! bands when the caller can give up ownership.
 
+use crate::common::{
+    extract_composite_metadata, missing_array_error, require_two_arrays, require_two_owned_arrays,
+    ArrayInfo,
+};
 use crate::Compositor;
 use rusty_sat_core::{
-    AnyDataArray, Coordinate, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError,
-    ValidityMask,
+    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
 };
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpectralBlender {
@@ -56,14 +58,17 @@ impl SpectralBlender {
                 *output += *weight * value;
             }
         }
+        let metadata = extract_composite_metadata(inputs[0].attrs());
         self.finish_dataset(
             array_info,
             values,
             build_or_mask(arrays.iter().map(|array| array.mask())),
+            &metadata,
         )
     }
 
     pub fn compose_owned(self, inputs: Vec<Dataset>) -> Result<Dataset> {
+        let metadata = extract_composite_metadata(inputs[0].attrs());
         let arrays = require_weighted_owned_arrays(inputs, self.weights.len())?;
         let refs = arrays.iter().collect::<Vec<_>>();
         let array_info = require_matching_2d_arrays(&refs)?;
@@ -88,6 +93,7 @@ impl SpectralBlender {
             array_info,
             values,
             build_or_mask(masks.iter().map(Option::as_ref)),
+            &metadata,
         )
     }
 
@@ -96,6 +102,7 @@ impl SpectralBlender {
         array_info: ArrayInfo,
         values: Vec<f64>,
         mask: Option<ValidityMask>,
+        metadata: &Vec<(String, MetadataValue)>,
     ) -> Result<Dataset> {
         let mut array =
             DataArray::<f64>::from_vec_named(array_info.shape, array_info.dims, values)?;
@@ -117,6 +124,9 @@ impl SpectralBlender {
                     .collect::<Result<Vec<_>>>()?,
             ),
         )?;
+        for (key, value) in metadata {
+            dataset.insert_attr(key, value.clone())?;
+        }
         Ok(dataset)
     }
 }
@@ -153,10 +163,12 @@ impl BandReplacementCompositor {
         let replacement_values = replacement.values_as_f64();
         replace_band_values(&mut values, &replacement_values, &band_info);
         let mask = build_replacement_mask(base.mask(), replacement.mask(), &band_info);
-        self.finish_dataset(band_info.array_info, values, mask)
+        let metadata = extract_composite_metadata(inputs[0].attrs());
+        self.finish_dataset(band_info.array_info, values, mask, &metadata)
     }
 
     pub fn compose_owned(self, inputs: Vec<Dataset>) -> Result<Dataset> {
+        let metadata = extract_composite_metadata(inputs[0].attrs());
         let [base, replacement] = require_two_owned_arrays(inputs)?;
         let band_info = require_band_replacement_shapes(&base, &replacement, self.band_index)?;
         let (mut values, base_mask) = base.into_f64_values_and_mask();
@@ -164,7 +176,7 @@ impl BandReplacementCompositor {
         replace_band_values(&mut values, &replacement_values, &band_info);
         let mask =
             build_replacement_mask(base_mask.as_ref(), replacement_mask.as_ref(), &band_info);
-        self.finish_dataset(band_info.array_info, values, mask)
+        self.finish_dataset(band_info.array_info, values, mask, &metadata)
     }
 
     fn finish_dataset(
@@ -172,6 +184,7 @@ impl BandReplacementCompositor {
         array_info: ArrayInfo,
         values: Vec<f64>,
         mask: Option<ValidityMask>,
+        metadata: &Vec<(String, MetadataValue)>,
     ) -> Result<Dataset> {
         let mut array =
             DataArray::<f64>::from_vec_named(array_info.shape, array_info.dims, values)?;
@@ -184,6 +197,9 @@ impl BandReplacementCompositor {
         let mut dataset = Dataset::new(DataId::new(self.name.clone())?).with_array(array);
         dataset.insert_attr("operation", MetadataValue::string("band_replacement"))?;
         dataset.insert_attr("band_index", MetadataValue::Integer(self.band_index as i64))?;
+        for (key, value) in metadata {
+            dataset.insert_attr(key, value.clone())?;
+        }
         Ok(dataset)
     }
 }
@@ -195,19 +211,6 @@ impl Compositor for BandReplacementCompositor {
 
     fn compose(&self, inputs: &[Dataset]) -> Result<Dataset> {
         self.compose_replacement(inputs)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ArrayInfo {
-    shape: Vec<usize>,
-    dims: Vec<String>,
-    coords: BTreeMap<String, Coordinate>,
-}
-
-impl ArrayInfo {
-    fn value_count(&self) -> usize {
-        self.shape.iter().product()
     }
 }
 
@@ -268,45 +271,6 @@ fn require_weighted_owned_arrays(
                 .ok_or_else(|| missing_array_error(&name))
         })
         .collect()
-}
-
-fn require_two_arrays(inputs: &[Dataset]) -> Result<[&AnyDataArray; 2]> {
-    if inputs.len() != 2 {
-        return Err(RustySatError::invalid_input(format!(
-            "band replacement requires exactly 2 input datasets, got {}",
-            inputs.len()
-        )));
-    }
-    let [base, replacement] = inputs else {
-        unreachable!("length checked above");
-    };
-    Ok([
-        base.array()
-            .ok_or_else(|| missing_array_error(base.id().name()))?,
-        replacement
-            .array()
-            .ok_or_else(|| missing_array_error(replacement.id().name()))?,
-    ])
-}
-
-fn require_two_owned_arrays(inputs: Vec<Dataset>) -> Result<[AnyDataArray; 2]> {
-    if inputs.len() != 2 {
-        return Err(RustySatError::invalid_input(format!(
-            "band replacement requires exactly 2 input datasets, got {}",
-            inputs.len()
-        )));
-    }
-    let mut arrays = Vec::with_capacity(2);
-    for dataset in inputs {
-        let name = dataset.id().name().to_string();
-        let array = dataset
-            .into_array()
-            .ok_or_else(|| missing_array_error(&name))?;
-        arrays.push(array);
-    }
-    arrays.try_into().map_err(|_| {
-        RustySatError::invalid_input("band replacement requires exactly 2 input datasets")
-    })
 }
 
 fn require_matching_2d_arrays(arrays: &[&AnyDataArray]) -> Result<ArrayInfo> {
@@ -434,14 +398,10 @@ fn build_replacement_mask(
     Some(output)
 }
 
-fn missing_array_error(name: &str) -> RustySatError {
-    RustySatError::invalid_input(format!("dataset '{name}' has no array data"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::{DataType, NumericElement};
+    use rusty_sat_core::{Coordinate, DataType, NumericElement};
 
     #[test]
     fn spectral_blender_computes_weighted_channel() -> Result<()> {
@@ -606,6 +566,113 @@ mod tests {
         assert!(BandReplacementCompositor::new("replace", 5)?
             .compose(&[left.clone(), left])
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn spectral_blender_works_with_single_weight() -> Result<()> {
+        let inputs = vec![dataset(
+            "green",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![10.0, 20.0])?,
+        )];
+
+        let output = SpectralBlender::new("passthrough", vec![1.0])?.compose(&inputs)?;
+
+        assert_eq!(output.array().unwrap().values_as_f64(), vec![10.0, 20.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn band_replacement_no_masks_produces_no_output_mask() -> Result<()> {
+        let base = dataset(
+            "rgb",
+            DataArray::<f64>::from_vec_named(
+                [3, 1, 2],
+                ["bands", "y", "x"],
+                vec![1.0, 2.0, 10.0, 20.0, 100.0, 200.0],
+            )?,
+        );
+        let replacement = dataset(
+            "corrected",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![30.0, 40.0])?,
+        );
+
+        let output =
+            BandReplacementCompositor::new("rgb_corrected", 1)?.compose(&[base, replacement])?;
+
+        assert!(output.array().and_then(|a| a.mask()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn spectral_blender_owned_propagates_masks() -> Result<()> {
+        let inputs = vec![
+            dataset(
+                "a",
+                DataArray::<f64>::from_vec_named([1, 3], ["y", "x"], vec![1.0, 2.0, 3.0])?
+                    .with_mask(ValidityMask::from_masked_flags([true, false, false]))?,
+            ),
+            dataset(
+                "b",
+                DataArray::<u16>::from_vec_named([1, 3], ["y", "x"], vec![4, 5, 6])?
+                    .with_mask(ValidityMask::from_masked_flags([false, false, true]))?,
+            ),
+        ];
+
+        let output = SpectralBlender::new("blend", vec![0.5, 0.5])?.compose_owned(inputs)?;
+        let mask = output.array().and_then(AnyDataArray::mask).unwrap();
+
+        assert_eq!(mask.masked_count(), 2);
+        assert_eq!(mask.is_masked(0), Some(true));
+        assert_eq!(mask.is_masked(1), Some(false));
+        assert_eq!(mask.is_masked(2), Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn spectral_compositors_propagate_metadata_from_first_input() -> Result<()> {
+        // Spectral blender
+        let mut green = dataset(
+            "green",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![10.0, 20.0])?,
+        );
+        green.insert_attr("units", MetadataValue::string("W m-2 sr-1"))?;
+        green.insert_attr("irrelevant", MetadataValue::string("no"))?;
+        let nir = dataset(
+            "nir",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![5.0, 5.0])?,
+        );
+
+        let blend_output = SpectralBlender::new("blend", vec![0.5, 0.5])?.compose(&[green, nir])?;
+        assert_eq!(
+            blend_output.attr("units").and_then(MetadataValue::as_str),
+            Some("W m-2 sr-1")
+        );
+        assert!(blend_output.attr("irrelevant").is_none());
+
+        // Band replacement
+        let mut base = dataset(
+            "rgb",
+            DataArray::<f64>::from_vec_named(
+                [3, 1, 2],
+                ["bands", "y", "x"],
+                vec![1.0, 2.0, 10.0, 20.0, 100.0, 200.0],
+            )?,
+        );
+        base.insert_attr("standard_name", MetadataValue::string("true_color"))?;
+        let replacement = dataset(
+            "corrected",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![30.0, 40.0])?,
+        );
+
+        let repl_output =
+            BandReplacementCompositor::new("rgb_corrected", 1)?.compose(&[base, replacement])?;
+        assert_eq!(
+            repl_output
+                .attr("standard_name")
+                .and_then(MetadataValue::as_str),
+            Some("true_color")
+        );
         Ok(())
     }
 
