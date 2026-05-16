@@ -13,7 +13,8 @@ pub use ahi_hsd::{
 };
 pub use netcdf::{
     FciL1cNetCdfHandler, InMemoryNetCdfSource, NetCdfContent, NetCdfDataSource, NetCdfFileHandler,
-    NetCdfFileTypeInfo, NetCdfGroup, NetCdfMetadata, NetCdfMetadataSource, NetCdfVariable,
+    NetCdfFileTypeInfo, NetCdfFixtureSource, NetCdfGroup, NetCdfMetadata, NetCdfMetadataSource,
+    NetCdfVariable,
 };
 pub use text_grid::{
     lazy_text_grid, load_text_grid, parse_text_grid, TextGridChunkSource, TextGridReader,

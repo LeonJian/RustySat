@@ -12,9 +12,15 @@
 //! preserving the public lookup behavior.
 
 use rusty_sat_core::{
-    AnyDataArray, DataId, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
+    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
 };
+use serde_norway::{Mapping, Value};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+const MAX_NETCDF_FIXTURE_YAML_BYTES: usize = 32 * 1024 * 1024;
+const MAX_NETCDF_FIXTURE_YAML_DEPTH: usize = 96;
 
 pub trait NetCdfMetadataSource {
     fn read_metadata_tree(&self, filename: &str, auto_mask_and_scale: bool) -> Result<NetCdfGroup>;
@@ -84,6 +90,78 @@ impl NetCdfDataSource for InMemoryNetCdfSource {
         self.arrays.get(variable_path).cloned().ok_or_else(|| {
             RustySatError::not_found(format!("NetCDF variable data '{variable_path}'"))
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NetCdfFixtureSource {
+    inner: InMemoryNetCdfSource,
+}
+
+impl NetCdfFixtureSource {
+    pub fn from_str(yaml: &str) -> Result<Self> {
+        if yaml.len() > MAX_NETCDF_FIXTURE_YAML_BYTES {
+            return Err(RustySatError::invalid_input(format!(
+                "NetCDF fixture YAML exceeds size limit of {MAX_NETCDF_FIXTURE_YAML_BYTES} bytes"
+            )));
+        }
+        let value: Value = serde_norway::from_str(yaml).map_err(|err| {
+            RustySatError::invalid_input(format!("invalid NetCDF fixture YAML: {err}"))
+        })?;
+        validate_fixture_yaml_depth(&value, 0)?;
+        let mapping = value
+            .as_mapping()
+            .ok_or_else(|| RustySatError::invalid_input("NetCDF fixture root must be a mapping"))?;
+        let mut arrays = BTreeMap::new();
+        let root = parse_fixture_group(mapping, "", &mut arrays)?;
+        Ok(Self {
+            inner: InMemoryNetCdfSource { root, arrays },
+        })
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path).map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to inspect NetCDF fixture '{}': {err}",
+                path.display()
+            ))
+        })?;
+        if metadata.len() as usize > MAX_NETCDF_FIXTURE_YAML_BYTES {
+            return Err(RustySatError::invalid_input(format!(
+                "NetCDF fixture '{}' exceeds size limit of {MAX_NETCDF_FIXTURE_YAML_BYTES} bytes",
+                path.display()
+            )));
+        }
+        let yaml = fs::read_to_string(path).map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to read NetCDF fixture '{}': {err}",
+                path.display()
+            ))
+        })?;
+        Self::from_str(&yaml)
+    }
+
+    pub fn inner(&self) -> &InMemoryNetCdfSource {
+        &self.inner
+    }
+}
+
+impl NetCdfMetadataSource for NetCdfFixtureSource {
+    fn read_metadata_tree(&self, filename: &str, auto_mask_and_scale: bool) -> Result<NetCdfGroup> {
+        self.inner.read_metadata_tree(filename, auto_mask_and_scale)
+    }
+}
+
+impl NetCdfDataSource for NetCdfFixtureSource {
+    fn read_array(
+        &self,
+        filename: &str,
+        variable_path: &str,
+        auto_mask_and_scale: bool,
+    ) -> Result<AnyDataArray> {
+        self.inner
+            .read_array(filename, variable_path, auto_mask_and_scale)
     }
 }
 
@@ -1057,6 +1135,269 @@ fn nearly_equal(left: f64, right: f64) -> bool {
     (left - right).abs() <= f64::EPSILON
 }
 
+fn parse_fixture_group(
+    mapping: &Mapping,
+    path: &str,
+    arrays: &mut BTreeMap<String, AnyDataArray>,
+) -> Result<NetCdfGroup> {
+    let mut group = if path.is_empty() {
+        NetCdfGroup::root()
+    } else {
+        let (_, name) = split_parent_path(path);
+        NetCdfGroup::new(name)?
+    };
+    if let Some(attrs) = optional_mapping(mapping, "attrs")? {
+        for (key, value) in attrs {
+            group.insert_attr(
+                yaml_key_to_string(key)?,
+                crate::yaml_reader::yaml_to_metadata_value(value)?,
+            )?;
+        }
+    }
+    if let Some(dimensions) = optional_mapping(mapping, "dimensions")? {
+        for (key, value) in dimensions {
+            group.insert_dimension(
+                yaml_key_to_string(key)?,
+                yaml_value_to_usize(value, "dimension length")?,
+            )?;
+        }
+    }
+    if let Some(variables) = optional_mapping(mapping, "variables")? {
+        for (key, value) in variables {
+            let variable_name = yaml_key_to_string(key)?;
+            let variable_mapping = value.as_mapping().ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "NetCDF fixture variable '{variable_name}' must be a mapping"
+                ))
+            })?;
+            let variable_path = join_path(path, &variable_name);
+            let (variable, array) = parse_fixture_variable(&variable_name, variable_mapping)?;
+            group.insert_variable(variable)?;
+            if let Some(array) = array {
+                arrays.insert(variable_path, array);
+            }
+        }
+    }
+    if let Some(groups) = optional_mapping(mapping, "groups")? {
+        for (key, value) in groups {
+            let group_name = yaml_key_to_string(key)?;
+            let group_mapping = value.as_mapping().ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "NetCDF fixture group '{group_name}' must be a mapping"
+                ))
+            })?;
+            let group_path = join_path(path, &group_name);
+            group.insert_group(parse_fixture_group(group_mapping, &group_path, arrays)?)?;
+        }
+    }
+    Ok(group)
+}
+
+fn parse_fixture_variable(
+    name: &str,
+    mapping: &Mapping,
+) -> Result<(NetCdfVariable, Option<AnyDataArray>)> {
+    let dtype = required_string(mapping, "dtype", "NetCDF fixture variable")?;
+    let dimensions = required_string_list(mapping, "dimensions", "NetCDF fixture variable")?;
+    let shape = required_usize_list(mapping, "shape", "NetCDF fixture variable")?;
+    let mut variable = NetCdfVariable::new(name, dtype.clone(), dimensions.clone(), shape.clone())?;
+    if let Some(attrs) = optional_mapping(mapping, "attrs")? {
+        for (key, value) in attrs {
+            variable.insert_attr(
+                yaml_key_to_string(key)?,
+                crate::yaml_reader::yaml_to_metadata_value(value)?,
+            )?;
+        }
+    }
+    let array = optional_value(mapping, "values")
+        .map(|value| fixture_values_to_array(&dtype, &shape, &dimensions, value))
+        .transpose()?;
+    Ok((variable, array))
+}
+
+fn fixture_values_to_array(
+    dtype: &str,
+    shape: &[usize],
+    dimensions: &[String],
+    value: &Value,
+) -> Result<AnyDataArray> {
+    let values = value.as_sequence().ok_or_else(|| {
+        RustySatError::invalid_input("NetCDF fixture variable values must be a sequence")
+    })?;
+    match dtype {
+        "f32" => Ok(DataArray::<f32>::from_vec_named(
+            shape.to_vec(),
+            dimensions.iter().cloned(),
+            values
+                .iter()
+                .map(|value| yaml_value_to_f64(value, "f32 value").map(|value| value as f32))
+                .collect::<Result<Vec<_>>>()?,
+        )?
+        .into()),
+        "f64" => Ok(DataArray::<f64>::from_vec_named(
+            shape.to_vec(),
+            dimensions.iter().cloned(),
+            values
+                .iter()
+                .map(|value| yaml_value_to_f64(value, "f64 value"))
+                .collect::<Result<Vec<_>>>()?,
+        )?
+        .into()),
+        "u8" => Ok(DataArray::<u8>::from_vec_named(
+            shape.to_vec(),
+            dimensions.iter().cloned(),
+            values
+                .iter()
+                .map(|value| yaml_value_to_u8(value, "u8 value"))
+                .collect::<Result<Vec<_>>>()?,
+        )?
+        .into()),
+        "u16" => Ok(DataArray::<u16>::from_vec_named(
+            shape.to_vec(),
+            dimensions.iter().cloned(),
+            values
+                .iter()
+                .map(|value| yaml_value_to_u16(value, "u16 value"))
+                .collect::<Result<Vec<_>>>()?,
+        )?
+        .into()),
+        "i16" => Ok(DataArray::<i16>::from_vec_named(
+            shape.to_vec(),
+            dimensions.iter().cloned(),
+            values
+                .iter()
+                .map(|value| yaml_value_to_i16(value, "i16 value"))
+                .collect::<Result<Vec<_>>>()?,
+        )?
+        .into()),
+        _ => Err(RustySatError::unsupported(format!(
+            "NetCDF fixture dtype '{dtype}'"
+        ))),
+    }
+}
+
+fn validate_fixture_yaml_depth(value: &Value, depth: usize) -> Result<()> {
+    if depth > MAX_NETCDF_FIXTURE_YAML_DEPTH {
+        return Err(RustySatError::invalid_input(format!(
+            "NetCDF fixture YAML exceeds nesting depth limit of {MAX_NETCDF_FIXTURE_YAML_DEPTH}"
+        )));
+    }
+    if let Some(sequence) = value.as_sequence() {
+        for child in sequence {
+            validate_fixture_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Some(mapping) = value.as_mapping() {
+        for (key, child) in mapping {
+            validate_fixture_yaml_depth(key, depth + 1)?;
+            validate_fixture_yaml_depth(child, depth + 1)?;
+        }
+    }
+    if let Value::Tagged(tagged) = value {
+        validate_fixture_yaml_depth(&tagged.value, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn optional_value<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+    mapping.get(Value::String(key.to_string()))
+}
+
+fn optional_mapping<'a>(mapping: &'a Mapping, key: &str) -> Result<Option<&'a Mapping>> {
+    optional_value(mapping, key)
+        .map(|value| {
+            value.as_mapping().ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "NetCDF fixture section '{key}' must be a mapping"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn required_string(mapping: &Mapping, key: &str, context: &str) -> Result<String> {
+    optional_value(mapping, key)
+        .ok_or_else(|| RustySatError::invalid_input(format!("{context} requires '{key}'")))?
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| RustySatError::invalid_input(format!("{context} '{key}' must be a string")))
+}
+
+fn required_string_list(mapping: &Mapping, key: &str, context: &str) -> Result<Vec<String>> {
+    let value = optional_value(mapping, key)
+        .ok_or_else(|| RustySatError::invalid_input(format!("{context} requires '{key}'")))?;
+    value
+        .as_sequence()
+        .ok_or_else(|| {
+            RustySatError::invalid_input(format!("{context} '{key}' must be a sequence"))
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                RustySatError::invalid_input(format!("{context} '{key}' entries must be strings"))
+            })
+        })
+        .collect()
+}
+
+fn required_usize_list(mapping: &Mapping, key: &str, context: &str) -> Result<Vec<usize>> {
+    let value = optional_value(mapping, key)
+        .ok_or_else(|| RustySatError::invalid_input(format!("{context} requires '{key}'")))?;
+    value
+        .as_sequence()
+        .ok_or_else(|| {
+            RustySatError::invalid_input(format!("{context} '{key}' must be a sequence"))
+        })?
+        .iter()
+        .map(|value| yaml_value_to_usize(value, key))
+        .collect()
+}
+
+fn yaml_key_to_string(value: &Value) -> Result<String> {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| RustySatError::invalid_input("NetCDF fixture mapping keys must be strings"))
+}
+
+fn yaml_value_to_usize(value: &Value, context: &str) -> Result<usize> {
+    let value = value.as_i64().ok_or_else(|| {
+        RustySatError::invalid_input(format!("NetCDF fixture {context} must be an integer"))
+    })?;
+    usize::try_from(value).map_err(|_| {
+        RustySatError::invalid_input(format!(
+            "NetCDF fixture {context} must be a non-negative integer"
+        ))
+    })
+}
+
+fn yaml_value_to_u8(value: &Value, context: &str) -> Result<u8> {
+    u8::try_from(yaml_value_to_usize(value, context)?).map_err(|_| {
+        RustySatError::invalid_input(format!("NetCDF fixture {context} does not fit in u8"))
+    })
+}
+
+fn yaml_value_to_u16(value: &Value, context: &str) -> Result<u16> {
+    u16::try_from(yaml_value_to_usize(value, context)?).map_err(|_| {
+        RustySatError::invalid_input(format!("NetCDF fixture {context} does not fit in u16"))
+    })
+}
+
+fn yaml_value_to_i16(value: &Value, context: &str) -> Result<i16> {
+    let value = value.as_i64().ok_or_else(|| {
+        RustySatError::invalid_input(format!("NetCDF fixture {context} must be an integer"))
+    })?;
+    i16::try_from(value).map_err(|_| {
+        RustySatError::invalid_input(format!("NetCDF fixture {context} does not fit in i16"))
+    })
+}
+
+fn yaml_value_to_f64(value: &Value, context: &str) -> Result<f64> {
+    value.as_f64().ok_or_else(|| {
+        RustySatError::invalid_input(format!("NetCDF fixture {context} must be numeric"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1705,5 +2046,118 @@ mod tests {
         let array = dataset.array().unwrap();
 
         assert_eq!(array.mask().map(|m| m.masked_count()), Some(0));
+    }
+
+    #[test]
+    fn fixture_source_loads_fci_like_counts_dataset_from_yaml() {
+        let fixture = r#"
+attrs:
+  platform: MTG-I1
+groups:
+  data:
+    groups:
+      vis_04:
+        groups:
+          measured:
+            dimensions:
+              y: 2
+              x: 3
+            variables:
+              effective_radiance:
+                dtype: u16
+                dimensions: [y, x]
+                shape: [2, 3]
+                attrs:
+                  units: mW m-2 sr-1 (cm-1)-1
+                  ancillary_variables: pixel_quality
+                  _FillValue: 65535
+                  valid_range: [0, 4095]
+                values: [10, 4096, 12, 13, 65535, 15]
+"#;
+        let source = NetCdfFixtureSource::from_str(fixture).unwrap();
+        let handler = NetCdfFileHandler::from_source(
+            "fixture.yaml",
+            BTreeMap::new(),
+            NetCdfFileTypeInfo::new(),
+            &source,
+        )
+        .unwrap();
+        let fci = FciL1cNetCdfHandler::new(handler);
+
+        let dataset = fci.load_counts_dataset("vis_04", &source).unwrap();
+        let array = dataset.array().unwrap();
+        let mask = array.mask().unwrap();
+
+        assert_eq!(array.shape(), &[2, 3]);
+        assert_eq!(
+            array.values_as_f64(),
+            vec![10.0, 4096.0, 12.0, 13.0, 65535.0, 15.0]
+        );
+        assert_eq!(mask.is_masked(1), Some(true));
+        assert_eq!(mask.is_masked(4), Some(true));
+        assert_eq!(mask.masked_count(), 2);
+    }
+
+    #[test]
+    fn fixture_source_loads_from_path() {
+        let fixture = r#"
+groups:
+  data:
+    groups:
+      vis_04:
+        groups:
+          measured:
+            dimensions: {y: 1, x: 2}
+            variables:
+              effective_radiance:
+                dtype: u16
+                dimensions: [y, x]
+                shape: [1, 2]
+                attrs:
+                  valid_range: [0, 4095]
+                  ancillary_variables: pixel_quality
+                values: [1, 2]
+"#;
+        let path = std::env::temp_dir().join(format!(
+            "rusty_sat_netcdf_fixture_{}_loads_from_path.yaml",
+            std::process::id()
+        ));
+        fs::write(&path, fixture).unwrap();
+
+        let source = NetCdfFixtureSource::from_path(&path).unwrap();
+        let handler = NetCdfFileHandler::from_source(
+            path.to_string_lossy(),
+            BTreeMap::new(),
+            NetCdfFileTypeInfo::new(),
+            &source,
+        )
+        .unwrap();
+
+        assert_eq!(
+            handler
+                .variable_shape("data/vis_04/measured/effective_radiance")
+                .unwrap(),
+            &[1, 2]
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn fixture_source_rejects_value_count_mismatch() {
+        let fixture = r#"
+variables:
+  broken:
+    dtype: u16
+    dimensions: [x]
+    shape: [2]
+    values: [1]
+"#;
+
+        let err = NetCdfFixtureSource::from_str(fixture)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("shape"));
     }
 }

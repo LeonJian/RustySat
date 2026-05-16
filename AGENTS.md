@@ -187,6 +187,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` R0.2-m4d1: Add Satpy-style NetCDF metadata index foundations for groups, variables, dimensions, global attrs, object attrs, and `required_netcdf_variables` replacement expansion without selecting a native NetCDF backend yet.
     - `[x]` R0.2-m4d2a: Add a Satpy-like NetCDF file-handler facade over the metadata index, including filename/filetype info, full-vs-required metadata collection, typed lookup helpers, and backend-neutral metadata source wiring.
     - `[x]` R0.2-m4d2b: Add backend-neutral NetCDF variable data loading from a `NetCdfDataSource`, array shape/dimension validation against metadata, and a first FCI L1C measured-channel counts loader with valid-range/fill masking.
+    - `[x]` R0.2-m4d2c: Add a documented YAML fixture-backed `NetCdfFixtureSource` for real file-backed tests without native NetCDF/HDF build requirements; this is the adapter contract for the later native backend.
     - `[ ]` R0.2-next: Add real backend adapter, auto mask/scale handling, xarray-like variable access, and FCI-oriented data loading.
   - `[ ]` R0.3: HDF5 common base including object/region reference handling.
   - `[ ]` R0.4: HDF4 common base for MODIS and other legacy products.
@@ -331,10 +332,10 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
   - `[~]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
     - `[x]` M4-resample-d1: Add NetCDF metadata/file-content foundation after inspecting Satpy `NetCDF4FileHandler` and FCI docs. Roadmap: R0.2.
-    - `[~]` M4-resample-d2: Add a real backend adapter and FCI-or-equivalent data-loading slice. Roadmap: R0.2/R1.
+    - `[x]` M4-resample-d2: Add a backend adapter strategy and FCI-or-equivalent data-loading slice. Roadmap: R0.2/R1.
       - `[x]` M4-resample-d2a: Add backend-neutral NetCDF file-handler facade and metadata source trait. Roadmap: R0.2.
       - `[x]` M4-resample-d2b: Add backend-neutral variable data source and first FCI L1C measured-channel counts dataset loader. Roadmap: R0.2/R1.
-      - `[ ]` M4-resample-d2c: Add native NetCDF/HDF-backed adapter or a documented fixture-backed adapter strategy for real files. Roadmap: R0.2/R1.
+      - `[x]` M4-resample-d2c: Add documented YAML fixture-backed source for real file-backed tests while postponing native NetCDF/HDF dependency choice. Roadmap: R0.2/R1.
   - `[x]` M4-resample-e: Add Scene-level resampling integration for current nearest path. Roadmap: SC3.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
@@ -436,7 +437,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
 | `AhiHsdReader` can expose a configured calibration, load a local uncompressed HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
 | Current reader inventory/load path still uses `f32` by default for memory-efficient display output | Final scientific/HDR HSD workflows need writer-preserving float/16-bit policies and public selection of the f64 calibrated path |
-| NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, and load an FCI L1C measured-channel counts dataset from a backend-neutral data source with valid-range/fill masking | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
+| NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, load an FCI L1C measured-channel counts dataset, and read YAML fixture-backed NetCDF trees/arrays from disk for portable tests | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
 
 ### rusty_sat_resample
 
