@@ -1,6 +1,7 @@
 //! Reader framework foundations.
 
 pub mod ahi_hsd;
+pub mod fci_l1c_nc;
 pub mod filename_pattern;
 pub mod netcdf;
 pub mod text_grid;
@@ -11,6 +12,7 @@ pub use ahi_hsd::{
     AhiDataInfo, AhiHsdFileHandler, AhiHsdHeader, AhiHsdReader, AhiNavigationInfo,
     AhiProjectionInfo, AhiSegmentBlockInfo, AhiSegmentInfo,
 };
+pub use fci_l1c_nc::FciL1cFixtureReader;
 pub use netcdf::{
     FciL1cNetCdfHandler, InMemoryNetCdfSource, NetCdfContent, NetCdfDataSource, NetCdfFileHandler,
     NetCdfFileTypeInfo, NetCdfFixtureSource, NetCdfGroup, NetCdfMetadata, NetCdfMetadataSource,

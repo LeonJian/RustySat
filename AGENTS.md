@@ -188,7 +188,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` R0.2-m4d2a: Add a Satpy-like NetCDF file-handler facade over the metadata index, including filename/filetype info, full-vs-required metadata collection, typed lookup helpers, and backend-neutral metadata source wiring.
     - `[x]` R0.2-m4d2b: Add backend-neutral NetCDF variable data loading from a `NetCdfDataSource`, array shape/dimension validation against metadata, and a first FCI L1C measured-channel counts loader with valid-range/fill masking.
     - `[x]` R0.2-m4d2c: Add a documented YAML fixture-backed `NetCdfFixtureSource` for real file-backed tests without native NetCDF/HDF build requirements; this is the adapter contract for the later native backend.
-    - `[ ]` R0.2-next: Add real backend adapter, auto mask/scale handling, xarray-like variable access, and FCI-oriented data loading.
+    - `[ ]` R0.2-next: Add native NetCDF/HDF adapter, real auto mask/scale handling, xarray-like variable access, and broader FCI/NetCDF data loading.
   - `[ ]` R0.3: HDF5 common base including object/region reference handling.
   - `[ ]` R0.4: HDF4 common base for MODIS and other legacy products.
   - `[ ]` R0.5: HDF-EOS base.
@@ -196,7 +196,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[ ]` R0.7: Instrument/product base modules for EUMETSAT, VII/VIIRS, SEVIRI, ABI, FCI, FY-4, LI, Landsat, HRIT JMA, and VIIRS/ATMS SDR.
   - `[ ]` R0.8: YAML reader completion: safe Python-tag representation, FileHandler instantiation, composite IDs, groups/bound groups, and delayed loading.
   - `[ ]` R0.9: Filename matching and grouping: `group_files`, multi-time grouping, and advanced matching.
-- `[@]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
+- `[~]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
+  - `[x]` R1-m4d3: Add first FCI L1C fixture-backed reader integration that exposes counts dataset IDs, loads measured-channel counts through the NetCDF handler, and participates in Scene load planning.
 - `[ ]` R2: LEO L1B readers, including VIIRS, MODIS, AVHRR, EPS, AAPP, OLCI, SLSTR, FY-3, ATMS, MetOp-SG, EarthCARE, PACE, MAIA, SCMI, and Satpy CF re-read.
 - `[ ]` R3: L2 product readers, including VIIRS L2/EDR, CLAVR-x, CMSAF, MIRS, NUCAPS, ACSPO, AMSR2, CALIOP, NWC SAF, IASI, TROPOMI, SeaDAS, Sentinel SAFE/SAR/MSI, GeoCAT, MERIS, OLCI, and SLSTR.
 - `[ ]` R4: Microwave, radio, lightning, and auxiliary readers.
@@ -303,7 +304,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
-| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | NetCDF metadata index exists; still needs real backend/data loading, real KD-tree backend, and FCI-or-equivalent reader slice |
+| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | FCI fixture reader slice exists; still needs real KD-tree backend and native NetCDF/HDF backend later |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
@@ -330,13 +331,15 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M4-resample-a: Add Pyresample-style shared geometry definition foundations. Roadmap: S1.
   - `[x]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
   - `[x]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
-  - `[~]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
+  - `[x]` M4-resample-d: Add first NetCDF/FCI-or-equivalent reader slice for resampling-oriented real data. Roadmap: R1/R0.2.
     - `[x]` M4-resample-d1: Add NetCDF metadata/file-content foundation after inspecting Satpy `NetCDF4FileHandler` and FCI docs. Roadmap: R0.2.
     - `[x]` M4-resample-d2: Add a backend adapter strategy and FCI-or-equivalent data-loading slice. Roadmap: R0.2/R1.
       - `[x]` M4-resample-d2a: Add backend-neutral NetCDF file-handler facade and metadata source trait. Roadmap: R0.2.
       - `[x]` M4-resample-d2b: Add backend-neutral variable data source and first FCI L1C measured-channel counts dataset loader. Roadmap: R0.2/R1.
       - `[x]` M4-resample-d2c: Add documented YAML fixture-backed source for real file-backed tests while postponing native NetCDF/HDF dependency choice. Roadmap: R0.2/R1.
+    - `[x]` M4-resample-d3: Add FCI fixture reader integration with Reader inventory/load and Scene planning. Roadmap: R1.
   - `[x]` M4-resample-e: Add Scene-level resampling integration for current nearest path. Roadmap: SC3.
+  - `[ ]` M4-resample-f: Add real KD-tree backend or accelerated nearest-neighbour structure for the current neighbour-info path. Roadmap: S2.
 - `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
@@ -437,7 +440,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
 | `AhiHsdReader` can expose a configured calibration, load a local uncompressed HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
 | Current reader inventory/load path still uses `f32` by default for memory-efficient display output | Final scientific/HDR HSD workflows need writer-preserving float/16-bit policies and public selection of the f64 calibrated path |
-| NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, load an FCI L1C measured-channel counts dataset, and read YAML fixture-backed NetCDF trees/arrays from disk for portable tests | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
+| NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, load an FCI L1C measured-channel counts dataset, read YAML fixture-backed NetCDF trees/arrays from disk, and expose a fixture-backed FCI reader for Scene planning | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
 
 ### rusty_sat_resample
 
