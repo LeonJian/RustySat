@@ -91,14 +91,17 @@ impl ArithmeticCompositor {
             .zip(right_values)
             .map(|(left, right)| self.operation.apply(left, right))
             .collect::<Vec<_>>();
+        let left_metadata = extract_composite_metadata(inputs[0].attrs());
         self.finish_dataset(
             array_info,
             values,
             build_binary_mask(left.mask(), right.mask()),
+            &left_metadata,
         )
     }
 
     pub fn compose_owned(self, inputs: Vec<Dataset>) -> Result<Dataset> {
+        let left_metadata = extract_composite_metadata(inputs[0].attrs());
         let [left, right] = require_two_owned_arrays(inputs)?;
         let array_info = require_matching_arrays(&left, &right)?;
         let (mut values, left_mask) = left.into_f64_values_and_mask();
@@ -110,6 +113,7 @@ impl ArithmeticCompositor {
             array_info,
             values,
             build_binary_mask(left_mask.as_ref(), right_mask.as_ref()),
+            &left_metadata,
         )
     }
 
@@ -118,6 +122,7 @@ impl ArithmeticCompositor {
         array_info: ArrayInfo,
         values: Vec<f64>,
         mask: Option<ValidityMask>,
+        metadata: &Vec<(String, MetadataValue)>,
     ) -> Result<Dataset> {
         let mut array =
             DataArray::<f64>::from_vec_named(array_info.shape, array_info.dims, values)?;
@@ -129,6 +134,9 @@ impl ArithmeticCompositor {
         }
         let mut dataset = Dataset::new(DataId::new(self.name.clone())?).with_array(array);
         dataset.insert_attr("operation", MetadataValue::string(self.operation.name()))?;
+        for (key, value) in metadata {
+            dataset.insert_attr(key, value.clone())?;
+        }
         Ok(dataset)
     }
 }
@@ -209,6 +217,21 @@ fn require_matching_arrays(left: &AnyDataArray, right: &AnyDataArray) -> Result<
         dims: left.dims().to_vec(),
         coords: left.coords().clone(),
     })
+}
+
+const PROPAGATED_METADATA_KEYS: &[&str] = &["units", "standard_name", "ancillary_variables"];
+
+fn extract_composite_metadata(
+    attrs: &BTreeMap<String, MetadataValue>,
+) -> Vec<(String, MetadataValue)> {
+    PROPAGATED_METADATA_KEYS
+        .iter()
+        .filter_map(|key| {
+            attrs
+                .get(*key)
+                .map(|value| (key.to_string(), value.clone()))
+        })
+        .collect()
 }
 
 fn build_binary_mask(
@@ -380,6 +403,111 @@ mod tests {
 
         assert!(compositor.compose(std::slice::from_ref(&left)).is_err());
         assert!(compositor.compose(&[left, right]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn arithmetic_rejects_dimension_name_mismatch() -> Result<()> {
+        let compositor = ArithmeticCompositor::difference("diff")?;
+        let left = dataset(
+            "left",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![1.0, 2.0])?,
+        );
+        let right = dataset(
+            "right",
+            DataArray::<f64>::from_vec_named([1, 2], ["bands", "x"], vec![1.0, 2.0])?,
+        );
+
+        assert!(compositor.compose(&[left, right]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn arithmetic_rejects_dataset_without_array() -> Result<()> {
+        let compositor = ArithmeticCompositor::difference("diff")?;
+        let empty = Dataset::new(DataId::new("empty")?);
+        let right = dataset(
+            "right",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![1.0, 2.0])?,
+        );
+
+        assert!(compositor.compose(&[empty, right]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn arithmetic_produces_no_mask_when_neither_input_has_one() -> Result<()> {
+        let compositor = ArithmeticCompositor::sum("sum")?;
+        let inputs = vec![
+            dataset(
+                "left",
+                DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![1.0, 2.0])?,
+            ),
+            dataset(
+                "right",
+                DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![3.0, 4.0])?,
+            ),
+        ];
+
+        let output = compositor.compose(&inputs)?;
+        assert!(output.array().and_then(|a| a.mask()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn arithmetic_owned_propagates_masks() -> Result<()> {
+        let inputs = vec![
+            dataset(
+                "left",
+                DataArray::<f64>::from_vec_named([1, 3], ["y", "x"], vec![1.0, 2.0, 3.0])?
+                    .with_mask(ValidityMask::from_masked_flags([true, false, false]))?,
+            ),
+            dataset(
+                "right",
+                DataArray::<u16>::from_vec_named([1, 3], ["y", "x"], vec![4, 5, 6])?
+                    .with_mask(ValidityMask::from_masked_flags([false, false, true]))?,
+            ),
+        ];
+
+        let output = ArithmeticCompositor::sum("sum")?.compose_owned(inputs)?;
+        let mask = output.array().and_then(AnyDataArray::mask).unwrap();
+
+        assert_eq!(mask.masked_count(), 2);
+        assert_eq!(mask.is_masked(0), Some(true));
+        assert_eq!(mask.is_masked(1), Some(false));
+        assert_eq!(mask.is_masked(2), Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn arithmetic_propagates_metadata_from_left_input() -> Result<()> {
+        let compositor = ArithmeticCompositor::difference("diff")?;
+        let mut left = dataset(
+            "left",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![1.0, 2.0])?,
+        );
+        left.insert_attr("units", MetadataValue::string("K"))?;
+        left.insert_attr(
+            "standard_name",
+            MetadataValue::string("brightness_temperature"),
+        )?;
+        left.insert_attr("irrelevant", MetadataValue::string("should not propagate"))?;
+        let right = dataset(
+            "right",
+            DataArray::<f64>::from_vec_named([1, 2], ["y", "x"], vec![1.0, 2.0])?,
+        );
+
+        let output = compositor.compose(&[left, right])?;
+
+        assert_eq!(
+            output.attr("units").and_then(MetadataValue::as_str),
+            Some("K")
+        );
+        assert_eq!(
+            output.attr("standard_name").and_then(MetadataValue::as_str),
+            Some("brightness_temperature")
+        );
+        assert!(output.attr("irrelevant").is_none());
         Ok(())
     }
 
