@@ -319,4 +319,33 @@ mod tests {
 
         assert_eq!(index.nearest(0.0, 0.0, None).unwrap().unwrap().index(), 0);
     }
+
+    #[test]
+    fn kd_index_returns_none_for_empty_tree() {
+        let index = KdPointIndex2D::from_xy(&[], &[]).unwrap();
+
+        assert!(index.is_empty());
+        assert_eq!(index.nearest(0.0, 0.0, None).unwrap(), None);
+    }
+
+    #[test]
+    fn kd_index_rejects_mismatched_xy_lengths() {
+        let err = KdPointIndex2D::from_xy(&[0.0, 1.0], &[0.0]).unwrap_err();
+        assert!(err.to_string().contains("lengths differ"));
+    }
+
+    #[test]
+    fn kd_index_rejects_non_finite_query_coordinates() {
+        let index = KdPointIndex2D::from_xy(&[0.0], &[0.0]).unwrap();
+
+        assert!(index.nearest(f64::NAN, 0.0, None).is_err());
+        assert!(index.nearest(0.0, f64::INFINITY, None).is_err());
+    }
+
+    #[test]
+    fn kd_index_rejects_negative_radius() {
+        let index = KdPointIndex2D::from_xy(&[0.0], &[0.0]).unwrap();
+
+        assert!(index.nearest(0.0, 0.0, Some(-0.5)).is_err());
+    }
 }
