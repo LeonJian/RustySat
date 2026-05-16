@@ -10,7 +10,7 @@
 //! does not yet implement kd-tree lookup, CRS transforms, or full fill-vs-mask
 //! policy.
 
-use crate::{AreaDefinition, Resampler, SwathDefinition};
+use crate::{AreaDefinition, KdPointIndex2D, Resampler, SwathDefinition};
 use rusty_sat_core::{
     Coordinate, DataGrid, Dataset, LazyDataArray, MetadataValue, Result, RustySatError,
     ValidityMask,
@@ -501,23 +501,19 @@ fn resample_swath_nearest_with_policy(
     let lats = source.lats().ok_or_else(|| {
         RustySatError::invalid_input("swath nearest resampling requires latitude coordinates")
     })?;
+    let source_index = KdPointIndex2D::from_xy(lons, lats)?;
     let (dst_height, dst_width) = destination.shape();
     let mut values = Vec::with_capacity(dst_height * dst_width);
     let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
     for y in 0..dst_height {
         for x in 0..dst_width {
             let (dst_x, dst_y) = pixel_center(destination, y, x);
-            let Some((source_index, distance)) = nearest_swath_point(lons, lats, dst_x, dst_y)
-            else {
+            let Some(nearest) = source_index.nearest(dst_x, dst_y, radius_of_influence)? else {
                 values.push(fill_value);
                 mask_flags.push(missing_value_policy.masks_missing());
                 continue;
             };
-            if radius_of_influence.is_some_and(|radius| distance > radius) {
-                values.push(fill_value);
-                mask_flags.push(missing_value_policy.masks_missing());
-                continue;
-            }
+            let source_index = nearest.index();
             let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
             values.push(source_grid.values()[source_index]);
             mask_flags.push(source_masked);
@@ -596,22 +592,6 @@ fn nearest_source_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usiz
     let (nearest_x, nearest_y) = pixel_center(source, src_y, src_x);
     let distance = ((nearest_x - x).powi(2) + (nearest_y - y).powi(2)).sqrt();
     Some((src_y, src_x, distance))
-}
-
-fn nearest_swath_point(lons: &[f64], lats: &[f64], x: f64, y: f64) -> Option<(usize, f64)> {
-    lons.iter()
-        .zip(lats)
-        .enumerate()
-        .filter_map(|(idx, (lon, lat))| {
-            if !lon.is_finite() || !lat.is_finite() {
-                return None;
-            }
-            let dx = *lon - x;
-            let dy = *lat - y;
-            Some((idx, dx * dx + dy * dy))
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .map(|(idx, distance_squared)| (idx, distance_squared.sqrt()))
 }
 
 fn require_lonlat_area(area: &AreaDefinition) -> Result<()> {

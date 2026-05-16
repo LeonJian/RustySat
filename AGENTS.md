@@ -212,7 +212,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` S2: KD-tree nearest resampling: tree creation, neighbour info, sampled output, radius calculation, Gaussian weights, great-circle distances, chunked parallel processing, `BaseResampler`, and full swath-to-grid support.
   - `[x]` S2-m4c: Add Pyresample-style neighbour-info data model and projection-coordinate area-to-area nearest neighbour query foundation.
   - `[x]` S2-m4c2: Add nearest sampled-output helper from `NeighbourInfo`, including fill-vs-mask missing handling and source-mask propagation.
-  - `[ ]` S2-next: Add real KD-tree backend, multi-neighbour sampling, great-circle/geocentric distances, and chunked parallel processing.
+  - `[x]` S2-m4f1: Add a dependency-free exact 2D KD point index and route lon/lat swath nearest queries through it, preserving radius-of-influence and source-mask behavior.
+  - `[ ]` S2-next: Add Pyresample-style multi-neighbour query/sampling, great-circle/geocentric distances, chunked parallel processing, and neighbour-info generation for swaths.
 - `[ ]` S3: Bilinear, cubic, and spline interpolation.
 - `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
 - `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
@@ -225,11 +226,11 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` I1-m2a: Owned image buffer construction and mask-aware luma finalization foundation for M2-image.
   - `[x]` I1-m2b: Crude stretch foundation with in-place float normalization and scale/offset history for M2-image.
   - `[x]` I1-m2prec: Add generic or parallel `f64` float image/enhancement path; keep `f32` only as an optimization/compatibility dtype, not the only enhancement dtype.
-  - `[ ]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
+  - `[@]` I1-next: Broader XRImage parity: band-aware dimensions, gamma, invert, alpha/finalize policy, mode conversion, and save helpers.
 - `[ ]` I2: Colormap system: validation, colorize/palettize, RGB/RGBA conversion, merging, reversing/ranging, export, and YAML loading.
 - `[ ]` I3: Legacy `Image` compatibility where needed.
 - `[ ]` I4: Color-space conversion and utility ramps.
-- `[ ]` I5: Satpy enhancer framework and YAML enhancement chains.
+- `[@]` I5: Satpy enhancer framework and YAML enhancement chains.
 - `[ ]` I6: Instrument enhancements for ABI, AHI, VIIRS, MIMIC, and enhancement YAML data.
 - `[ ]` I7: Convolution filters and overlays.
 
@@ -238,8 +239,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` C0: Composite core: `CompositeBase`, generic/single-band/RGB compositors, enhance-to-dataset helpers, band handling, and mode checks.
   - `[x]` C0-m2c: RGB compositor vertical slice for three matching single-band datasets, with Satpy-like common-channel mask behavior.
   - `[ ]` C0-next: Broader composite parity: `CompositeBase`, generic/single-band compositors, enhance-to-dataset helpers, band/mode checks, metadata combination, optional prerequisites, and YAML integration.
-- `[ ]` C1: Arithmetic composites such as NDVI/EVI/diff/ratio/sum and channel-operation compositors.
-- `[ ]` C2: Spectral composites, weighted blends, and band replacement/mapping.
+- `[@]` C1: Arithmetic composites such as NDVI/EVI/diff/ratio/sum and channel-operation compositors.
+- `[@]` C2: Spectral composites, weighted blends, and band replacement/mapping.
 - `[ ]` C3: SEVIRI composites and YAML parity.
 - `[ ]` C4: ABI, AHI, AMI, AGRI, and VIIRS composites plus YAML data.
 - `[ ]` C5: Advanced composites: masks, resolution-aware composites, lookup tables, fill, auxiliary data, cloud products, lightning overlays, SAR, and config loading.
@@ -304,8 +305,8 @@ Before starting or closing a milestone, check this table and update both the mil
 | M2-foundation | P0-1, P0-2, P0-3 | Done |
 | M2-image | I1 partial (`XRImage` construction, crude stretch, f32/f64 enhancement buffers, finalize-to-u8 basics), C0 partial (generic/RGB compositor), W2 partial (PNG/simple image writer with 8-bit and 16-bit output paths), SC4 partial (`Scene.save_dataset`) | Done |
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
-| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | FCI fixture reader slice exists; still needs real KD-tree backend and native NetCDF/HDF backend later |
-| M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Needs M2-image primitives first |
+| M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Done for geometry, fixture-backed FCI/NetCDF reader slice, Scene resampling extension, and exact 2D KD point-index acceleration; native NetCDF/HDF and full Pyresample KD parity remain later roadmap work |
+| M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Selected next |
 | M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
 | M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
@@ -327,7 +328,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M3-reader-c: Load raw AHI count arrays for a tiny local/synthetic HSD fixture, preserving dtype and metadata.
   - `[x]` M3-reader-d: Apply first visible/IR calibration path needed for basic image output.
   - `[x]` M3-reader-e: Integrate AHI reader with `Scene` load path and write a basic PNG from an AHI sample.
-- `[~]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
+- `[x]` M4-resample: FCI/another NetCDF reader plus CRS/KD-tree foundations sufficient for real projection-aware resampling.
   - `[x]` M4-resample-a: Add Pyresample-style shared geometry definition foundations. Roadmap: S1.
   - `[x]` M4-resample-b: Add projection-definition/area completeness needed by KD-tree setup. Roadmap: S1.
   - `[x]` M4-resample-c: Add KD-tree neighbour information foundation. Roadmap: S2.
@@ -339,8 +340,13 @@ Before starting or closing a milestone, check this table and update both the mil
       - `[x]` M4-resample-d2c: Add documented YAML fixture-backed source for real file-backed tests while postponing native NetCDF/HDF dependency choice. Roadmap: R0.2/R1.
     - `[x]` M4-resample-d3: Add FCI fixture reader integration with Reader inventory/load and Scene planning. Roadmap: R1.
   - `[x]` M4-resample-e: Add Scene-level resampling integration for current nearest path. Roadmap: SC3.
-  - `[ ]` M4-resample-f: Add real KD-tree backend or accelerated nearest-neighbour structure for the current neighbour-info path. Roadmap: S2.
-- `[ ]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
+  - `[x]` M4-resample-f: Add real KD-tree backend or accelerated nearest-neighbour structure for the current nearest path. Roadmap: S2.
+    - `[x]` M4-resample-f1: Add exact 2D KD point index and route swath nearest through it. Roadmap: S2.
+- `[~]` M5-enhance-composite: Broaden image enhancement and arithmetic/spectral composites.
+  - `[ ]` M5-enhance-composite-a: Inspect Trollimage `XRImage` and Satpy enhancement chain behavior; add gamma/invert/alpha-finalize foundations without collapsing f64 paths to u8. Roadmap: I1/I5.
+  - `[ ]` M5-enhance-composite-b: Add arithmetic composite foundations such as normalized difference, ratio, sum, and difference with mask propagation and consuming APIs. Roadmap: C1.
+  - `[ ]` M5-enhance-composite-c: Add spectral composite foundations for weighted blends and band replacement/mapping. Roadmap: C2.
+  - `[ ]` M5-enhance-composite-d: Add YAML-driven enhancer/composite registration slice. Roadmap: I5/C0/C2.
 - `[ ]` M6-resampling-full: Complete major resampler families and performance work.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
 - `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
@@ -451,9 +457,10 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
-| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, cached valid-input/output counts, area-to-area nearest neighbour query foundation, and nearest sampled-output helper for `DataGrid` with both borrowed and owned variants | Real KD-tree backend, multi-neighbour queries/sampling, swath neighbour info, geocentric/great-circle distances |
+| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, cached valid-input/output counts, area-to-area nearest neighbour query foundation, and nearest sampled-output helper for `DataGrid` with both borrowed and owned variants | Multi-neighbour queries/sampling, swath neighbour-info arrays, geocentric/great-circle distances |
+| `KdPointIndex2D`: dependency-free exact 2D KD-tree over finite source points for nearest-point lookup with optional radius-of-influence pruning | Pyresample-compatible geocentric KD-tree, multi-neighbour output, chunked/parallel queries |
 | `SceneResampleExt`: Scene-level resampling extension in `rusty_sat_resample` for all currently loaded datasets through a supplied `Resampler` and destination area, with both borrowed (`&self`) and consuming (`self`) APIs | Full Satpy `Scene.resample` parity: dataset selection, area helpers, resampler cache/preparation, and multiple resampler families |
-| `NearestAreaResampler`: area-to-area and swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption, and `resample_owned` through the `Resampler` trait | KD-tree acceleration, CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
+| `NearestAreaResampler`: area-to-area and KD-indexed swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption, and `resample_owned` through the `Resampler` trait | CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
 
 ### rusty_sat_composites
 
