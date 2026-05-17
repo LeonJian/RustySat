@@ -610,4 +610,83 @@ mod tests {
             Some(&MetadataValue::string("kept"))
         );
     }
+
+    #[test]
+    fn identity_passes_through_unchanged() {
+        let destination = area("destination", 2, 3);
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([
+                false, true, false, false, false, false,
+            ]))
+            .unwrap();
+
+        let result = native_resample_2d(&grid, &destination).unwrap();
+
+        assert_eq!(result.shape(), (2, 3));
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(result.mask().unwrap().masked_count(), 1);
+        assert!(result.coord("x").is_some());
+        assert!(result.coord("y").is_some());
+    }
+
+    #[test]
+    fn owned_repeat_and_aggregate_produce_same_output_as_borrowed() {
+        let grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let borrowed = native_repeat_2d(&grid, 2, 2).unwrap();
+        let owned = native_repeat_2d_owned(grid, 2, 2).unwrap();
+        assert_eq!(borrowed.values(), owned.values());
+        assert_eq!(borrowed.mask(), owned.mask());
+
+        let grid = DataGrid::new(4, 4, (0..16).map(f64::from).collect()).unwrap();
+        let borrowed = native_aggregate_mean_2d(&grid, 2, 2).unwrap();
+        let owned = native_aggregate_mean_2d_owned(grid, 2, 2).unwrap();
+        assert_eq!(borrowed.values(), owned.values());
+        assert_eq!(borrowed.mask(), owned.mask());
+    }
+
+    #[test]
+    fn repeat_rejects_zero_factors() {
+        let grid = DataGrid::new(1, 1, vec![1.0]).unwrap();
+
+        assert!(native_repeat_2d(&grid, 0, 2).is_err());
+        assert!(native_repeat_2d(&grid, 2, 0).is_err());
+    }
+
+    #[test]
+    fn aggregate_rejects_non_integer_factors() {
+        let grid = DataGrid::new(3, 3, (0..9).map(f64::from).collect()).unwrap();
+
+        assert!(native_aggregate_mean_2d(&grid, 2, 2).is_err());
+    }
+
+    #[test]
+    fn native_resampler_rejects_different_projections() {
+        let source = AreaDefinition::from_parts(
+            "source",
+            "source",
+            "source",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            2,
+            2,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let destination = AreaDefinition::from_parts(
+            "destination",
+            "destination",
+            "destination",
+            BTreeMap::from([("proj".to_string(), "merc".to_string())]),
+            2,
+            2,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let id = DataId::new("image").unwrap();
+        let dataset =
+            Dataset::new(id).with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let resampler = NativeResampler::new(source);
+
+        assert!(resampler.resample(&dataset, &destination).is_err());
+    }
 }
