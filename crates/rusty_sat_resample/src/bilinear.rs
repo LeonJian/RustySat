@@ -503,4 +503,48 @@ mod tests {
         assert!(output.data().unwrap().coord("y").is_some());
         assert_eq!(output.attr("nested"), Some(&MetadataValue::string("kept")));
     }
+
+    #[test]
+    fn resample_owned_through_trait_produces_same_output() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.5, 0.5, 1.5, 1.5]);
+        let id = DataId::new("image").unwrap();
+        let ds1 = Dataset::new(id.clone())
+            .with_data(DataGrid::new(2, 2, vec![0.0, 10.0, 20.0, 30.0]).unwrap());
+        let ds2 =
+            Dataset::new(id).with_data(DataGrid::new(2, 2, vec![0.0, 10.0, 20.0, 30.0]).unwrap());
+        let resampler = BilinearAreaResampler::new(source);
+
+        let borrowed = resampler.resample(&ds1, &destination).unwrap();
+        let owned = resampler.resample_owned(ds2, &destination).unwrap();
+
+        assert_eq!(borrowed.data().unwrap().values(), &[15.0]);
+        assert_eq!(
+            owned.data().unwrap().values(),
+            borrowed.data().unwrap().values()
+        );
+    }
+
+    #[test]
+    fn bilinear_returns_fill_when_fully_outside_source_extent() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [5.0, 5.0, 6.0, 6.0]);
+        let grid = DataGrid::new(2, 2, vec![0.0, 10.0, 20.0, 30.0]).unwrap();
+
+        let resampled = resample_area_bilinear(&grid, &source, &destination, -999.0).unwrap();
+
+        assert_eq!(resampled.values(), &[-999.0]);
+        assert!(resampled.mask().is_none());
+    }
+
+    #[test]
+    fn bilinear_rejects_source_nans_during_interpolation() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.5, 0.5, 1.5, 1.5]);
+        let grid = DataGrid::new(2, 2, vec![f64::NAN, 10.0, 20.0, 30.0]).unwrap();
+
+        let resampled = resample_area_bilinear(&grid, &source, &destination, -999.0).unwrap();
+
+        assert_eq!(resampled.values(), &[-999.0]);
+    }
 }
