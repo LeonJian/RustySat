@@ -1,0 +1,608 @@
+//! Drop-in-a-bucket resampling foundations.
+//!
+//! Reference behavior inspected before implementation:
+//! - `satpy/satpy/resample/bucket.py`
+//! - `deps/pyresample/pyresample/bucket/__init__.py`
+//!
+//! This first S4 slice supports lon/lat swath coordinates dropped into a
+//! same-geographic target area. It implements average, sum, and count for 2D
+//! f64 grids. Fractions, projected target backends, multidimensional buckets,
+//! and chunked execution are future S4 work.
+
+use crate::{AreaDefinition, Resampler, SwathDefinition};
+use rusty_sat_core::{
+    Coordinate, DataGrid, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
+};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketStatistic {
+    Average,
+    Sum,
+    Count,
+}
+
+impl BucketStatistic {
+    fn resampler_name(self) -> &'static str {
+        match self {
+            Self::Average => "bucket_avg",
+            Self::Sum => "bucket_sum",
+            Self::Count => "bucket_count",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BucketResampler {
+    source: SwathDefinition,
+    statistic: BucketStatistic,
+    fill_value: f64,
+    skipna: bool,
+}
+
+impl BucketResampler {
+    pub fn new(source: SwathDefinition, statistic: BucketStatistic) -> Self {
+        Self {
+            source,
+            statistic,
+            fill_value: f64::NAN,
+            skipna: true,
+        }
+    }
+
+    pub fn average(source: SwathDefinition) -> Self {
+        Self::new(source, BucketStatistic::Average)
+    }
+
+    pub fn sum(source: SwathDefinition) -> Self {
+        Self::new(source, BucketStatistic::Sum)
+    }
+
+    pub fn count(source: SwathDefinition) -> Self {
+        Self::new(source, BucketStatistic::Count)
+    }
+
+    pub fn with_fill_value(mut self, fill_value: f64) -> Self {
+        self.fill_value = fill_value;
+        self
+    }
+
+    pub fn with_skipna(mut self, skipna: bool) -> Self {
+        self.skipna = skipna;
+        self
+    }
+
+    pub fn source(&self) -> &SwathDefinition {
+        &self.source
+    }
+
+    pub fn statistic(&self) -> BucketStatistic {
+        self.statistic
+    }
+}
+
+impl Resampler for BucketResampler {
+    fn name(&self) -> &str {
+        self.statistic.resampler_name()
+    }
+
+    fn resample(&self, dataset: &Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let source_grid = dataset.data().ok_or_else(|| {
+            RustySatError::invalid_input("bucket resampling requires f64 dataset grid values")
+        })?;
+        validate_source_shape(source_grid, &self.source)?;
+        validate_bucket_target(destination)?;
+
+        let resampled = resample_bucket_with_statistic(
+            source_grid,
+            &self.source,
+            destination,
+            self.statistic,
+            self.fill_value,
+            self.skipna,
+        )?;
+        let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
+        for (key, value) in dataset.metadata() {
+            resampled_dataset.insert_metadata(key.clone(), value.clone())?;
+        }
+        for (key, value) in dataset.attrs() {
+            resampled_dataset.insert_attr(key.clone(), value.clone())?;
+        }
+        adjust_bucket_attrs(&mut resampled_dataset, self.statistic)?;
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
+
+    fn resample_owned(&self, dataset: Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let id = dataset.id().clone();
+        let metadata = dataset.metadata().clone();
+        let attrs = dataset.attrs().clone();
+        let source_grid = dataset
+            .into_array()
+            .and_then(|array| array.into_f64())
+            .ok_or_else(|| {
+                RustySatError::invalid_input("bucket resampling requires an f64 dataset grid")
+            })?;
+        validate_source_shape(&source_grid, &self.source)?;
+        validate_bucket_target(destination)?;
+
+        let resampled = resample_bucket_owned_with_statistic(
+            source_grid,
+            &self.source,
+            destination,
+            self.statistic,
+            self.fill_value,
+            self.skipna,
+        )?;
+        let mut resampled_dataset = Dataset::new(id).with_data(resampled);
+        for (key, value) in metadata {
+            resampled_dataset.insert_metadata(key, value)?;
+        }
+        for (key, value) in attrs {
+            resampled_dataset.insert_attr(key, value)?;
+        }
+        adjust_bucket_attrs(&mut resampled_dataset, self.statistic)?;
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
+}
+
+pub fn resample_bucket_average(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    fill_value: f64,
+    skipna: bool,
+) -> Result<DataGrid> {
+    resample_bucket_with_statistic(
+        source_grid,
+        source,
+        destination,
+        BucketStatistic::Average,
+        fill_value,
+        skipna,
+    )
+}
+
+pub fn resample_bucket_sum(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    fill_value: f64,
+    skipna: bool,
+) -> Result<DataGrid> {
+    resample_bucket_with_statistic(
+        source_grid,
+        source,
+        destination,
+        BucketStatistic::Sum,
+        fill_value,
+        skipna,
+    )
+}
+
+pub fn resample_bucket_count(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+) -> Result<DataGrid> {
+    resample_bucket_with_statistic(
+        source_grid,
+        source,
+        destination,
+        BucketStatistic::Count,
+        f64::NAN,
+        true,
+    )
+}
+
+fn resample_bucket_with_statistic(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    statistic: BucketStatistic,
+    fill_value: f64,
+    skipna: bool,
+) -> Result<DataGrid> {
+    validate_source_shape(source_grid, source)?;
+    validate_bucket_target(destination)?;
+    let indices = bucket_indices(source, destination)?;
+    let (height, width) = destination.shape();
+    let mut accumulators = BucketAccumulators::new(height * width);
+    accumulators.add_borrowed(source_grid, &indices, fill_value, skipna, statistic);
+    add_bucket_coords(
+        accumulators.finish(height, width, fill_value, statistic, skipna)?,
+        Some(source_grid.coords()),
+        destination,
+    )
+}
+
+fn resample_bucket_owned_with_statistic(
+    source_grid: DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    statistic: BucketStatistic,
+    fill_value: f64,
+    skipna: bool,
+) -> Result<DataGrid> {
+    validate_source_shape(&source_grid, source)?;
+    validate_bucket_target(destination)?;
+    let indices = bucket_indices(source, destination)?;
+    let (values, coords, mask) = source_grid.into_parts();
+    let (height, width) = destination.shape();
+    let mut accumulators = BucketAccumulators::new(height * width);
+    accumulators.add_values(
+        &values,
+        mask.as_ref(),
+        &indices,
+        fill_value,
+        skipna,
+        statistic,
+    );
+    add_bucket_coords_owned(
+        accumulators.finish(height, width, fill_value, statistic, skipna)?,
+        Some(coords),
+        destination,
+    )
+}
+
+#[derive(Debug)]
+struct BucketAccumulators {
+    sums: Vec<f64>,
+    valid_counts: Vec<usize>,
+    coordinate_counts: Vec<usize>,
+    invalid_seen: Vec<bool>,
+}
+
+impl BucketAccumulators {
+    fn new(size: usize) -> Self {
+        Self {
+            sums: vec![0.0; size],
+            valid_counts: vec![0; size],
+            coordinate_counts: vec![0; size],
+            invalid_seen: vec![false; size],
+        }
+    }
+
+    fn add_borrowed(
+        &mut self,
+        source_grid: &DataGrid,
+        indices: &[Option<usize>],
+        fill_value: f64,
+        skipna: bool,
+        statistic: BucketStatistic,
+    ) {
+        self.add_values(
+            source_grid.values(),
+            source_grid.mask(),
+            indices,
+            fill_value,
+            skipna,
+            statistic,
+        );
+    }
+
+    fn add_values(
+        &mut self,
+        values: &[f64],
+        mask: Option<&ValidityMask>,
+        indices: &[Option<usize>],
+        fill_value: f64,
+        skipna: bool,
+        statistic: BucketStatistic,
+    ) {
+        for (source_idx, target_idx) in indices.iter().enumerate() {
+            let Some(target_idx) = target_idx else {
+                continue;
+            };
+            self.coordinate_counts[*target_idx] += 1;
+            if statistic == BucketStatistic::Count {
+                continue;
+            }
+
+            let invalid = is_invalid_sample(values[source_idx], mask, source_idx, fill_value);
+            if invalid {
+                self.invalid_seen[*target_idx] = true;
+                if skipna {
+                    continue;
+                }
+            }
+            if invalid && !skipna {
+                continue;
+            }
+            self.sums[*target_idx] += values[source_idx];
+            self.valid_counts[*target_idx] += 1;
+        }
+    }
+
+    fn finish(
+        self,
+        height: usize,
+        width: usize,
+        fill_value: f64,
+        statistic: BucketStatistic,
+        skipna: bool,
+    ) -> Result<DataGrid> {
+        let mut output = Vec::with_capacity(height * width);
+        match statistic {
+            BucketStatistic::Average => {
+                for idx in 0..self.sums.len() {
+                    if self.valid_counts[idx] == 0 || self.invalid_seen[idx] {
+                        output.push(fill_value);
+                    } else {
+                        output.push(self.sums[idx] / self.valid_counts[idx] as f64);
+                    }
+                }
+            }
+            BucketStatistic::Sum => {
+                for idx in 0..self.sums.len() {
+                    if self.invalid_seen[idx] && !skipna {
+                        output.push(fill_value);
+                    } else if self.valid_counts[idx] == 0 {
+                        output.push(0.0);
+                    } else {
+                        output.push(self.sums[idx]);
+                    }
+                }
+            }
+            BucketStatistic::Count => {
+                output.extend(self.coordinate_counts.into_iter().map(|count| count as f64));
+            }
+        }
+        DataGrid::new(height, width, output)
+    }
+}
+
+fn is_invalid_sample(
+    value: f64,
+    mask: Option<&ValidityMask>,
+    index: usize,
+    fill_value: f64,
+) -> bool {
+    if mask.and_then(|mask| mask.is_masked(index)).unwrap_or(false) {
+        return true;
+    }
+    if !value.is_finite() {
+        return true;
+    }
+    fill_value.is_finite() && value == fill_value
+}
+
+fn bucket_indices(
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+) -> Result<Vec<Option<usize>>> {
+    let lons = source
+        .lons()
+        .ok_or_else(|| RustySatError::invalid_input("bucket resampling requires source lons"))?;
+    let lats = source
+        .lats()
+        .ok_or_else(|| RustySatError::invalid_input("bucket resampling requires source lats"))?;
+    let (height, width) = destination.shape();
+    let extent = destination.area_extent();
+    let (pixel_size_x, pixel_size_y) = destination.pixel_size();
+    Ok(lons
+        .iter()
+        .zip(lats)
+        .map(|(lon, lat)| {
+            let x_idx = ((lon - extent[0]) / pixel_size_x).floor();
+            let y_idx = ((extent[3] - lat) / pixel_size_y).floor();
+            if x_idx < 0.0
+                || y_idx < 0.0
+                || x_idx >= width as f64
+                || y_idx >= height as f64
+                || !x_idx.is_finite()
+                || !y_idx.is_finite()
+            {
+                None
+            } else {
+                Some(y_idx as usize * width + x_idx as usize)
+            }
+        })
+        .collect())
+}
+
+fn validate_source_shape(source_grid: &DataGrid, source: &SwathDefinition) -> Result<()> {
+    if source_grid.shape() != source.shape() {
+        return Err(RustySatError::invalid_input(format!(
+            "dataset grid shape {:?} does not match swath shape {:?}",
+            source_grid.shape(),
+            source.shape()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bucket_target(destination: &AreaDefinition) -> Result<()> {
+    let projection = destination.projection();
+    let Some(proj) = projection.get("proj").or_else(|| projection.get("proj4")) else {
+        return Err(RustySatError::unsupported(
+            "bucket resampling without lon/lat destination projection metadata",
+        ));
+    };
+    if proj.contains("latlong") || proj.contains("longlat") {
+        return Ok(());
+    }
+    Err(RustySatError::unsupported(
+        "bucket resampling to non-lon/lat destination area",
+    ))
+}
+
+fn adjust_bucket_attrs(dataset: &mut Dataset, statistic: BucketStatistic) -> Result<()> {
+    if statistic == BucketStatistic::Count {
+        dataset.insert_metadata("units", "")?;
+        dataset.insert_metadata("calibration", "")?;
+        dataset.insert_attr(
+            "standard_name",
+            MetadataValue::string("number_of_observations"),
+        )?;
+    }
+    Ok(())
+}
+
+fn add_bucket_coords(
+    mut grid: DataGrid,
+    source_coords: Option<&BTreeMap<String, Coordinate>>,
+    area: &AreaDefinition,
+) -> Result<DataGrid> {
+    if let Some(coords) = source_coords {
+        for (name, coordinate) in coords {
+            if should_preserve_coord(name, coordinate) {
+                grid.set_coordinate(name.clone(), coordinate.clone())?;
+            }
+        }
+    }
+    grid.set_coordinate(
+        "x",
+        Coordinate::axis("x", area.iter_projection_x_coords().collect::<Vec<_>>())?,
+    )?;
+    grid.set_coordinate(
+        "y",
+        Coordinate::axis("y", area.iter_projection_y_coords().collect::<Vec<_>>())?,
+    )?;
+    Ok(grid)
+}
+
+fn add_bucket_coords_owned(
+    mut grid: DataGrid,
+    source_coords: Option<BTreeMap<String, Coordinate>>,
+    area: &AreaDefinition,
+) -> Result<DataGrid> {
+    if let Some(coords) = source_coords {
+        for (name, coordinate) in coords {
+            if should_preserve_coord(&name, &coordinate) {
+                grid.set_coordinate(name, coordinate)?;
+            }
+        }
+    }
+    grid.set_coordinate(
+        "x",
+        Coordinate::axis("x", area.iter_projection_x_coords().collect::<Vec<_>>())?,
+    )?;
+    grid.set_coordinate(
+        "y",
+        Coordinate::axis("y", area.iter_projection_y_coords().collect::<Vec<_>>())?,
+    )?;
+    Ok(grid)
+}
+
+fn should_preserve_coord(name: &str, coordinate: &Coordinate) -> bool {
+    const IGNORE_DIMS: [&str; 5] = ["y", "x", "crs", "longitude", "latitude"];
+    !IGNORE_DIMS.contains(&name)
+        && !coordinate
+            .dims()
+            .iter()
+            .any(|dim| IGNORE_DIMS.contains(&dim.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_sat_core::DataId;
+
+    fn area() -> AreaDefinition {
+        AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            2,
+            2,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap()
+    }
+
+    fn swath() -> SwathDefinition {
+        SwathDefinition::from_lonlats(
+            2,
+            3,
+            vec![0.25, 0.75, 1.25, 1.75, 3.0, 0.25],
+            vec![1.75, 1.25, 1.25, 0.25, 0.5, 0.25],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bucket_count_counts_coordinate_hits_inside_target() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+
+        let resampled = resample_bucket_count(&grid, &swath(), &area()).unwrap();
+
+        assert_eq!(resampled.values(), &[2.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn bucket_average_skips_invalid_values_by_default() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+
+        let resampled = resample_bucket_average(&grid, &swath(), &area(), -999.0, true).unwrap();
+
+        assert_eq!(resampled.values(), &[1.5, -999.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn bucket_average_can_fail_bucket_when_invalid_seen() {
+        let grid = DataGrid::new(2, 3, vec![1.0, f64::NAN, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+
+        let resampled = resample_bucket_average(&grid, &swath(), &area(), -999.0, false).unwrap();
+
+        assert_eq!(resampled.values(), &[-999.0, -999.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn bucket_sum_skips_invalid_values_and_uses_zero_for_empty_buckets() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+
+        let resampled = resample_bucket_sum(&grid, &swath(), &area(), -999.0, true).unwrap();
+
+        assert_eq!(resampled.values(), &[3.0, 0.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn bucket_resampler_preserves_metadata_and_updates_count_attrs() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0])
+            .unwrap()
+            .with_coordinate("time", Coordinate::scalar(1.0))
+            .unwrap();
+        let id = DataId::new("obs").unwrap();
+        let mut dataset = Dataset::new(id.clone()).with_data(grid);
+        dataset.insert_metadata("sensor", "test").unwrap();
+        let resampler = BucketResampler::count(swath());
+
+        let output = resampler.resample(&dataset, &area()).unwrap();
+
+        assert_eq!(output.id(), &id);
+        assert_eq!(output.metadata().get("sensor"), Some(&"test".to_string()));
+        assert_eq!(
+            output.attr("standard_name"),
+            Some(&MetadataValue::string("number_of_observations"))
+        );
+        assert_eq!(
+            output.metadata().get("resampler"),
+            Some(&"bucket_count".to_string())
+        );
+        assert!(output.data().unwrap().coord("time").is_some());
+        assert!(output.data().unwrap().coord("x").is_some());
+        assert!(output.data().unwrap().coord("y").is_some());
+    }
+
+    #[test]
+    fn bucket_owned_matches_borrowed_average() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+        let borrowed = resample_bucket_average(&grid, &swath(), &area(), -999.0, true).unwrap();
+        let owned = resample_bucket_owned_with_statistic(
+            grid,
+            &swath(),
+            &area(),
+            BucketStatistic::Average,
+            -999.0,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(borrowed, owned);
+    }
+}

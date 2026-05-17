@@ -2,6 +2,7 @@
 
 pub mod area;
 pub mod bilinear;
+pub mod bucket;
 pub mod crs;
 pub mod geometry;
 pub mod native;
@@ -18,6 +19,10 @@ pub use area::{
 pub use bilinear::{
     resample_area_bilinear, resample_area_bilinear_masked_missing, resample_area_bilinear_owned,
     BilinearAreaResampler, BilinearMissingPolicy,
+};
+pub use bucket::{
+    resample_bucket_average, resample_bucket_count, resample_bucket_sum, BucketResampler,
+    BucketStatistic,
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
 pub use geometry::{
