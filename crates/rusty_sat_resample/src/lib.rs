@@ -6,6 +6,7 @@ pub mod geometry;
 pub mod native;
 pub mod nearest;
 pub mod neighbour;
+pub mod pipeline;
 pub mod scene;
 pub mod spatial_index;
 pub mod swath;
@@ -28,6 +29,10 @@ pub use nearest::{
 pub use neighbour::{
     get_area_neighbour_info, sample_nearest_from_neighbour_info,
     sample_nearest_from_neighbour_info_owned, Neighbour, NeighbourInfo, SampleMissingPolicy,
+};
+pub use pipeline::{
+    prepare_resampler, resample_dataset, resample_dataset_owned, PreparedResampler,
+    ResampleOptions, ResamplerMethod,
 };
 pub use scene::SceneResampleExt;
 pub use spatial_index::{KdPointIndex2D, NearestPoint, Point2D};
