@@ -7,13 +7,16 @@
 //! keeps that split, but makes the selected resampler an explicit enum instead
 //! of dynamically importing Python classes by name.
 
-use crate::{AreaDefinition, NativeResampler, NearestAreaResampler, Resampler};
+use crate::{
+    AreaDefinition, BilinearAreaResampler, NativeResampler, NearestAreaResampler, Resampler,
+};
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResamplerMethod {
     NearestArea,
+    Bilinear,
     Native,
 }
 
@@ -25,6 +28,7 @@ impl ResamplerMethod {
     pub fn name(self) -> &'static str {
         match self {
             Self::NearestArea => "nearest_area",
+            Self::Bilinear => "bilinear",
             Self::Native => "native",
         }
     }
@@ -36,6 +40,7 @@ impl FromStr for ResamplerMethod {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "nearest" | "nearest_area" | "kd_tree" => Ok(Self::NearestArea),
+            "bilinear" => Ok(Self::Bilinear),
             "native" => Ok(Self::Native),
             other => Err(RustySatError::not_found(format!(
                 "resampler method '{other}'"
@@ -77,6 +82,10 @@ impl ResampleOptions {
 
     pub fn native() -> Self {
         Self::new(ResamplerMethod::Native)
+    }
+
+    pub fn bilinear() -> Self {
+        Self::new(ResamplerMethod::Bilinear)
     }
 
     pub fn method(&self) -> ResamplerMethod {
@@ -125,6 +134,7 @@ impl ResampleOptions {
 #[derive(Debug, Clone)]
 pub enum PreparedResampler {
     NearestArea(NearestAreaResampler),
+    Bilinear(BilinearAreaResampler),
     Native(NativeResampler),
 }
 
@@ -132,6 +142,7 @@ impl PreparedResampler {
     pub fn method(&self) -> ResamplerMethod {
         match self {
             Self::NearestArea(_) => ResamplerMethod::NearestArea,
+            Self::Bilinear(_) => ResamplerMethod::Bilinear,
             Self::Native(_) => ResamplerMethod::Native,
         }
     }
@@ -141,6 +152,7 @@ impl Resampler for PreparedResampler {
     fn name(&self) -> &str {
         match self {
             Self::NearestArea(resampler) => resampler.name(),
+            Self::Bilinear(resampler) => resampler.name(),
             Self::Native(resampler) => resampler.name(),
         }
     }
@@ -148,6 +160,7 @@ impl Resampler for PreparedResampler {
     fn resample(&self, dataset: &Dataset, destination: &AreaDefinition) -> Result<Dataset> {
         match self {
             Self::NearestArea(resampler) => resampler.resample(dataset, destination),
+            Self::Bilinear(resampler) => resampler.resample(dataset, destination),
             Self::Native(resampler) => resampler.resample(dataset, destination),
         }
     }
@@ -155,6 +168,7 @@ impl Resampler for PreparedResampler {
     fn resample_owned(&self, dataset: Dataset, destination: &AreaDefinition) -> Result<Dataset> {
         match self {
             Self::NearestArea(resampler) => resampler.resample_owned(dataset, destination),
+            Self::Bilinear(resampler) => resampler.resample_owned(dataset, destination),
             Self::Native(resampler) => resampler.resample_owned(dataset, destination),
         }
     }
@@ -165,6 +179,10 @@ impl Resampler for PreparedResampler {
 /// The `_destination` parameter is reserved for future CRS-aware resampler
 /// setup (S7-next); it is currently unused because neither the nearest-area
 /// nor the native resampler performs cross-projection coordinate transforms.
+///
+/// The `Bilinear` method currently uses `fill_value`/`mask_missing` but ignores
+/// `radius_of_influence`; full Pyresample bilinear neighbour search belongs to
+/// S3-next/S2-next.
 ///
 /// The `Native` method ignores `radius_of_influence`, `fill_value`, and
 /// `mask_missing` — native resampling is a pure geometric operation without
@@ -186,6 +204,15 @@ pub fn prepare_resampler(
                 resampler.with_fill_value(options.fill_value)
             };
             Ok(PreparedResampler::NearestArea(resampler))
+        }
+        ResamplerMethod::Bilinear => {
+            let mut resampler = BilinearAreaResampler::new(source);
+            resampler = if options.mask_missing {
+                resampler.with_masked_missing()
+            } else {
+                resampler.with_fill_value(options.fill_value)
+            };
+            Ok(PreparedResampler::Bilinear(resampler))
         }
         ResamplerMethod::Native => Ok(PreparedResampler::Native(NativeResampler::new(source))),
     }
@@ -244,6 +271,10 @@ mod tests {
             ResamplerMethod::from_name("native").unwrap(),
             ResamplerMethod::Native
         );
+        assert_eq!(
+            ResamplerMethod::from_name("bilinear").unwrap(),
+            ResamplerMethod::Bilinear
+        );
         assert!(ResamplerMethod::from_name("ewa").is_err());
     }
 
@@ -288,6 +319,23 @@ mod tests {
         assert_eq!(
             &output.data().unwrap().values()[..8],
             &[1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn resample_dataset_uses_bilinear_method() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.5, 0.5, 1.5, 1.5]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![0.0, 10.0, 20.0, 30.0]).unwrap());
+
+        let output =
+            resample_dataset(&dataset, source, &destination, ResampleOptions::bilinear()).unwrap();
+
+        assert_eq!(output.data().unwrap().values(), &[15.0]);
+        assert_eq!(
+            output.metadata().get("resampler"),
+            Some(&"bilinear".to_string())
         );
     }
 

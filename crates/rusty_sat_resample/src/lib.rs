@@ -1,6 +1,7 @@
 //! Geometry and resampling foundations.
 
 pub mod area;
+pub mod bilinear;
 pub mod crs;
 pub mod geometry;
 pub mod native;
@@ -13,6 +14,10 @@ pub mod swath;
 
 pub use area::{
     load_area_from_file, load_area_from_str, load_areas_from_str, AreaDefinition, PixelResolution,
+};
+pub use bilinear::{
+    resample_area_bilinear, resample_area_bilinear_masked_missing, resample_area_bilinear_owned,
+    BilinearAreaResampler, BilinearMissingPolicy,
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
 pub use geometry::{
