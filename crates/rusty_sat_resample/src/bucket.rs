@@ -211,7 +211,7 @@ fn resample_bucket_with_statistic(
     let indices = bucket_indices(source, destination)?;
     let (height, width) = destination.shape();
     let mut accumulators = BucketAccumulators::new(height * width);
-    accumulators.add_borrowed(source_grid, &indices, fill_value, skipna, statistic);
+    accumulators.add_borrowed(source_grid, &indices, fill_value, statistic);
     add_bucket_coords(
         accumulators.finish(height, width, fill_value, statistic, skipna)?,
         Some(source_grid.coords()),
@@ -233,14 +233,7 @@ fn resample_bucket_owned_with_statistic(
     let (values, coords, mask) = source_grid.into_parts();
     let (height, width) = destination.shape();
     let mut accumulators = BucketAccumulators::new(height * width);
-    accumulators.add_values(
-        &values,
-        mask.as_ref(),
-        &indices,
-        fill_value,
-        skipna,
-        statistic,
-    );
+    accumulators.add_values(&values, mask.as_ref(), &indices, fill_value, statistic);
     add_bucket_coords_owned(
         accumulators.finish(height, width, fill_value, statistic, skipna)?,
         Some(coords),
@@ -271,7 +264,6 @@ impl BucketAccumulators {
         source_grid: &DataGrid,
         indices: &[Option<usize>],
         fill_value: f64,
-        skipna: bool,
         statistic: BucketStatistic,
     ) {
         self.add_values(
@@ -279,7 +271,6 @@ impl BucketAccumulators {
             source_grid.mask(),
             indices,
             fill_value,
-            skipna,
             statistic,
         );
     }
@@ -290,7 +281,6 @@ impl BucketAccumulators {
         mask: Option<&ValidityMask>,
         indices: &[Option<usize>],
         fill_value: f64,
-        skipna: bool,
         statistic: BucketStatistic,
     ) {
         for (source_idx, target_idx) in indices.iter().enumerate() {
@@ -305,11 +295,6 @@ impl BucketAccumulators {
             let invalid = is_invalid_sample(values[source_idx], mask, source_idx, fill_value);
             if invalid {
                 self.invalid_seen[*target_idx] = true;
-                if skipna {
-                    continue;
-                }
-            }
-            if invalid && !skipna {
                 continue;
             }
             self.sums[*target_idx] += values[source_idx];
@@ -329,7 +314,7 @@ impl BucketAccumulators {
         match statistic {
             BucketStatistic::Average => {
                 for idx in 0..self.sums.len() {
-                    if self.valid_counts[idx] == 0 || self.invalid_seen[idx] {
+                    if self.valid_counts[idx] == 0 || (!skipna && self.invalid_seen[idx]) {
                         output.push(fill_value);
                     } else {
                         output.push(self.sums[idx] / self.valid_counts[idx] as f64);
@@ -604,5 +589,77 @@ mod tests {
         .unwrap();
 
         assert_eq!(borrowed, owned);
+    }
+
+    #[test]
+    fn bucket_average_skipna_true_averages_valid_values_in_mixed_bucket() {
+        // Two points land in same bucket: one valid (10.0), one NaN.
+        let swath = SwathDefinition::from_lonlats(1, 2, vec![0.5, 0.5], vec![1.5, 1.5]).unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 2, vec![10.0, f64::NAN]).unwrap();
+
+        let resampled = resample_bucket_average(&grid, &swath, &target, -999.0, true).unwrap();
+
+        assert_eq!(resampled.values(), &[10.0]);
+        assert!(resampled.mask().is_none());
+    }
+
+    #[test]
+    fn bucket_resampler_through_trait_uses_correct_statistic_name() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+        let id = DataId::new("obs").unwrap();
+        let dataset = Dataset::new(id.clone()).with_data(grid);
+        let resampler = BucketResampler::average(swath());
+
+        let output = resampler.resample(&dataset, &area()).unwrap();
+
+        assert_eq!(output.id(), &id);
+        assert_eq!(
+            output.metadata().get("resampler"),
+            Some(&"bucket_avg".to_string())
+        );
+    }
+
+    #[test]
+    fn bucket_resampler_owned_through_trait_produces_same_output() {
+        let id = DataId::new("obs").unwrap();
+        let ds1 = Dataset::new(id.clone())
+            .with_data(DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap());
+        let ds2 = Dataset::new(id)
+            .with_data(DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap());
+        let resampler = BucketResampler::sum(swath()).with_fill_value(-999.0);
+
+        let borrowed = resampler.resample(&ds1, &area()).unwrap();
+        let owned = resampler.resample_owned(ds2, &area()).unwrap();
+
+        assert_eq!(
+            borrowed.data().unwrap().values(),
+            owned.data().unwrap().values()
+        );
+    }
+
+    #[test]
+    fn bucket_factory_methods_create_correct_statistics() {
+        assert_eq!(
+            BucketResampler::average(swath()).statistic(),
+            BucketStatistic::Average
+        );
+        assert_eq!(
+            BucketResampler::sum(swath()).statistic(),
+            BucketStatistic::Sum
+        );
+        assert_eq!(
+            BucketResampler::count(swath()).statistic(),
+            BucketStatistic::Count
+        );
     }
 }
