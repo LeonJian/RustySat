@@ -217,7 +217,9 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[ ]` S3: Bilinear, cubic, and spline interpolation.
 - `[ ]` S4: Bucket resampling: average, sum, count, fraction, and multi-dimensional buckets.
 - `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
-- `[ ]` S6: Native resampler: repeat, aggregate, and native-resolution pipelines.
+- `[~]` S6: Native resampler: repeat, aggregate, and native-resolution pipelines.
+  - `[x]` S6-m6a: Add 2D native repeat/aggregate-mean foundations and a `NativeResampler` for integer y/x scale factors after inspecting Satpy `resample/native.py`.
+  - `[ ]` S6-next: Add higher-dimensional native resampling, chunked/lazy execution, and full Satpy native-resampler integration with Scene area-choice helpers.
 - `[ ]` S7: Resampling pipeline helpers: `resample_dataset`, resampler preparation, data reduction, slicers, image containers, cropping, and CRS cross-projection resampling.
 
 ### I: Image And Enhancement
@@ -315,7 +317,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Done for geometry, fixture-backed FCI/NetCDF reader slice, Scene resampling extension, and exact 2D KD point-index acceleration; native NetCDF/HDF and full Pyresample KD parity remain later roadmap work |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Selected next |
-| M6-resampling-full | S1-S7 | Needs M4 resampling architecture first |
+| M6-resampling-full | S1-S7 | Started with S6 native repeat/aggregate foundation; remaining gaps are S1-next, S2-next, S3-S5, S6-next, and S7 |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
 | M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
 | M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
@@ -355,7 +357,8 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M5-enhance-composite-b: Add arithmetic composite foundations such as normalized difference, ratio, sum, and difference with mask propagation and consuming APIs. Roadmap: C1.
   - `[x]` M5-enhance-composite-c: Add spectral composite foundations for weighted blends and band replacement/mapping. Roadmap: C2.
   - `[x]` M5-enhance-composite-d: Add YAML-driven enhancer/composite registration slice. Roadmap: I5/C0/C2.
-- `[ ]` M6-resampling-full: Complete major resampler families and performance work.
+- `[~]` M6-resampling-full: Complete major resampler families and performance work.
+  - `[x]` M6-resampling-full-a: Add native resampler repeat/aggregate foundation. Roadmap: S6.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
 - `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
 - `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
@@ -469,6 +472,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `KdPointIndex2D`: dependency-free exact 2D KD-tree over finite source points for nearest-point lookup with optional radius-of-influence pruning | Pyresample-compatible geocentric KD-tree, multi-neighbour output, chunked/parallel queries |
 | `SceneResampleExt`: Scene-level resampling extension in `rusty_sat_resample` for all currently loaded datasets through a supplied `Resampler` and destination area, with both borrowed (`&self`) and consuming (`self`) APIs | Full Satpy `Scene.resample` parity: dataset selection, area helpers, resampler cache/preparation, and multiple resampler families |
 | `NearestAreaResampler`: area-to-area and KD-indexed swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption, and `resample_owned` through the `Resampler` trait | CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
+| `NativeResampler`: 2D f64 Satpy-style native repeat for integer upscaling, nanmean aggregation for integer downscaling, equal-shape pass-through, mixed-axis rejection, mask propagation, destination x/y coordinates, and metadata preservation | Higher-dimensional native resampling, lazy/chunked native execution, mixed dtype output preservation, and full Satpy area-choice integration |
 
 ### rusty_sat_composites
 

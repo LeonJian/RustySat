@@ -3,6 +3,7 @@
 pub mod area;
 pub mod crs;
 pub mod geometry;
+pub mod native;
 pub mod nearest;
 pub mod neighbour;
 pub mod scene;
@@ -15,6 +16,10 @@ pub use area::{
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
 pub use geometry::{
     CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
+};
+pub use native::{
+    native_aggregate_mean_2d, native_aggregate_mean_2d_owned, native_repeat_2d,
+    native_repeat_2d_owned, native_resample_2d, native_resample_2d_owned, NativeResampler,
 };
 pub use nearest::{
     resample_area_nearest, resample_area_nearest_lazy, resample_area_nearest_owned,
