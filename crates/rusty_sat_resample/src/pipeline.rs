@@ -160,6 +160,15 @@ impl Resampler for PreparedResampler {
     }
 }
 
+/// Prepare a resampler from the given source area and options.
+///
+/// The `_destination` parameter is reserved for future CRS-aware resampler
+/// setup (S7-next); it is currently unused because neither the nearest-area
+/// nor the native resampler performs cross-projection coordinate transforms.
+///
+/// The `Native` method ignores `radius_of_influence`, `fill_value`, and
+/// `mask_missing` — native resampling is a pure geometric operation without
+/// radiusing or fill-value semantics.
 pub fn prepare_resampler(
     source: AreaDefinition,
     _destination: &AreaDefinition,
@@ -297,5 +306,55 @@ mod tests {
             output.metadata().get("resampler"),
             Some(&"nearest_area".to_string())
         );
+    }
+
+    #[test]
+    fn prepare_resampler_with_native_method() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let options = ResampleOptions::native();
+        let resampler = prepare_resampler(source, &destination, options).unwrap();
+
+        assert_eq!(resampler.method(), ResamplerMethod::Native);
+
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let output = resampler.resample(&dataset, &destination).unwrap();
+
+        assert_eq!(output.data().unwrap().shape(), (4, 4));
+    }
+
+    #[test]
+    fn mask_missing_option_produces_masked_output() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = area("destination", 1, 1, [2.0, 2.0, 3.0, 3.0]);
+        let options = ResampleOptions::nearest_area()
+            .with_radius_of_influence(0.25)
+            .unwrap()
+            .with_masked_missing();
+        let resampler = prepare_resampler(source, &destination, options).unwrap();
+
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(1, 1, vec![5.0]).unwrap());
+        let output = resampler.resample(&dataset, &destination).unwrap();
+
+        assert!(output.data().unwrap().values()[0].is_nan());
+        assert_eq!(output.data().unwrap().mask().unwrap().masked_count(), 1);
+    }
+
+    #[test]
+    fn options_with_method_chains_to_switch_resampler() {
+        let native = ResampleOptions::nearest_area().with_method(ResamplerMethod::Native);
+        assert_eq!(native.method(), ResamplerMethod::Native);
+
+        let nearest = ResampleOptions::native().with_method(ResamplerMethod::NearestArea);
+        assert_eq!(nearest.method(), ResamplerMethod::NearestArea);
+    }
+
+    #[test]
+    fn options_rejects_negative_radius() {
+        assert!(ResampleOptions::nearest_area()
+            .with_radius_of_influence(-0.5)
+            .is_err());
     }
 }
