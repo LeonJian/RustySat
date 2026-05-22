@@ -45,8 +45,9 @@ pub use neighbour::{
     NeighbourInfo, SampleMissingPolicy,
 };
 pub use pipeline::{
-    prepare_resampler, resample_dataset, resample_dataset_owned, PreparedResampler,
-    ResampleOptions, ResamplerMethod,
+    prepare_resampler, prepare_resampler_for_geometry, resample_dataset,
+    resample_dataset_from_geometry, resample_dataset_owned, resample_dataset_owned_from_geometry,
+    PreparedResampler, ResampleOptions, ResamplerMethod, SourceGeometry,
 };
 pub use scene::SceneResampleExt;
 pub use spatial_index::{KdPointIndex2D, NearestPoint, Point2D};

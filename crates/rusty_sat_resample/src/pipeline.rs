@@ -8,7 +8,8 @@
 //! of dynamically importing Python classes by name.
 
 use crate::{
-    AreaDefinition, BilinearAreaResampler, NativeResampler, NearestAreaResampler, Resampler,
+    AreaDefinition, BilinearAreaResampler, BucketResampler, BucketStatistic, EwaOptions,
+    EwaResampler, NativeResampler, NearestAreaResampler, Resampler, SwathDefinition,
 };
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::str::FromStr;
@@ -18,6 +19,10 @@ pub enum ResamplerMethod {
     NearestArea,
     Bilinear,
     Native,
+    BucketAverage,
+    BucketSum,
+    BucketCount,
+    Ewa,
 }
 
 impl ResamplerMethod {
@@ -30,6 +35,10 @@ impl ResamplerMethod {
             Self::NearestArea => "nearest_area",
             Self::Bilinear => "bilinear",
             Self::Native => "native",
+            Self::BucketAverage => "bucket_avg",
+            Self::BucketSum => "bucket_sum",
+            Self::BucketCount => "bucket_count",
+            Self::Ewa => "ewa",
         }
     }
 }
@@ -42,6 +51,10 @@ impl FromStr for ResamplerMethod {
             "nearest" | "nearest_area" | "kd_tree" => Ok(Self::NearestArea),
             "bilinear" => Ok(Self::Bilinear),
             "native" => Ok(Self::Native),
+            "bucket" | "bucket_avg" | "bucket_average" => Ok(Self::BucketAverage),
+            "bucket_sum" => Ok(Self::BucketSum),
+            "bucket_count" => Ok(Self::BucketCount),
+            "ewa" | "ewa_legacy" => Ok(Self::Ewa),
             other => Err(RustySatError::not_found(format!(
                 "resampler method '{other}'"
             ))),
@@ -55,6 +68,7 @@ pub struct ResampleOptions {
     radius_of_influence: Option<f64>,
     fill_value: f64,
     mask_missing: bool,
+    skipna: bool,
 }
 
 impl Default for ResampleOptions {
@@ -64,6 +78,7 @@ impl Default for ResampleOptions {
             radius_of_influence: None,
             fill_value: f64::NAN,
             mask_missing: false,
+            skipna: true,
         }
     }
 }
@@ -88,6 +103,22 @@ impl ResampleOptions {
         Self::new(ResamplerMethod::Bilinear)
     }
 
+    pub fn bucket_average() -> Self {
+        Self::new(ResamplerMethod::BucketAverage)
+    }
+
+    pub fn bucket_sum() -> Self {
+        Self::new(ResamplerMethod::BucketSum)
+    }
+
+    pub fn bucket_count() -> Self {
+        Self::new(ResamplerMethod::BucketCount)
+    }
+
+    pub fn ewa() -> Self {
+        Self::new(ResamplerMethod::Ewa)
+    }
+
     pub fn method(&self) -> ResamplerMethod {
         self.method
     }
@@ -102,6 +133,10 @@ impl ResampleOptions {
 
     pub fn mask_missing(&self) -> bool {
         self.mask_missing
+    }
+
+    pub fn skipna(&self) -> bool {
+        self.skipna
     }
 
     pub fn with_method(mut self, method: ResamplerMethod) -> Self {
@@ -129,6 +164,11 @@ impl ResampleOptions {
         self.mask_missing = true;
         self
     }
+
+    pub fn with_skipna(mut self, skipna: bool) -> Self {
+        self.skipna = skipna;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +176,8 @@ pub enum PreparedResampler {
     NearestArea(NearestAreaResampler),
     Bilinear(BilinearAreaResampler),
     Native(NativeResampler),
+    Bucket(BucketResampler),
+    Ewa(EwaResampler),
 }
 
 impl PreparedResampler {
@@ -144,6 +186,12 @@ impl PreparedResampler {
             Self::NearestArea(_) => ResamplerMethod::NearestArea,
             Self::Bilinear(_) => ResamplerMethod::Bilinear,
             Self::Native(_) => ResamplerMethod::Native,
+            Self::Bucket(resampler) => match resampler.statistic() {
+                BucketStatistic::Average => ResamplerMethod::BucketAverage,
+                BucketStatistic::Sum => ResamplerMethod::BucketSum,
+                BucketStatistic::Count => ResamplerMethod::BucketCount,
+            },
+            Self::Ewa(_) => ResamplerMethod::Ewa,
         }
     }
 }
@@ -154,6 +202,8 @@ impl Resampler for PreparedResampler {
             Self::NearestArea(resampler) => resampler.name(),
             Self::Bilinear(resampler) => resampler.name(),
             Self::Native(resampler) => resampler.name(),
+            Self::Bucket(resampler) => resampler.name(),
+            Self::Ewa(resampler) => resampler.name(),
         }
     }
 
@@ -162,6 +212,8 @@ impl Resampler for PreparedResampler {
             Self::NearestArea(resampler) => resampler.resample(dataset, destination),
             Self::Bilinear(resampler) => resampler.resample(dataset, destination),
             Self::Native(resampler) => resampler.resample(dataset, destination),
+            Self::Bucket(resampler) => resampler.resample(dataset, destination),
+            Self::Ewa(resampler) => resampler.resample(dataset, destination),
         }
     }
 
@@ -170,7 +222,25 @@ impl Resampler for PreparedResampler {
             Self::NearestArea(resampler) => resampler.resample_owned(dataset, destination),
             Self::Bilinear(resampler) => resampler.resample_owned(dataset, destination),
             Self::Native(resampler) => resampler.resample_owned(dataset, destination),
+            Self::Bucket(resampler) => resampler.resample_owned(dataset, destination),
+            Self::Ewa(resampler) => resampler.resample_owned(dataset, destination),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SourceGeometry {
+    Area(AreaDefinition),
+    Swath(SwathDefinition),
+}
+
+impl SourceGeometry {
+    pub fn area(area: AreaDefinition) -> Self {
+        Self::Area(area)
+    }
+
+    pub fn swath(swath: SwathDefinition) -> Self {
+        Self::Swath(swath)
     }
 }
 
@@ -192,8 +262,21 @@ pub fn prepare_resampler(
     _destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<PreparedResampler> {
+    prepare_resampler_for_geometry(SourceGeometry::Area(source), _destination, options)
+}
+
+pub fn prepare_resampler_for_geometry(
+    source: SourceGeometry,
+    _destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<PreparedResampler> {
     match options.method {
         ResamplerMethod::NearestArea => {
+            let SourceGeometry::Area(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "nearest_area pipeline preparation from swath geometry",
+                ));
+            };
             let mut resampler = NearestAreaResampler::new(source);
             if let Some(radius_of_influence) = options.radius_of_influence {
                 resampler = resampler.with_radius_of_influence(radius_of_influence)?;
@@ -206,6 +289,11 @@ pub fn prepare_resampler(
             Ok(PreparedResampler::NearestArea(resampler))
         }
         ResamplerMethod::Bilinear => {
+            let SourceGeometry::Area(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "bilinear pipeline preparation from swath geometry",
+                ));
+            };
             let mut resampler = BilinearAreaResampler::new(source);
             resampler = if options.mask_missing {
                 resampler.with_masked_missing()
@@ -214,7 +302,67 @@ pub fn prepare_resampler(
             };
             Ok(PreparedResampler::Bilinear(resampler))
         }
-        ResamplerMethod::Native => Ok(PreparedResampler::Native(NativeResampler::new(source))),
+        ResamplerMethod::Native => {
+            let SourceGeometry::Area(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "native pipeline preparation from swath geometry",
+                ));
+            };
+            Ok(PreparedResampler::Native(NativeResampler::new(source)))
+        }
+        ResamplerMethod::BucketAverage => {
+            let SourceGeometry::Swath(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "bucket average pipeline preparation from area geometry",
+                ));
+            };
+            Ok(PreparedResampler::Bucket(
+                BucketResampler::average(source)
+                    .with_fill_value(options.fill_value)
+                    .with_skipna(options.skipna),
+            ))
+        }
+        ResamplerMethod::BucketSum => {
+            let SourceGeometry::Swath(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "bucket sum pipeline preparation from area geometry",
+                ));
+            };
+            Ok(PreparedResampler::Bucket(
+                BucketResampler::sum(source)
+                    .with_fill_value(options.fill_value)
+                    .with_skipna(options.skipna),
+            ))
+        }
+        ResamplerMethod::BucketCount => {
+            let SourceGeometry::Swath(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "bucket count pipeline preparation from area geometry",
+                ));
+            };
+            Ok(PreparedResampler::Bucket(BucketResampler::count(source)))
+        }
+        ResamplerMethod::Ewa => {
+            let SourceGeometry::Swath(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "EWA pipeline preparation from area geometry",
+                ));
+            };
+            let radius_of_influence = options.radius_of_influence.ok_or_else(|| {
+                RustySatError::invalid_input(
+                    "EWA pipeline preparation requires radius_of_influence",
+                )
+            })?;
+            let mut ewa_options =
+                EwaOptions::new(radius_of_influence)?.with_fill_value(options.fill_value);
+            if options.mask_missing {
+                ewa_options = ewa_options.with_masked_missing(true);
+            }
+            Ok(PreparedResampler::Ewa(EwaResampler::new(
+                source,
+                ewa_options,
+            )))
+        }
     }
 }
 
@@ -226,6 +374,26 @@ pub fn resample_dataset(
 ) -> Result<Dataset> {
     let resampler = prepare_resampler(source, destination, options)?;
     resampler.resample(dataset, destination)
+}
+
+pub fn resample_dataset_from_geometry(
+    dataset: &Dataset,
+    source: SourceGeometry,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let resampler = prepare_resampler_for_geometry(source, destination, options)?;
+    resampler.resample(dataset, destination)
+}
+
+pub fn resample_dataset_owned_from_geometry(
+    dataset: Dataset,
+    source: SourceGeometry,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let resampler = prepare_resampler_for_geometry(source, destination, options)?;
+    resampler.resample_owned(dataset, destination)
 }
 
 pub fn resample_dataset_owned(
@@ -257,6 +425,16 @@ mod tests {
         .unwrap()
     }
 
+    fn swath() -> SwathDefinition {
+        SwathDefinition::from_lonlats(
+            2,
+            2,
+            vec![0.25, 1.25, 0.25, 1.25],
+            vec![1.25, 1.25, 0.25, 0.25],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn parses_resampler_method_names() {
         assert_eq!(
@@ -275,7 +453,22 @@ mod tests {
             ResamplerMethod::from_name("bilinear").unwrap(),
             ResamplerMethod::Bilinear
         );
-        assert!(ResamplerMethod::from_name("ewa").is_err());
+        assert_eq!(
+            ResamplerMethod::from_name("bucket_avg").unwrap(),
+            ResamplerMethod::BucketAverage
+        );
+        assert_eq!(
+            ResamplerMethod::from_name("bucket_sum").unwrap(),
+            ResamplerMethod::BucketSum
+        );
+        assert_eq!(
+            ResamplerMethod::from_name("bucket_count").unwrap(),
+            ResamplerMethod::BucketCount
+        );
+        assert_eq!(
+            ResamplerMethod::from_name("ewa").unwrap(),
+            ResamplerMethod::Ewa
+        );
     }
 
     #[test]
@@ -357,6 +550,104 @@ mod tests {
     }
 
     #[test]
+    fn resample_dataset_from_geometry_uses_bucket_average_method() {
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let options = ResampleOptions::bucket_average().with_fill_value(-999.0);
+
+        let output = resample_dataset_from_geometry(
+            &dataset,
+            SourceGeometry::swath(swath()),
+            &destination,
+            options,
+        )
+        .unwrap();
+
+        assert_eq!(output.data().unwrap().values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            output.metadata().get("resampler"),
+            Some(&"bucket_avg".to_string())
+        );
+    }
+
+    #[test]
+    fn resample_dataset_owned_from_geometry_uses_ewa_method() {
+        let destination = area("destination", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let source = SwathDefinition::from_lonlats(1, 2, vec![0.5, 1.5], vec![0.5, 0.5]).unwrap();
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(1, 2, vec![10.0, 20.0]).unwrap());
+        let options = ResampleOptions::ewa()
+            .with_radius_of_influence(0.25)
+            .unwrap()
+            .with_fill_value(-999.0);
+
+        let output = resample_dataset_owned_from_geometry(
+            dataset,
+            SourceGeometry::swath(source),
+            &destination,
+            options,
+        )
+        .unwrap();
+
+        assert_eq!(output.data().unwrap().values(), &[10.0, 20.0]);
+        assert_eq!(output.metadata().get("resampler"), Some(&"ewa".to_string()));
+    }
+
+    #[test]
+    fn swath_pipeline_methods_require_swath_geometry() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        assert!(matches!(
+            prepare_resampler_for_geometry(
+                SourceGeometry::area(source.clone()),
+                &destination,
+                ResampleOptions::bucket_count(),
+            )
+            .unwrap_err(),
+            RustySatError::Unsupported { .. }
+        ));
+        assert!(prepare_resampler_for_geometry(
+            SourceGeometry::area(source),
+            &destination,
+            ResampleOptions::ewa(),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("area geometry"));
+    }
+
+    #[test]
+    fn area_pipeline_methods_require_area_geometry() {
+        let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        assert!(matches!(
+            prepare_resampler_for_geometry(
+                SourceGeometry::swath(swath()),
+                &destination,
+                ResampleOptions::nearest_area(),
+            )
+            .unwrap_err(),
+            RustySatError::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn ewa_pipeline_requires_radius() {
+        let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        let err = prepare_resampler_for_geometry(
+            SourceGeometry::swath(swath()),
+            &destination,
+            ResampleOptions::ewa(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("radius_of_influence"));
+    }
+
+    #[test]
     fn prepare_resampler_with_native_method() {
         let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
         let destination = area("destination", 4, 4, [0.0, 0.0, 4.0, 4.0]);
@@ -397,6 +688,10 @@ mod tests {
 
         let nearest = ResampleOptions::native().with_method(ResamplerMethod::NearestArea);
         assert_eq!(nearest.method(), ResamplerMethod::NearestArea);
+
+        let bucket = ResampleOptions::bucket_sum().with_skipna(false);
+        assert_eq!(bucket.method(), ResamplerMethod::BucketSum);
+        assert!(!bucket.skipna());
     }
 
     #[test]
