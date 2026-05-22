@@ -4,6 +4,7 @@ pub mod area;
 pub mod bilinear;
 pub mod bucket;
 pub mod crs;
+pub mod ewa;
 pub mod geometry;
 pub mod native;
 pub mod nearest;
@@ -25,6 +26,7 @@ pub use bucket::{
     BucketResampler, BucketStatistic,
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
+pub use ewa::{resample_swath_ewa, resample_swath_ewa_owned, EwaOptions, EwaResampler};
 pub use geometry::{
     CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
 };

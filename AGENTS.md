@@ -221,7 +221,9 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` S4-m6d: Add first lon/lat swath-to-area bucket average, sum, and count foundations after inspecting Satpy/Pyresample bucket resamplers.
   - `[x]` S4-m6e: Add manual-category bucket fraction output as a `categories,y,x` `DataArray<f64>` plus skipna=false sum guardrail tests.
   - `[ ]` S4-next: Add automatic category discovery, projected target backends, multidimensional/band-aware buckets, chunked execution, and Scene/pipeline preparation integration.
-- `[ ]` S5: EWA/Fornavy/LLS2 resampling wrappers.
+- `[~]` S5: EWA/Fornavy/LLS2 resampling wrappers.
+  - `[x]` S5-m6f: Add a dependency-free lon/lat swath-to-geographic-area EWA-style weighted accumulation foundation after inspecting Satpy/Pyresample EWA and Fornav wrappers.
+  - `[ ]` S5-next: Add real Fornav/LLS2 parity, scan geometry and `rows_per_scan`, maximum-weight mode, chunked execution, multi-band sampling, and production Pyresample-compatible weighting.
 - `[~]` S6: Native resampler: repeat, aggregate, and native-resolution pipelines.
   - `[x]` S6-m6a: Add 2D native repeat/aggregate-mean foundations and a `NativeResampler` for integer y/x scale factors after inspecting Satpy `resample/native.py`.
   - `[ ]` S6-next: Add higher-dimensional native resampling, chunked/lazy execution, and full Satpy native-resampler integration with Scene area-choice helpers.
@@ -324,7 +326,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Done for geometry, fixture-backed FCI/NetCDF reader slice, Scene resampling extension, and exact 2D KD point-index acceleration; native NetCDF/HDF and full Pyresample KD parity remain later roadmap work |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Selected next |
-| M6-resampling-full | S1-S7 | Started with S3 bilinear, S4 bucket avg/sum/count/fraction, S6 native repeat/aggregate, and S7 pipeline foundations; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5, S6-next, and S7-next |
+| M6-resampling-full | S1-S7 | Started with S3 bilinear, S4 bucket avg/sum/count/fraction, S5 EWA-style weighted accumulation, S6 native repeat/aggregate, and S7 pipeline foundations; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5-next, S6-next, and S7-next |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
 | M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
 | M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
@@ -370,6 +372,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M6-resampling-full-c: Add first same-projection area bilinear resampler and pipeline method. Roadmap: S3.
   - `[x]` M6-resampling-full-d: Add first swath-to-area bucket avg/sum/count resampling foundation. Roadmap: S4.
   - `[x]` M6-resampling-full-e: Add bucket fraction category-axis output and sum skipna=false guardrail. Roadmap: S4.
+  - `[x]` M6-resampling-full-f: Add first dependency-free EWA-style weighted accumulation foundation. Roadmap: S5.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
 - `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
 - `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
@@ -485,6 +488,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `NearestAreaResampler`: area-to-area and KD-indexed swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption, and `resample_owned` through the `Resampler` trait | CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
 | `BilinearAreaResampler`: same-projection 2D f64 area-to-area bilinear interpolation, fill or mask missing behavior, strict source-mask/non-finite handling, metadata preservation, destination x/y coordinates, and `resample_owned` support | Irregular swath bilinear coefficients, radius/neighbour based bilinear lookup, cubic/spline interpolation, higher-dimensional/band-aware sampling, and chunked/lazy bilinear execution |
 | `BucketResampler`: lon/lat swath-to-geographic-area bucket average, sum, and count for 2D f64 grids; manual-category bucket fractions as `categories,y,x` arrays; skipna/fill behavior, owned resampling, destination x/y coordinates, metadata preservation, and Satpy-like count attrs | Automatic category discovery, projected target backends, multidimensional/band-aware buckets, chunked/lazy bucket execution, and pipeline preparation integration |
+| `EwaResampler`: dependency-free lon/lat swath-to-geographic-area EWA-style weighted accumulation for 2D f64 grids, configurable radius/weight/fill/masked-missing policy, source-mask skipping, destination x/y coordinates, metadata preservation, and owned resampling | Full Pyresample Fornav/LLS2 parity, scan-aware `rows_per_scan`, maximum-weight mode, chunked execution, multi-band sampling, geocentric/cross-projection distances, and production EWA performance |
 | `NativeResampler`: 2D f64 Satpy-style native repeat for integer upscaling, nanmean aggregation for integer downscaling, equal-shape pass-through, mixed-axis rejection, mask propagation, destination x/y coordinates, and metadata preservation | Higher-dimensional native resampling, lazy/chunked native execution, mixed dtype output preservation, and full Satpy area-choice integration |
 | `prepare_resampler`, `resample_dataset`, and `resample_dataset_owned`: typed Satpy-style pipeline helpers for selecting current nearest/bilinear/native resamplers and applying them to one dataset | Resampler caching, automatic source-area lookup from dataset attrs, data reduction, slicers, crop helpers, or CRS cross-projection resampling |
 
