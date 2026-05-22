@@ -820,4 +820,51 @@ mod tests {
             BucketStatistic::Count
         );
     }
+
+    #[test]
+    fn bucket_fraction_ignores_values_not_matching_any_category() {
+        let swath =
+            SwathDefinition::from_lonlats(1, 3, vec![0.5, 0.5, 0.5], vec![1.5, 1.5, 1.5]).unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 3, vec![0.0, 99.0, 1.0]).unwrap();
+
+        let fractions =
+            resample_bucket_fraction(&grid, &swath, &target, &[0.0, 1.0], -1.0).unwrap();
+
+        assert_eq!(fractions.values(), &[1.0 / 3.0, 1.0 / 3.0]);
+    }
+
+    #[test]
+    fn bucket_fraction_fills_all_when_all_points_masked() {
+        let swath = SwathDefinition::from_lonlats(1, 2, vec![0.5, 0.5], vec![1.5, 1.5]).unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 2, vec![0.0, 1.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([true, true]))
+            .unwrap();
+
+        let fractions =
+            resample_bucket_fraction(&grid, &swath, &target, &[0.0, 1.0], -1.0).unwrap();
+
+        // denominator = 2 (both points counted), numerator = 0 (both masked, skipped)
+        assert_eq!(fractions.values(), &[0.0, 0.0]);
+    }
 }
