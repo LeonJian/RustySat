@@ -11,7 +11,7 @@
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
 use rusty_sat_core::{
-    Coordinate, DataGrid, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
+    Coordinate, DataArray, DataGrid, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
 };
 use std::collections::BTreeMap;
 
@@ -198,6 +198,73 @@ pub fn resample_bucket_count(
     )
 }
 
+pub fn resample_bucket_fraction(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    categories: &[f64],
+    fill_value: f64,
+) -> Result<DataArray<f64>> {
+    validate_source_shape(source_grid, source)?;
+    validate_bucket_target(destination)?;
+    validate_categories(categories)?;
+    let indices = bucket_indices(source, destination)?;
+    let (height, width) = destination.shape();
+    let bucket_count = height * width;
+    let mut coordinate_counts = vec![0usize; bucket_count];
+    let mut category_counts = vec![0usize; categories.len() * bucket_count];
+
+    for (source_idx, target_idx) in indices.iter().enumerate() {
+        let Some(target_idx) = target_idx else {
+            continue;
+        };
+        coordinate_counts[*target_idx] += 1;
+        let value = source_grid.values()[source_idx];
+        if source_grid.is_masked(source_idx).unwrap_or(false) || !value.is_finite() {
+            continue;
+        }
+        if let Some(category_index) = categories.iter().position(|category| *category == value) {
+            category_counts[category_index * bucket_count + *target_idx] += 1;
+        }
+    }
+
+    let mut values = Vec::with_capacity(categories.len() * bucket_count);
+    for category_index in 0..categories.len() {
+        let offset = category_index * bucket_count;
+        for (bucket_idx, denominator) in coordinate_counts.iter().enumerate() {
+            if *denominator == 0 {
+                values.push(fill_value);
+            } else {
+                values.push(category_counts[offset + bucket_idx] as f64 / *denominator as f64);
+            }
+        }
+    }
+    let mut array = DataArray::from_vec_named(
+        vec![categories.len(), height, width],
+        ["categories", "y", "x"],
+        values,
+    )?;
+    array.set_coordinate(
+        "categories",
+        Coordinate::axis("categories", categories.to_vec())?,
+    )?;
+    array.set_coordinate(
+        "x",
+        Coordinate::axis(
+            "x",
+            destination.iter_projection_x_coords().collect::<Vec<_>>(),
+        )?,
+    )?;
+    array.set_coordinate(
+        "y",
+        Coordinate::axis(
+            "y",
+            destination.iter_projection_y_coords().collect::<Vec<_>>(),
+        )?,
+    )?;
+    Ok(array)
+}
+
 fn resample_bucket_with_statistic(
     source_grid: &DataGrid,
     source: &SwathDefinition,
@@ -217,6 +284,20 @@ fn resample_bucket_with_statistic(
         Some(source_grid.coords()),
         destination,
     )
+}
+
+fn validate_categories(categories: &[f64]) -> Result<()> {
+    if categories.is_empty() {
+        return Err(RustySatError::invalid_input(
+            "bucket fraction requires at least one category",
+        ));
+    }
+    if categories.iter().any(|category| !category.is_finite()) {
+        return Err(RustySatError::invalid_input(
+            "bucket fraction categories must be finite",
+        ));
+    }
+    Ok(())
 }
 
 fn resample_bucket_owned_with_statistic(
@@ -544,6 +625,83 @@ mod tests {
         let resampled = resample_bucket_sum(&grid, &swath(), &area(), -999.0, true).unwrap();
 
         assert_eq!(resampled.values(), &[3.0, 0.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn bucket_sum_skipna_false_fills_bucket_when_invalid_seen() {
+        let swath = SwathDefinition::from_lonlats(1, 2, vec![0.5, 0.5], vec![1.5, 1.5]).unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 2, vec![10.0, f64::NAN]).unwrap();
+
+        let resampled = resample_bucket_sum(&grid, &swath, &target, -999.0, false).unwrap();
+
+        assert_eq!(resampled.values(), &[-999.0]);
+    }
+
+    #[test]
+    fn bucket_fraction_returns_category_axis() {
+        let swath =
+            SwathDefinition::from_lonlats(1, 4, vec![0.5, 0.5, 0.5, 0.5], vec![1.5, 1.5, 1.5, 1.5])
+                .unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 4, vec![0.0, 1.0, 1.0, f64::NAN]).unwrap();
+
+        let fractions =
+            resample_bucket_fraction(&grid, &swath, &target, &[0.0, 1.0], -1.0).unwrap();
+
+        assert_eq!(fractions.shape_nd(), &[2, 1, 1]);
+        assert_eq!(fractions.dims(), &["categories", "y", "x"]);
+        assert_eq!(fractions.values(), &[0.25, 0.5]);
+        assert_eq!(fractions.coord("categories").unwrap().values(), &[0.0, 1.0]);
+        assert!(fractions.coord("x").is_some());
+        assert!(fractions.coord("y").is_some());
+    }
+
+    #[test]
+    fn bucket_fraction_uses_fill_for_empty_buckets() {
+        let swath = SwathDefinition::from_lonlats(1, 2, vec![0.5, 0.5], vec![0.5, 0.5]).unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            2,
+            [0.0, 0.0, 2.0, 1.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 2, vec![1.0, 1.0]).unwrap();
+
+        let fractions = resample_bucket_fraction(&grid, &swath, &target, &[1.0], -1.0).unwrap();
+
+        assert_eq!(fractions.shape_nd(), &[1, 1, 2]);
+        assert_eq!(fractions.values(), &[1.0, -1.0]);
+    }
+
+    #[test]
+    fn bucket_fraction_rejects_empty_or_non_finite_categories() {
+        let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
+
+        assert!(resample_bucket_fraction(&grid, &swath(), &area(), &[], -1.0).is_err());
+        assert!(resample_bucket_fraction(&grid, &swath(), &area(), &[f64::NAN], -1.0).is_err());
     }
 
     #[test]

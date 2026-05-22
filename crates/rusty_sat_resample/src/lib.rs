@@ -21,8 +21,8 @@ pub use bilinear::{
     BilinearAreaResampler, BilinearMissingPolicy,
 };
 pub use bucket::{
-    resample_bucket_average, resample_bucket_count, resample_bucket_sum, BucketResampler,
-    BucketStatistic,
+    resample_bucket_average, resample_bucket_count, resample_bucket_fraction, resample_bucket_sum,
+    BucketResampler, BucketStatistic,
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
 pub use geometry::{
