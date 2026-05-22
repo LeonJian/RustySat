@@ -991,4 +991,56 @@ mod tests {
         assert!(gaussian_weight(-1.0, 2.0).is_err());
         assert!(gaussian_weight(1.0, 0.0).is_err());
     }
+
+    #[test]
+    fn area_neighbour_info_rejects_zero_neighbours() {
+        let source = area("source", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let target = area("target", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        assert!(get_area_neighbour_info_with_neighbours(&source, &target, None, 0).is_err());
+    }
+
+    #[test]
+    fn weighted_sampling_works_with_single_neighbour() {
+        let source = area("source", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let target = area("target", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let source_grid = DataGrid::new(1, 2, vec![10.0, 20.0]).unwrap();
+        let info = get_area_neighbour_info(&source, &target, None).unwrap();
+
+        let sampled = sample_weighted_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+            |_| 1.0,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.values(), &[10.0]);
+    }
+
+    #[test]
+    fn weighted_sampling_owned_propagates_source_mask() {
+        let source = area("source", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let target = area("target", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let source_grid = DataGrid::new(1, 2, vec![10.0, 20.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true]))
+            .unwrap();
+        let info = get_area_neighbour_info(&source, &target, None).unwrap();
+
+        let result = sample_weighted_from_neighbour_info_owned(
+            source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+            |_| 1.0,
+        )
+        .unwrap();
+
+        assert_eq!(result.values(), &[10.0]);
+        assert!(result.mask().is_none());
+    }
 }
