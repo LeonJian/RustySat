@@ -510,4 +510,67 @@ mod tests {
 
         assert!(err.to_string().contains("source lons"));
     }
+
+    #[test]
+    fn ewa_weight_min_filters_low_weight_contributions() {
+        let source = SwathDefinition::from_lonlats(1, 2, vec![0.5, 1.0], vec![0.5, 0.5]).unwrap();
+        let grid = DataGrid::new(1, 2, vec![10.0, 20.0]).unwrap();
+        // weight_min=0.9 means only very close (<~0.05 deg) points contribute
+        let options = EwaOptions::new(1.0)
+            .unwrap()
+            .with_weight_min(0.9)
+            .unwrap()
+            .with_fill_value(-999.0);
+
+        let resampled = resample_swath_ewa(&grid, &source, &area(), options).unwrap();
+
+        // Point at lon=0.5 close to pixel center → contributes. lon=1.0 far → filtered.
+        assert!(resampled.values()[0] > 0.0);
+    }
+
+    #[test]
+    fn ewa_weight_sum_min_fills_when_insufficient_total_weight() {
+        // Point at edge of area, far from all pixel centers with small radius
+        let source = SwathDefinition::from_lonlats(1, 1, vec![0.05], vec![0.5]).unwrap();
+        let grid = DataGrid::new(1, 1, vec![10.0]).unwrap();
+        let options = EwaOptions::new(0.3)
+            .unwrap()
+            .with_weight_sum_min(0.5)
+            .unwrap()
+            .with_fill_value(-999.0);
+
+        let resampled = resample_swath_ewa(&grid, &source, &area(), options).unwrap();
+
+        assert!(resampled.values().iter().all(|v| *v == -999.0));
+    }
+
+    #[test]
+    fn ewa_resampler_owned_through_trait() {
+        let source = SwathDefinition::from_lonlats(1, 2, vec![0.5, 1.5], vec![0.5, 0.5]).unwrap();
+        let id = DataId::new("test").unwrap();
+        let ds1 =
+            Dataset::new(id.clone()).with_data(DataGrid::new(1, 2, vec![10.0, 20.0]).unwrap());
+        let ds2 = Dataset::new(id).with_data(DataGrid::new(1, 2, vec![10.0, 20.0]).unwrap());
+        let resampler = EwaResampler::with_radius(source, 1.0).unwrap();
+
+        let borrowed = resampler.resample(&ds1, &area()).unwrap();
+        let owned = resampler.resample_owned(ds2, &area()).unwrap();
+
+        assert_eq!(
+            borrowed.data().unwrap().values(),
+            owned.data().unwrap().values()
+        );
+    }
+
+    #[test]
+    fn ewa_skips_non_finite_source_values() {
+        let source = SwathDefinition::from_lonlats(1, 2, vec![0.5, 1.5], vec![0.5, 0.5]).unwrap();
+        let grid = DataGrid::new(1, 2, vec![10.0, f64::NAN]).unwrap();
+        let options = EwaOptions::new(1.0).unwrap().with_fill_value(-999.0);
+
+        let resampled = resample_swath_ewa(&grid, &source, &area(), options).unwrap();
+
+        // Only the first valid value (10.0) contributes; NaN is skipped.
+        assert!(resampled.values()[0] > 0.0);
+    }
 }
