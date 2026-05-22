@@ -4,10 +4,11 @@
 //! - `deps/pyresample/pyresample/kd_tree.py::get_neighbour_info`
 //! - `deps/pyresample/pyresample/kd_tree.py::_query_resample_kdtree`
 //! - `deps/pyresample/pyresample/kd_tree.py::_create_empty_info`
+//! - `deps/pyresample/pyresample/kd_tree.py::get_sample_from_neighbour_info`
 //!
-//! This module does not build a KD-tree yet. It defines the reusable
-//! neighbour-info contract and provides a projection-coordinate area-to-area
-//! nearest query that future KD-tree code can replace internally.
+//! This module does not build a geocentric KD-tree yet. It defines the
+//! reusable neighbour-info contract and provides projection-coordinate
+//! area-to-area queries that future KD-tree code can replace internally.
 
 use crate::AreaDefinition;
 use rusty_sat_core::{DataGrid, Result, RustySatError, ValidityMask};
@@ -254,6 +255,20 @@ pub fn get_area_neighbour_info(
     target: &AreaDefinition,
     radius_of_influence: Option<f64>,
 ) -> Result<NeighbourInfo> {
+    get_area_neighbour_info_with_neighbours(source, target, radius_of_influence, 1)
+}
+
+pub fn get_area_neighbour_info_with_neighbours(
+    source: &AreaDefinition,
+    target: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+    neighbours: usize,
+) -> Result<NeighbourInfo> {
+    if neighbours == 0 {
+        return Err(RustySatError::invalid_input(
+            "neighbour count must be non-zero",
+        ));
+    }
     if radius_of_influence.is_some_and(|radius| radius < 0.0) {
         return Err(RustySatError::invalid_input(
             "radius_of_influence must be non-negative",
@@ -269,37 +284,124 @@ pub fn get_area_neighbour_info(
     let target_size = target.height() * target.width();
     let valid_input_index = vec![true; source_size];
     let valid_output_index = vec![true; target_size];
-    let mut index_array = Vec::with_capacity(target_size);
-    let mut distance_array = Vec::with_capacity(target_size);
+    let mut index_array = Vec::with_capacity(target_size * neighbours);
+    let mut distance_array = Vec::with_capacity(target_size * neighbours);
     // Sentinel must equal valid_input_count() so that
     // NeighbourInfo::missing_neighbour_index() stays consistent
     // when valid_input_index is later narrowed by masking.
     let missing_index = valid_input_index.iter().filter(|v| **v).count();
 
     for (target_x, target_y) in target.iter_projection_coords() {
-        let Some((source_index, distance)) = nearest_area_pixel(source, target_x, target_y) else {
-            index_array.push(missing_index);
-            distance_array.push(f64::INFINITY);
-            continue;
-        };
-        if radius_of_influence.is_some_and(|radius| distance > radius) {
-            index_array.push(missing_index);
-            distance_array.push(f64::INFINITY);
-        } else {
-            index_array.push(source_index);
-            distance_array.push(distance);
+        let neighbours_for_target =
+            nearest_area_pixels(source, target_x, target_y, radius_of_influence, neighbours);
+        for offset in 0..neighbours {
+            if let Some((source_index, distance)) = neighbours_for_target.get(offset) {
+                index_array.push(*source_index);
+                distance_array.push(*distance);
+            } else {
+                index_array.push(missing_index);
+                distance_array.push(f64::INFINITY);
+            }
         }
     }
 
     NeighbourInfo::new(
         source_size,
         target_size,
-        1,
+        neighbours,
         valid_input_index,
         valid_output_index,
         index_array,
         distance_array,
     )
+}
+
+pub fn sample_weighted_from_neighbour_info(
+    source_grid: &DataGrid,
+    output_shape: (usize, usize),
+    info: &NeighbourInfo,
+    fill_value: f64,
+    missing_policy: SampleMissingPolicy,
+    weight_fn: impl Fn(f64) -> f64,
+) -> Result<DataGrid> {
+    validate_sampling_geometry(source_grid.values().len(), output_shape, info)?;
+    let output_size = output_shape.0 * output_shape.1;
+    let mut values = Vec::with_capacity(output_size);
+    let mut mask_flags = Vec::with_capacity(output_size);
+    for output_index in 0..output_size {
+        let Some(weighted_value) = weighted_value_for_output(
+            output_index,
+            info,
+            fill_value,
+            &weight_fn,
+            |source_index| {
+                let masked = source_grid
+                    .is_masked(source_index)
+                    .expect("source_index is validated against source_size");
+                (source_grid.values()[source_index], masked)
+            },
+        )?
+        else {
+            values.push(fill_value);
+            mask_flags.push(missing_policy.masks_missing());
+            continue;
+        };
+        values.push(weighted_value);
+        mask_flags.push(false);
+    }
+    build_sampled_grid(output_shape, values, mask_flags)
+}
+
+pub fn sample_weighted_from_neighbour_info_owned(
+    source_grid: DataGrid,
+    output_shape: (usize, usize),
+    info: &NeighbourInfo,
+    fill_value: f64,
+    missing_policy: SampleMissingPolicy,
+    weight_fn: impl Fn(f64) -> f64,
+) -> Result<DataGrid> {
+    validate_sampling_geometry(source_grid.values().len(), output_shape, info)?;
+    let (src_values, _src_coords, src_mask) = source_grid.into_parts();
+    let output_size = output_shape.0 * output_shape.1;
+    let mut values = Vec::with_capacity(output_size);
+    let mut mask_flags = Vec::with_capacity(output_size);
+    for output_index in 0..output_size {
+        let Some(weighted_value) = weighted_value_for_output(
+            output_index,
+            info,
+            fill_value,
+            &weight_fn,
+            |source_index| {
+                let masked = src_mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(source_index))
+                    .unwrap_or(false);
+                (src_values[source_index], masked)
+            },
+        )?
+        else {
+            values.push(fill_value);
+            mask_flags.push(missing_policy.masks_missing());
+            continue;
+        };
+        values.push(weighted_value);
+        mask_flags.push(false);
+    }
+    build_sampled_grid(output_shape, values, mask_flags)
+}
+
+pub fn gaussian_weight(distance: f64, sigma: f64) -> Result<f64> {
+    if !distance.is_finite() || distance < 0.0 {
+        return Err(RustySatError::invalid_input(
+            "gaussian distance must be finite and non-negative",
+        ));
+    }
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return Err(RustySatError::invalid_input(
+            "gaussian sigma must be finite and positive",
+        ));
+    }
+    Ok((-distance * distance / (2.0 * sigma * sigma)).exp())
 }
 
 pub fn sample_nearest_from_neighbour_info(
@@ -314,24 +416,7 @@ pub fn sample_nearest_from_neighbour_info(
             "nearest neighbour sampling from multi-neighbour index arrays",
         ));
     }
-    if source_grid.values().len() != info.source_size() {
-        return Err(RustySatError::invalid_input(format!(
-            "source grid has {} values but neighbour info source size is {}",
-            source_grid.values().len(),
-            info.source_size()
-        )));
-    }
-    let output_size = output_shape
-        .0
-        .checked_mul(output_shape.1)
-        .ok_or_else(|| RustySatError::invalid_input("output shape size overflows usize"))?;
-    if output_size != info.target_size() {
-        return Err(RustySatError::invalid_input(format!(
-            "output shape {:?} has {output_size} pixels but neighbour info target size is {}",
-            output_shape,
-            info.target_size()
-        )));
-    }
+    let output_size = validate_sampling_geometry(source_grid.values().len(), output_shape, info)?;
 
     let mut values = Vec::with_capacity(output_size);
     let mut mask_flags = Vec::with_capacity(output_size);
@@ -349,13 +434,7 @@ pub fn sample_nearest_from_neighbour_info(
         mask_flags.push(source_masked);
     }
 
-    let has_mask = mask_flags.iter().any(|masked| *masked);
-    let grid = DataGrid::new(output_shape.0, output_shape.1, values)?;
-    if has_mask {
-        grid.with_mask(ValidityMask::from_masked_flags(mask_flags))
-    } else {
-        Ok(grid)
-    }
+    build_sampled_grid(output_shape, values, mask_flags)
 }
 
 pub fn sample_nearest_from_neighbour_info_owned(
@@ -370,24 +449,7 @@ pub fn sample_nearest_from_neighbour_info_owned(
             "nearest neighbour sampling from multi-neighbour index arrays",
         ));
     }
-    if source_grid.values().len() != info.source_size() {
-        return Err(RustySatError::invalid_input(format!(
-            "source grid has {} values but neighbour info source size is {}",
-            source_grid.values().len(),
-            info.source_size()
-        )));
-    }
-    let output_size = output_shape
-        .0
-        .checked_mul(output_shape.1)
-        .ok_or_else(|| RustySatError::invalid_input("output shape size overflows usize"))?;
-    if output_size != info.target_size() {
-        return Err(RustySatError::invalid_input(format!(
-            "output shape {:?} has {output_size} pixels but neighbour info target size is {}",
-            output_shape,
-            info.target_size()
-        )));
-    }
+    let output_size = validate_sampling_geometry(source_grid.values().len(), output_shape, info)?;
 
     let (src_values, _src_coords, src_mask) = source_grid.into_parts();
     let mut values = Vec::with_capacity(output_size);
@@ -407,16 +469,45 @@ pub fn sample_nearest_from_neighbour_info_owned(
         mask_flags.push(source_masked);
     }
 
-    let has_mask = mask_flags.iter().any(|masked| *masked);
-    let grid = DataGrid::new(output_shape.0, output_shape.1, values)?;
-    if has_mask {
-        grid.with_mask(ValidityMask::from_masked_flags(mask_flags))
-    } else {
-        Ok(grid)
-    }
+    build_sampled_grid(output_shape, values, mask_flags)
 }
 
-fn nearest_area_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize, f64)> {
+fn nearest_area_pixels(
+    source: &AreaDefinition,
+    x: f64,
+    y: f64,
+    radius_of_influence: Option<f64>,
+    neighbours: usize,
+) -> Vec<(usize, f64)> {
+    if neighbours == 1 {
+        return nearest_area_pixel_fast(source, x, y, radius_of_influence)
+            .into_iter()
+            .collect();
+    }
+    let mut candidates = Vec::with_capacity(source.height() * source.width());
+    for (source_index, (source_x, source_y)) in source.iter_projection_coords().enumerate() {
+        let dx = source_x - x;
+        let dy = source_y - y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if radius_of_influence.is_none_or(|radius| distance <= radius) {
+            candidates.push((source_index, distance));
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.1
+            .total_cmp(&right.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    candidates.truncate(neighbours);
+    candidates
+}
+
+fn nearest_area_pixel_fast(
+    source: &AreaDefinition,
+    x: f64,
+    y: f64,
+    radius_of_influence: Option<f64>,
+) -> Option<(usize, f64)> {
     let extent = source.area_extent();
     let src_x = clamp_pixel_index(
         (x - extent[0]) / source.pixel_size_x() - 0.5,
@@ -430,7 +521,87 @@ fn nearest_area_pixel(source: &AreaDefinition, x: f64, y: f64) -> Option<(usize,
     let nearest_y = source.projection_y_coord(src_y).ok()?;
     let dx = nearest_x - x;
     let dy = nearest_y - y;
-    Some((src_y * source.width() + src_x, (dx * dx + dy * dy).sqrt()))
+    let distance = (dx * dx + dy * dy).sqrt();
+    if radius_of_influence.is_some_and(|radius| distance > radius) {
+        None
+    } else {
+        Some((src_y * source.width() + src_x, distance))
+    }
+}
+
+fn validate_sampling_geometry(
+    source_len: usize,
+    output_shape: (usize, usize),
+    info: &NeighbourInfo,
+) -> Result<usize> {
+    if source_len != info.source_size() {
+        return Err(RustySatError::invalid_input(format!(
+            "source grid has {source_len} values but neighbour info source size is {}",
+            info.source_size()
+        )));
+    }
+    let output_size = output_shape
+        .0
+        .checked_mul(output_shape.1)
+        .ok_or_else(|| RustySatError::invalid_input("output shape size overflows usize"))?;
+    if output_size != info.target_size() {
+        return Err(RustySatError::invalid_input(format!(
+            "output shape {:?} has {output_size} pixels but neighbour info target size is {}",
+            output_shape,
+            info.target_size()
+        )));
+    }
+    Ok(output_size)
+}
+
+fn weighted_value_for_output(
+    output_index: usize,
+    info: &NeighbourInfo,
+    fill_value: f64,
+    weight_fn: &impl Fn(f64) -> f64,
+    source_value: impl Fn(usize) -> (f64, bool),
+) -> Result<Option<f64>> {
+    let Some(neighbours) = info.neighbours_for_output(output_index)? else {
+        return Ok(None);
+    };
+    let mut weighted_sum = 0.0;
+    let mut norm = 0.0;
+    for neighbour in neighbours.into_iter().flatten() {
+        let Some(source_index) =
+            info.source_index_for_reduced_index(neighbour.reduced_source_index())?
+        else {
+            continue;
+        };
+        let (value, masked) = source_value(source_index);
+        if masked || !value.is_finite() || (fill_value.is_finite() && value == fill_value) {
+            continue;
+        }
+        let weight = weight_fn(neighbour.distance());
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        weighted_sum += value * weight;
+        norm += weight;
+    }
+    if norm > 0.0 {
+        Ok(Some(weighted_sum / norm))
+    } else {
+        Ok(None)
+    }
+}
+
+fn build_sampled_grid(
+    output_shape: (usize, usize),
+    values: Vec<f64>,
+    mask_flags: Vec<bool>,
+) -> Result<DataGrid> {
+    let has_mask = mask_flags.iter().any(|masked| *masked);
+    let grid = DataGrid::new(output_shape.0, output_shape.1, values)?;
+    if has_mask {
+        grid.with_mask(ValidityMask::from_masked_flags(mask_flags))
+    } else {
+        Ok(grid)
+    }
 }
 
 fn clamp_pixel_index(value: f64, size: usize) -> Option<usize> {
@@ -527,6 +698,49 @@ mod tests {
         assert_eq!(info.index_array(), &[1]);
         assert!(info.distance_array()[0].is_infinite());
         assert_eq!(info.first_neighbour_for_output(0).unwrap(), None);
+    }
+
+    #[test]
+    fn area_neighbour_info_can_return_multiple_neighbours() {
+        let source = area("source", 1, 3, [0.0, 0.0, 3.0, 1.0]);
+        let target = area("target", 1, 1, [1.0, 0.0, 2.0, 1.0]);
+
+        let info = get_area_neighbour_info_with_neighbours(&source, &target, None, 3).unwrap();
+
+        assert_eq!(info.neighbours(), 3);
+        assert_eq!(info.index_array(), &[1, 0, 2]);
+        assert_eq!(info.distance_array(), &[0.0, 1.0, 1.0]);
+        assert_eq!(
+            info.neighbours_for_output(0).unwrap().unwrap(),
+            vec![
+                Some(Neighbour {
+                    reduced_source_index: 1,
+                    distance: 0.0
+                }),
+                Some(Neighbour {
+                    reduced_source_index: 0,
+                    distance: 1.0
+                }),
+                Some(Neighbour {
+                    reduced_source_index: 2,
+                    distance: 1.0
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn area_neighbour_info_pads_missing_multi_neighbours() {
+        let source = area("source", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let target = area("target", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        let info =
+            get_area_neighbour_info_with_neighbours(&source, &target, Some(0.25), 3).unwrap();
+
+        assert_eq!(info.index_array(), &[0, 2, 2]);
+        assert_eq!(info.distance_array()[0], 0.0);
+        assert!(info.distance_array()[1].is_infinite());
+        assert!(info.distance_array()[2].is_infinite());
     }
 
     #[test]
@@ -694,5 +908,87 @@ mod tests {
         assert_eq!(result.values(), &[1.0, 2.0]);
         assert_eq!(result.mask().unwrap().masked_count(), 1);
         assert_eq!(result.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn weighted_sampling_averages_multiple_neighbours() {
+        let source = area("source", 1, 3, [0.0, 0.0, 3.0, 1.0]);
+        let target = area("target", 1, 1, [1.0, 0.0, 2.0, 1.0]);
+        let source_grid = DataGrid::new(1, 3, vec![10.0, 20.0, 30.0]).unwrap();
+        let info = get_area_neighbour_info_with_neighbours(&source, &target, None, 3).unwrap();
+
+        let sampled = sample_weighted_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+            |_| 1.0,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.values(), &[20.0]);
+        assert!(sampled.mask().is_none());
+    }
+
+    #[test]
+    fn weighted_sampling_skips_source_masks_and_can_mask_missing_output() {
+        let source = area("source", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let target = area("target", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let source_grid = DataGrid::new(1, 2, vec![10.0, 20.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([true, false]))
+            .unwrap();
+        let info =
+            get_area_neighbour_info_with_neighbours(&source, &target, Some(0.25), 2).unwrap();
+
+        let sampled = sample_weighted_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::Mask,
+            |_| 1.0,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.values(), &[-999.0]);
+        assert_eq!(sampled.mask().unwrap().is_masked(0), Some(true));
+    }
+
+    #[test]
+    fn weighted_sampling_owned_matches_borrowed() {
+        let source = area("source", 1, 2, [0.0, 0.0, 2.0, 1.0]);
+        let target = area("target", 1, 1, [0.0, 0.0, 2.0, 1.0]);
+        let source_grid = DataGrid::new(1, 2, vec![10.0, 20.0]).unwrap();
+        let info = get_area_neighbour_info_with_neighbours(&source, &target, None, 2).unwrap();
+
+        let borrowed = sample_weighted_from_neighbour_info(
+            &source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+            |distance| gaussian_weight(distance, 2.0).unwrap(),
+        )
+        .unwrap();
+        let owned = sample_weighted_from_neighbour_info_owned(
+            source_grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+            |distance| gaussian_weight(distance, 2.0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(borrowed.values(), owned.values());
+    }
+
+    #[test]
+    fn gaussian_weight_validates_inputs() {
+        assert_eq!(gaussian_weight(0.0, 2.0).unwrap(), 1.0);
+        assert!(gaussian_weight(-1.0, 2.0).is_err());
+        assert!(gaussian_weight(1.0, 0.0).is_err());
     }
 }

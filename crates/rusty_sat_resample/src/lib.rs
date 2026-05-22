@@ -39,8 +39,10 @@ pub use nearest::{
     resample_swath_nearest, NearestAreaResampler,
 };
 pub use neighbour::{
-    get_area_neighbour_info, sample_nearest_from_neighbour_info,
-    sample_nearest_from_neighbour_info_owned, Neighbour, NeighbourInfo, SampleMissingPolicy,
+    gaussian_weight, get_area_neighbour_info, get_area_neighbour_info_with_neighbours,
+    sample_nearest_from_neighbour_info, sample_nearest_from_neighbour_info_owned,
+    sample_weighted_from_neighbour_info, sample_weighted_from_neighbour_info_owned, Neighbour,
+    NeighbourInfo, SampleMissingPolicy,
 };
 pub use pipeline::{
     prepare_resampler, resample_dataset, resample_dataset_owned, PreparedResampler,

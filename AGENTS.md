@@ -213,7 +213,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` S2-m4c: Add Pyresample-style neighbour-info data model and projection-coordinate area-to-area nearest neighbour query foundation.
   - `[x]` S2-m4c2: Add nearest sampled-output helper from `NeighbourInfo`, including fill-vs-mask missing handling and source-mask propagation.
   - `[x]` S2-m4f1: Add a dependency-free exact 2D KD point index and route lon/lat swath nearest queries through it, preserving radius-of-influence and source-mask behavior.
-  - `[ ]` S2-next: Add Pyresample-style multi-neighbour query/sampling, great-circle/geocentric distances, chunked parallel processing, and neighbour-info generation for swaths.
+  - `[x]` S2-m6g: Add area-to-area top-k neighbour-info generation and weighted multi-neighbour sampling foundations after inspecting Pyresample `get_sample_from_neighbour_info`.
+  - `[ ]` S2-next: Add geocentric/great-circle KD distances, chunked parallel processing, multi-neighbour KD-tree acceleration, uncertainty outputs, and neighbour-info generation for swaths.
 - `[~]` S3: Bilinear, cubic, and spline interpolation.
   - `[x]` S3-m6c: Add first same-projection 2D area-to-area bilinear resampler with fill/mask missing policy and pipeline selection after inspecting Satpy/Pyresample bilinear paths.
   - `[ ]` S3-next: Add irregular swath bilinear coefficients, multi-neighbour lookup, cubic interpolation, spline interpolation, and higher-dimensional/band-aware sampling.
@@ -326,7 +327,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Done for geometry, fixture-backed FCI/NetCDF reader slice, Scene resampling extension, and exact 2D KD point-index acceleration; native NetCDF/HDF and full Pyresample KD parity remain later roadmap work |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Selected next |
-| M6-resampling-full | S1-S7 | Started with S3 bilinear, S4 bucket avg/sum/count/fraction, S5 EWA-style weighted accumulation, S6 native repeat/aggregate, and S7 pipeline foundations; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5-next, S6-next, and S7-next |
+| M6-resampling-full | S1-S7 | Started with S2 top-k/weighted neighbour-info foundations, S3 bilinear, S4 bucket avg/sum/count/fraction, S5 EWA-style weighted accumulation, S6 native repeat/aggregate, and S7 pipeline foundations; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5-next, S6-next, and S7-next |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
 | M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
 | M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
@@ -373,6 +374,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M6-resampling-full-d: Add first swath-to-area bucket avg/sum/count resampling foundation. Roadmap: S4.
   - `[x]` M6-resampling-full-e: Add bucket fraction category-axis output and sum skipna=false guardrail. Roadmap: S4.
   - `[x]` M6-resampling-full-f: Add first dependency-free EWA-style weighted accumulation foundation. Roadmap: S5.
+  - `[x]` M6-resampling-full-g: Add area-to-area top-k neighbour-info and weighted sampling foundations. Roadmap: S2.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
 - `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
 - `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
@@ -482,7 +484,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
-| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest index array, distance array, missing-neighbour sentinel, cached valid-input/output counts, area-to-area nearest neighbour query foundation, and nearest sampled-output helper for `DataGrid` with both borrowed and owned variants | Multi-neighbour queries/sampling, swath neighbour-info arrays, geocentric/great-circle distances |
+| `NeighbourInfo`: Pyresample-style valid input/output flags, nearest/top-k index arrays, distance arrays, missing-neighbour sentinel, cached valid-input/output counts, area-to-area nearest/top-k neighbour query foundations, nearest sampled-output helpers, weighted multi-neighbour sampling helpers, and Gaussian weight helper for `DataGrid` with both borrowed and owned variants | Swath neighbour-info arrays, geocentric/great-circle distances, chunked/parallel neighbour queries, uncertainty outputs, multi-band weighted sampling |
 | `KdPointIndex2D`: dependency-free exact 2D KD-tree over finite source points for nearest-point lookup with optional radius-of-influence pruning | Pyresample-compatible geocentric KD-tree, multi-neighbour output, chunked/parallel queries |
 | `SceneResampleExt`: Scene-level resampling extension in `rusty_sat_resample` for all currently loaded datasets through a supplied `Resampler` and destination area, with both borrowed (`&self`) and consuming (`self`) APIs | Full Satpy `Scene.resample` parity: dataset selection, area helpers, resampler cache/preparation, and multiple resampler families |
 | `NearestAreaResampler`: area-to-area and KD-indexed swath-to-area nearest, radius of influence, fill value, mask propagation, coordinate preservation, lazy input consumption, and `resample_owned` through the `Resampler` trait | CRS transforms, anti-meridian handling, geocentric distances, multi-band, chunk-preserving lazy output |
