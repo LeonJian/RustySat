@@ -64,6 +64,7 @@ pub struct NeighbourInfo {
     distance_array: Vec<f64>,
     valid_input_count: usize,
     valid_output_count: usize,
+    reduced_to_source: Vec<usize>,
 }
 
 impl NeighbourInfo {
@@ -95,6 +96,16 @@ impl NeighbourInfo {
         }
         let valid_input_count = valid_input_index.iter().filter(|v| **v).count();
         let valid_output_count = valid_output_index.iter().filter(|v| **v).count();
+        let mut reduced_to_source = vec![0usize; valid_input_count];
+        {
+            let mut reduced = 0;
+            for (source_index, valid) in valid_input_index.iter().enumerate() {
+                if *valid {
+                    reduced_to_source[reduced] = source_index;
+                    reduced += 1;
+                }
+            }
+        }
         let expected_neighbour_entries = valid_output_count
             .checked_mul(neighbours)
             .ok_or_else(|| RustySatError::invalid_input("neighbour info size overflows usize"))?;
@@ -120,6 +131,7 @@ impl NeighbourInfo {
             distance_array,
             valid_input_count,
             valid_output_count,
+            reduced_to_source,
         })
     }
 
@@ -213,19 +225,15 @@ impl NeighbourInfo {
         if reduced_source_index == missing_index {
             return Ok(None);
         }
-        let mut reduced = 0usize;
-        for (source_index, valid) in self.valid_input_index.iter().enumerate() {
-            if !valid {
-                continue;
-            }
-            if reduced == reduced_source_index {
-                return Ok(Some(source_index));
-            }
-            reduced += 1;
-        }
-        Err(RustySatError::invalid_input(format!(
-            "reduced source index {reduced_source_index} is outside valid input count {missing_index}"
-        )))
+        self.reduced_to_source
+            .get(reduced_source_index)
+            .copied()
+            .map(Some)
+            .ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "reduced source index {reduced_source_index} is outside valid input count {missing_index}"
+                ))
+            })
     }
 
     pub fn first_source_index_for_output(

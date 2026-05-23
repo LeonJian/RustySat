@@ -15,6 +15,7 @@
 
 use crate::{Result, RustySatError};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Numeric element types supported by the first Rusty Sat data-array layer.
 pub trait NumericElement:
@@ -187,28 +188,62 @@ impl ChunkShape {
 }
 
 /// Packed mask where a set bit means the corresponding data value is invalid.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidityMask {
     len: usize,
     bits: Vec<u8>,
+    cached_count: AtomicUsize,
 }
+
+const UNCACHED_COUNT: usize = usize::MAX;
+
+impl Clone for ValidityMask {
+    fn clone(&self) -> Self {
+        Self {
+            len: self.len,
+            bits: self.bits.clone(),
+            cached_count: AtomicUsize::new(self.cached_count.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl std::fmt::Debug for ValidityMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidityMask")
+            .field("len", &self.len)
+            .field("bits", &self.bits)
+            .field("masked_count", &self.masked_count())
+            .finish()
+    }
+}
+
+impl PartialEq for ValidityMask {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.bits == other.bits
+    }
+}
+
+impl Eq for ValidityMask {}
 
 impl ValidityMask {
     pub fn all_valid(len: usize) -> Self {
         Self {
             len,
             bits: vec![0; len.div_ceil(8)],
+            cached_count: AtomicUsize::new(0),
         }
     }
 
     pub fn from_masked_flags(flags: impl IntoIterator<Item = bool>) -> Self {
         let flags = flags.into_iter().collect::<Vec<_>>();
         let mut mask = Self::all_valid(flags.len());
+        let mut count = 0;
         for (idx, masked) in flags.into_iter().enumerate() {
             if masked {
                 mask.set_masked(idx, true);
+                count += 1;
             }
         }
+        mask.cached_count.store(count, Ordering::Relaxed);
         mask
     }
 
@@ -238,12 +273,19 @@ impl ValidityMask {
         } else {
             *byte &= !(1 << bit);
         }
+        self.cached_count.store(UNCACHED_COUNT, Ordering::Relaxed);
     }
 
     pub fn masked_count(&self) -> usize {
-        (0..self.len)
+        let cached = self.cached_count.load(Ordering::Relaxed);
+        if cached != UNCACHED_COUNT {
+            return cached;
+        }
+        let count = (0..self.len)
             .filter(|idx| self.is_masked(*idx).unwrap_or(false))
-            .count()
+            .count();
+        self.cached_count.store(count, Ordering::Relaxed);
+        count
     }
 
     pub fn bytes(&self) -> &[u8] {
