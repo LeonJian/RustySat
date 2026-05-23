@@ -74,6 +74,7 @@ pub struct ResampleOptions {
     mask_missing: bool,
     skipna: bool,
     bucket_categories: Vec<f64>,
+    bucket_categories_auto: bool,
 }
 
 impl Default for ResampleOptions {
@@ -85,6 +86,7 @@ impl Default for ResampleOptions {
             mask_missing: false,
             skipna: true,
             bucket_categories: Vec::new(),
+            bucket_categories_auto: false,
         }
     }
 }
@@ -125,6 +127,10 @@ impl ResampleOptions {
         Self::new(ResamplerMethod::BucketFraction).with_bucket_categories(categories)
     }
 
+    pub fn bucket_fraction_auto() -> Self {
+        Self::new(ResamplerMethod::BucketFraction).with_auto_bucket_categories()
+    }
+
     pub fn ewa() -> Self {
         Self::new(ResamplerMethod::Ewa)
     }
@@ -151,6 +157,10 @@ impl ResampleOptions {
 
     pub fn bucket_categories(&self) -> &[f64] {
         &self.bucket_categories
+    }
+
+    pub fn bucket_categories_auto(&self) -> bool {
+        self.bucket_categories_auto
     }
 
     pub fn with_method(mut self, method: ResamplerMethod) -> Self {
@@ -186,6 +196,13 @@ impl ResampleOptions {
 
     pub fn with_bucket_categories(mut self, categories: impl Into<Vec<f64>>) -> Self {
         self.bucket_categories = categories.into();
+        self.bucket_categories_auto = false;
+        self
+    }
+
+    pub fn with_auto_bucket_categories(mut self) -> Self {
+        self.bucket_categories.clear();
+        self.bucket_categories_auto = true;
         self
     }
 }
@@ -372,9 +389,13 @@ pub fn prepare_resampler_for_geometry(
                     "bucket fraction pipeline preparation from area geometry",
                 ));
             };
-            Ok(PreparedResampler::BucketFraction(
+            let resampler = if options.bucket_categories_auto {
+                BucketFractionResampler::auto_categories(source)
+            } else {
                 BucketFractionResampler::new(source, options.bucket_categories)?
-                    .with_fill_value(options.fill_value),
+            };
+            Ok(PreparedResampler::BucketFraction(
+                resampler.with_fill_value(options.fill_value),
             ))
         }
         ResamplerMethod::Ewa => {
@@ -636,6 +657,26 @@ mod tests {
     }
 
     #[test]
+    fn resample_dataset_from_geometry_uses_auto_bucket_fraction_categories() {
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let dataset = Dataset::new(DataId::new("quality").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![2.0, 1.0, 2.0, 1.0]).unwrap());
+        let options = ResampleOptions::bucket_fraction_auto().with_fill_value(-1.0);
+
+        let output = resample_dataset_from_geometry(
+            &dataset,
+            SourceGeometry::swath(swath()),
+            &destination,
+            options,
+        )
+        .unwrap();
+
+        let array = output.array().unwrap();
+        assert_eq!(array.shape(), &[2, 2, 2]);
+        assert_eq!(array.coord("categories").unwrap().values(), &[1.0, 2.0]);
+    }
+
+    #[test]
     fn bucket_fraction_pipeline_requires_categories() {
         let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
 
@@ -774,6 +815,12 @@ mod tests {
         let fraction = ResampleOptions::bucket_fraction([0.0, 1.0]);
         assert_eq!(fraction.method(), ResamplerMethod::BucketFraction);
         assert_eq!(fraction.bucket_categories(), &[0.0, 1.0]);
+        assert!(!fraction.bucket_categories_auto());
+
+        let auto_fraction = ResampleOptions::bucket_fraction_auto();
+        assert_eq!(auto_fraction.method(), ResamplerMethod::BucketFraction);
+        assert!(auto_fraction.bucket_categories_auto());
+        assert!(auto_fraction.bucket_categories().is_empty());
     }
 
     #[test]

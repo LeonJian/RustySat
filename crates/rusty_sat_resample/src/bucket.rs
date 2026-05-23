@@ -6,8 +6,9 @@
 //!
 //! This first S4 slice supports lon/lat swath coordinates dropped into a
 //! same-geographic target area. It implements average, sum, and count for 2D
-//! f64 grids. Fractions, projected target backends, multidimensional buckets,
-//! and chunked execution are future S4 work.
+//! f64 grids plus explicit and auto-discovered bucket fractions. Projected
+//! target backends, multidimensional buckets, and chunked execution are future
+//! S4 work.
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
 use rusty_sat_core::{
@@ -44,6 +45,7 @@ pub struct BucketResampler {
 pub struct BucketFractionResampler {
     source: SwathDefinition,
     categories: Vec<f64>,
+    discover_categories: bool,
     fill_value: f64,
 }
 
@@ -94,8 +96,18 @@ impl BucketFractionResampler {
         Ok(Self {
             source,
             categories,
+            discover_categories: false,
             fill_value: f64::NAN,
         })
+    }
+
+    pub fn auto_categories(source: SwathDefinition) -> Self {
+        Self {
+            source,
+            categories: Vec::new(),
+            discover_categories: true,
+            fill_value: f64::NAN,
+        }
     }
 
     pub fn with_fill_value(mut self, fill_value: f64) -> Self {
@@ -109,6 +121,18 @@ impl BucketFractionResampler {
 
     pub fn categories(&self) -> &[f64] {
         &self.categories
+    }
+
+    pub fn discovers_categories(&self) -> bool {
+        self.discover_categories
+    }
+
+    fn categories_for_grid(&self, source_grid: &DataGrid) -> Result<Vec<f64>> {
+        if self.discover_categories {
+            discover_bucket_fraction_categories(source_grid)
+        } else {
+            Ok(self.categories.clone())
+        }
     }
 }
 
@@ -191,11 +215,12 @@ impl Resampler for BucketFractionResampler {
                 "bucket fraction resampling requires f64 dataset grid values",
             )
         })?;
+        let categories = self.categories_for_grid(source_grid)?;
         let resampled = resample_bucket_fraction(
             source_grid,
             &self.source,
             destination,
-            &self.categories,
+            &categories,
             self.fill_value,
         )?;
         let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_array(resampled);
@@ -222,11 +247,12 @@ impl Resampler for BucketFractionResampler {
                     "bucket fraction resampling requires an f64 dataset grid",
                 )
             })?;
+        let categories = self.categories_for_grid(&source_grid)?;
         let resampled = resample_bucket_fraction(
             &source_grid,
             &self.source,
             destination,
-            &self.categories,
+            &categories,
             self.fill_value,
         )?;
         let mut resampled_dataset = Dataset::new(id).with_array(resampled);
@@ -358,6 +384,16 @@ pub fn resample_bucket_fraction(
     Ok(array)
 }
 
+pub fn resample_bucket_fraction_auto(
+    source_grid: &DataGrid,
+    source: &SwathDefinition,
+    destination: &AreaDefinition,
+    fill_value: f64,
+) -> Result<DataArray<f64>> {
+    let categories = discover_bucket_fraction_categories(source_grid)?;
+    resample_bucket_fraction(source_grid, source, destination, &categories, fill_value)
+}
+
 fn resample_bucket_with_statistic(
     source_grid: &DataGrid,
     source: &SwathDefinition,
@@ -391,6 +427,20 @@ fn validate_categories(categories: &[f64]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn discover_bucket_fraction_categories(source_grid: &DataGrid) -> Result<Vec<f64>> {
+    let mut categories = Vec::new();
+    for (idx, value) in source_grid.values().iter().copied().enumerate() {
+        if source_grid.is_masked(idx).unwrap_or(false) || !value.is_finite() {
+            continue;
+        }
+        categories.push(value);
+    }
+    categories.sort_by(f64::total_cmp);
+    categories.dedup_by(|left, right| *left == *right);
+    validate_categories(&categories)?;
+    Ok(categories)
 }
 
 fn resample_bucket_owned_with_statistic(
@@ -790,11 +840,47 @@ mod tests {
     }
 
     #[test]
+    fn bucket_fraction_auto_discovers_sorted_finite_unmasked_categories() {
+        let swath = SwathDefinition::from_lonlats(1, 5, vec![0.5; 5], vec![1.5; 5]).unwrap();
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "longlat".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 2.0, 2.0],
+        )
+        .unwrap();
+        let grid = DataGrid::new(1, 5, vec![2.0, 1.0, 2.0, f64::NAN, 3.0])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([
+                false, false, false, false, true,
+            ]))
+            .unwrap();
+
+        let fractions = resample_bucket_fraction_auto(&grid, &swath, &target, -1.0).unwrap();
+
+        assert_eq!(fractions.shape_nd(), &[2, 1, 1]);
+        assert_eq!(fractions.coord("categories").unwrap().values(), &[1.0, 2.0]);
+        assert_eq!(fractions.values(), &[0.2, 0.4]);
+    }
+
+    #[test]
     fn bucket_fraction_rejects_empty_or_non_finite_categories() {
         let grid = DataGrid::new(2, 3, vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]).unwrap();
 
         assert!(resample_bucket_fraction(&grid, &swath(), &area(), &[], -1.0).is_err());
         assert!(resample_bucket_fraction(&grid, &swath(), &area(), &[f64::NAN], -1.0).is_err());
+    }
+
+    #[test]
+    fn bucket_fraction_auto_rejects_when_no_categories_exist() {
+        let grid = DataGrid::new(2, 3, vec![f64::NAN; 6]).unwrap();
+
+        let err = resample_bucket_fraction_auto(&grid, &swath(), &area(), -1.0).unwrap_err();
+
+        assert!(err.to_string().contains("at least one category"));
     }
 
     #[test]
