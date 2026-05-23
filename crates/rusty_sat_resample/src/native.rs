@@ -1096,4 +1096,58 @@ mod tests {
 
         assert!(resampler.resample(&dataset, &destination).is_err());
     }
+
+    #[test]
+    fn yx_methods_reject_missing_y_or_x_dimensions() {
+        let array =
+            DataArray::from_vec_named(vec![2, 2], ["bands", "time"], vec![1.0, 2.0, 3.0, 4.0])
+                .unwrap();
+
+        assert!(native_repeat_yx(&array, 2, 2).is_err());
+        assert!(native_aggregate_mean_yx(&array, 2, 2).is_err());
+    }
+
+    #[test]
+    fn yx_owned_produces_same_output_as_borrowed() {
+        let array = DataArray::from_vec_named(
+            vec![2, 2, 2],
+            ["bands", "y", "x"],
+            vec![1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags([
+            false, true, false, false, false, false, true, false,
+        ]))
+        .unwrap();
+
+        let borrowed_repeat = native_repeat_yx(&array, 2, 2).unwrap();
+        let owned_repeat = native_repeat_yx_owned(array.clone(), 2, 2).unwrap();
+        assert_eq!(borrowed_repeat.values(), owned_repeat.values());
+        assert_eq!(borrowed_repeat.mask(), owned_repeat.mask());
+
+        let borrowed_agg = native_aggregate_mean_yx(&array, 2, 2).unwrap();
+        let owned_agg = native_aggregate_mean_yx_owned(array, 2, 2).unwrap();
+        assert_eq!(borrowed_agg.values(), owned_agg.values());
+        assert_eq!(borrowed_agg.mask(), owned_agg.mask());
+    }
+
+    #[test]
+    fn native_resample_yx_owned_produces_same_output_as_borrowed() {
+        let source = area("source", 2, 2);
+        let destination = area("destination", 4, 4);
+        let borrowed = DataArray::from_vec_named(
+            vec![2, 2, 2],
+            ["bands", "y", "x"],
+            vec![1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap();
+        let owned = borrowed.clone();
+
+        let borrowed_result = native_resample_yx(&borrowed, &destination).unwrap();
+        let owned_result = native_resample_yx_owned(owned, &destination).unwrap();
+
+        assert_eq!(borrowed_result.values(), owned_result.values());
+        assert_eq!(borrowed_result.shape_nd(), owned_result.shape_nd());
+        assert_eq!(borrowed_result.dims(), owned_result.dims());
+    }
 }
