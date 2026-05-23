@@ -40,6 +40,13 @@ pub struct BucketResampler {
     skipna: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct BucketFractionResampler {
+    source: SwathDefinition,
+    categories: Vec<f64>,
+    fill_value: f64,
+}
+
 impl BucketResampler {
     pub fn new(source: SwathDefinition, statistic: BucketStatistic) -> Self {
         Self {
@@ -78,6 +85,30 @@ impl BucketResampler {
 
     pub fn statistic(&self) -> BucketStatistic {
         self.statistic
+    }
+}
+
+impl BucketFractionResampler {
+    pub fn new(source: SwathDefinition, categories: Vec<f64>) -> Result<Self> {
+        validate_categories(&categories)?;
+        Ok(Self {
+            source,
+            categories,
+            fill_value: f64::NAN,
+        })
+    }
+
+    pub fn with_fill_value(mut self, fill_value: f64) -> Self {
+        self.fill_value = fill_value;
+        self
+    }
+
+    pub fn source(&self) -> &SwathDefinition {
+        &self.source
+    }
+
+    pub fn categories(&self) -> &[f64] {
+        &self.categories
     }
 }
 
@@ -143,6 +174,68 @@ impl Resampler for BucketResampler {
             resampled_dataset.insert_attr(key, value)?;
         }
         adjust_bucket_attrs(&mut resampled_dataset, self.statistic)?;
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
+}
+
+impl Resampler for BucketFractionResampler {
+    fn name(&self) -> &str {
+        "bucket_fraction"
+    }
+
+    fn resample(&self, dataset: &Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let source_grid = dataset.data().ok_or_else(|| {
+            RustySatError::invalid_input(
+                "bucket fraction resampling requires f64 dataset grid values",
+            )
+        })?;
+        let resampled = resample_bucket_fraction(
+            source_grid,
+            &self.source,
+            destination,
+            &self.categories,
+            self.fill_value,
+        )?;
+        let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_array(resampled);
+        for (key, value) in dataset.metadata() {
+            resampled_dataset.insert_metadata(key.clone(), value.clone())?;
+        }
+        for (key, value) in dataset.attrs() {
+            resampled_dataset.insert_attr(key.clone(), value.clone())?;
+        }
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
+
+    fn resample_owned(&self, dataset: Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let id = dataset.id().clone();
+        let metadata = dataset.metadata().clone();
+        let attrs = dataset.attrs().clone();
+        let source_grid = dataset
+            .into_array()
+            .and_then(|array| array.into_f64())
+            .ok_or_else(|| {
+                RustySatError::invalid_input(
+                    "bucket fraction resampling requires an f64 dataset grid",
+                )
+            })?;
+        let resampled = resample_bucket_fraction(
+            &source_grid,
+            &self.source,
+            destination,
+            &self.categories,
+            self.fill_value,
+        )?;
+        let mut resampled_dataset = Dataset::new(id).with_array(resampled);
+        for (key, value) in metadata {
+            resampled_dataset.insert_metadata(key, value)?;
+        }
+        for (key, value) in attrs {
+            resampled_dataset.insert_attr(key, value)?;
+        }
         resampled_dataset.insert_metadata("area", destination.id())?;
         resampled_dataset.insert_metadata("resampler", self.name())?;
         Ok(resampled_dataset)

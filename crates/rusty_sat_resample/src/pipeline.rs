@@ -8,8 +8,9 @@
 //! of dynamically importing Python classes by name.
 
 use crate::{
-    AreaDefinition, BilinearAreaResampler, BucketResampler, BucketStatistic, EwaOptions,
-    EwaResampler, NativeResampler, NearestAreaResampler, Resampler, SwathDefinition,
+    AreaDefinition, BilinearAreaResampler, BucketFractionResampler, BucketResampler,
+    BucketStatistic, EwaOptions, EwaResampler, NativeResampler, NearestAreaResampler, Resampler,
+    SwathDefinition,
 };
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::str::FromStr;
@@ -22,6 +23,7 @@ pub enum ResamplerMethod {
     BucketAverage,
     BucketSum,
     BucketCount,
+    BucketFraction,
     Ewa,
 }
 
@@ -38,6 +40,7 @@ impl ResamplerMethod {
             Self::BucketAverage => "bucket_avg",
             Self::BucketSum => "bucket_sum",
             Self::BucketCount => "bucket_count",
+            Self::BucketFraction => "bucket_fraction",
             Self::Ewa => "ewa",
         }
     }
@@ -54,6 +57,7 @@ impl FromStr for ResamplerMethod {
             "bucket" | "bucket_avg" | "bucket_average" => Ok(Self::BucketAverage),
             "bucket_sum" => Ok(Self::BucketSum),
             "bucket_count" => Ok(Self::BucketCount),
+            "bucket_fraction" | "bucket_frac" => Ok(Self::BucketFraction),
             "ewa" | "ewa_legacy" => Ok(Self::Ewa),
             other => Err(RustySatError::not_found(format!(
                 "resampler method '{other}'"
@@ -69,6 +73,7 @@ pub struct ResampleOptions {
     fill_value: f64,
     mask_missing: bool,
     skipna: bool,
+    bucket_categories: Vec<f64>,
 }
 
 impl Default for ResampleOptions {
@@ -79,6 +84,7 @@ impl Default for ResampleOptions {
             fill_value: f64::NAN,
             mask_missing: false,
             skipna: true,
+            bucket_categories: Vec::new(),
         }
     }
 }
@@ -115,6 +121,10 @@ impl ResampleOptions {
         Self::new(ResamplerMethod::BucketCount)
     }
 
+    pub fn bucket_fraction(categories: impl Into<Vec<f64>>) -> Self {
+        Self::new(ResamplerMethod::BucketFraction).with_bucket_categories(categories)
+    }
+
     pub fn ewa() -> Self {
         Self::new(ResamplerMethod::Ewa)
     }
@@ -137,6 +147,10 @@ impl ResampleOptions {
 
     pub fn skipna(&self) -> bool {
         self.skipna
+    }
+
+    pub fn bucket_categories(&self) -> &[f64] {
+        &self.bucket_categories
     }
 
     pub fn with_method(mut self, method: ResamplerMethod) -> Self {
@@ -169,6 +183,11 @@ impl ResampleOptions {
         self.skipna = skipna;
         self
     }
+
+    pub fn with_bucket_categories(mut self, categories: impl Into<Vec<f64>>) -> Self {
+        self.bucket_categories = categories.into();
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +196,7 @@ pub enum PreparedResampler {
     Bilinear(BilinearAreaResampler),
     Native(NativeResampler),
     Bucket(BucketResampler),
+    BucketFraction(BucketFractionResampler),
     Ewa(EwaResampler),
 }
 
@@ -191,6 +211,7 @@ impl PreparedResampler {
                 BucketStatistic::Sum => ResamplerMethod::BucketSum,
                 BucketStatistic::Count => ResamplerMethod::BucketCount,
             },
+            Self::BucketFraction(_) => ResamplerMethod::BucketFraction,
             Self::Ewa(_) => ResamplerMethod::Ewa,
         }
     }
@@ -203,6 +224,7 @@ impl Resampler for PreparedResampler {
             Self::Bilinear(resampler) => resampler.name(),
             Self::Native(resampler) => resampler.name(),
             Self::Bucket(resampler) => resampler.name(),
+            Self::BucketFraction(resampler) => resampler.name(),
             Self::Ewa(resampler) => resampler.name(),
         }
     }
@@ -213,6 +235,7 @@ impl Resampler for PreparedResampler {
             Self::Bilinear(resampler) => resampler.resample(dataset, destination),
             Self::Native(resampler) => resampler.resample(dataset, destination),
             Self::Bucket(resampler) => resampler.resample(dataset, destination),
+            Self::BucketFraction(resampler) => resampler.resample(dataset, destination),
             Self::Ewa(resampler) => resampler.resample(dataset, destination),
         }
     }
@@ -223,6 +246,7 @@ impl Resampler for PreparedResampler {
             Self::Bilinear(resampler) => resampler.resample_owned(dataset, destination),
             Self::Native(resampler) => resampler.resample_owned(dataset, destination),
             Self::Bucket(resampler) => resampler.resample_owned(dataset, destination),
+            Self::BucketFraction(resampler) => resampler.resample_owned(dataset, destination),
             Self::Ewa(resampler) => resampler.resample_owned(dataset, destination),
         }
     }
@@ -341,6 +365,17 @@ pub fn prepare_resampler_for_geometry(
                 ));
             };
             Ok(PreparedResampler::Bucket(BucketResampler::count(source)))
+        }
+        ResamplerMethod::BucketFraction => {
+            let SourceGeometry::Swath(source) = source else {
+                return Err(RustySatError::unsupported(
+                    "bucket fraction pipeline preparation from area geometry",
+                ));
+            };
+            Ok(PreparedResampler::BucketFraction(
+                BucketFractionResampler::new(source, options.bucket_categories)?
+                    .with_fill_value(options.fill_value),
+            ))
         }
         ResamplerMethod::Ewa => {
             let SourceGeometry::Swath(source) = source else {
@@ -466,6 +501,10 @@ mod tests {
             ResamplerMethod::BucketCount
         );
         assert_eq!(
+            ResamplerMethod::from_name("bucket_fraction").unwrap(),
+            ResamplerMethod::BucketFraction
+        );
+        assert_eq!(
             ResamplerMethod::from_name("ewa").unwrap(),
             ResamplerMethod::Ewa
         );
@@ -569,6 +608,45 @@ mod tests {
             output.metadata().get("resampler"),
             Some(&"bucket_avg".to_string())
         );
+    }
+
+    #[test]
+    fn resample_dataset_from_geometry_uses_bucket_fraction_method() {
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let dataset = Dataset::new(DataId::new("quality").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![0.0, 1.0, 1.0, 0.0]).unwrap());
+        let options = ResampleOptions::bucket_fraction([0.0, 1.0]).with_fill_value(-1.0);
+
+        let output = resample_dataset_from_geometry(
+            &dataset,
+            SourceGeometry::swath(swath()),
+            &destination,
+            options,
+        )
+        .unwrap();
+
+        let array = output.array().unwrap();
+        assert_eq!(array.shape(), &[2, 2, 2]);
+        assert_eq!(array.dims(), &["categories", "y", "x"]);
+        assert!(array.coord("categories").is_some());
+        assert_eq!(
+            output.metadata().get("resampler"),
+            Some(&"bucket_fraction".to_string())
+        );
+    }
+
+    #[test]
+    fn bucket_fraction_pipeline_requires_categories() {
+        let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+
+        let err = prepare_resampler_for_geometry(
+            SourceGeometry::swath(swath()),
+            &destination,
+            ResampleOptions::new(ResamplerMethod::BucketFraction),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("at least one category"));
     }
 
     #[test]
@@ -692,6 +770,10 @@ mod tests {
         let bucket = ResampleOptions::bucket_sum().with_skipna(false);
         assert_eq!(bucket.method(), ResamplerMethod::BucketSum);
         assert!(!bucket.skipna());
+
+        let fraction = ResampleOptions::bucket_fraction([0.0, 1.0]);
+        assert_eq!(fraction.method(), ResamplerMethod::BucketFraction);
+        assert_eq!(fraction.bucket_categories(), &[0.0, 1.0]);
     }
 
     #[test]
