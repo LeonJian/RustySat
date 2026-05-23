@@ -1250,6 +1250,27 @@ mod tests {
     }
 
     #[test]
+    fn native_resample_any_yx_owned_identity_preserves_dtype() {
+        let destination = area("destination", 2, 2);
+        let array = DataArray::from_vec_named(vec![2, 2], ["y", "x"], vec![1_u8, 2, 3, 4])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, false, true, false]))
+            .unwrap()
+            .with_coordinate("quality", Coordinate::scalar(1.0))
+            .unwrap();
+
+        let output = native_resample_any_yx_owned(array.into(), &destination).unwrap();
+
+        assert_eq!(output.dtype(), rusty_sat_core::DataType::U8);
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_eq!(output.values_as_f64(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(output.mask().unwrap().masked_count(), 1);
+        assert!(output.coord("x").is_some());
+        assert!(output.coord("y").is_some());
+        assert_eq!(output.coord("quality").unwrap().values(), &[1.0]);
+    }
+
+    #[test]
     fn native_resampler_aggregates_runtime_typed_arrays_to_f64_means() {
         let source = area("source", 4, 4);
         let destination = area("destination", 2, 2);
