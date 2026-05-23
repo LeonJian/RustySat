@@ -9,7 +9,9 @@
 //! expand/reduce directions are rejected.
 
 use crate::{AreaDefinition, Resampler};
-use rusty_sat_core::{Coordinate, DataGrid, Dataset, Result, RustySatError, ValidityMask};
+use rusty_sat_core::{
+    Coordinate, DataArray, DataGrid, Dataset, Result, RustySatError, ValidityMask,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -36,16 +38,16 @@ impl Resampler for NativeResampler {
         let source_grid = dataset.data().ok_or_else(|| {
             RustySatError::invalid_input("native resampling requires f64 dataset grid values")
         })?;
-        if source_grid.shape() != self.source.shape() {
+        if source_grid.shape_yx()? != self.source.shape() {
             return Err(RustySatError::invalid_input(format!(
-                "dataset grid shape {:?} does not match source area shape {:?}",
-                source_grid.shape(),
+                "dataset grid y/x shape {:?} does not match source area shape {:?}",
+                source_grid.shape_yx()?,
                 self.source.shape()
             )));
         }
         validate_native_area_compatibility(&self.source, destination)?;
 
-        let resampled = native_resample_2d(source_grid, destination)?;
+        let resampled = native_resample_yx(source_grid, destination)?;
         let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
         for (key, value) in dataset.metadata() {
             resampled_dataset.insert_metadata(key.clone(), value.clone())?;
@@ -68,16 +70,16 @@ impl Resampler for NativeResampler {
             .ok_or_else(|| {
                 RustySatError::invalid_input("native resampling requires an f64 dataset grid")
             })?;
-        if source_grid.shape() != self.source.shape() {
+        if source_grid.shape_yx()? != self.source.shape() {
             return Err(RustySatError::invalid_input(format!(
-                "dataset grid shape {:?} does not match source area shape {:?}",
-                source_grid.shape(),
+                "dataset grid y/x shape {:?} does not match source area shape {:?}",
+                source_grid.shape_yx()?,
                 self.source.shape()
             )));
         }
         validate_native_area_compatibility(&self.source, destination)?;
 
-        let resampled = native_resample_2d_owned(source_grid, destination)?;
+        let resampled = native_resample_yx_owned(source_grid, destination)?;
         let mut resampled_dataset = Dataset::new(id).with_data(resampled);
         for (key, value) in metadata {
             resampled_dataset.insert_metadata(key, value)?;
@@ -88,6 +90,71 @@ impl Resampler for NativeResampler {
         resampled_dataset.insert_metadata("area", destination.id())?;
         resampled_dataset.insert_metadata("resampler", self.name())?;
         Ok(resampled_dataset)
+    }
+}
+
+pub fn native_resample_yx(
+    source_grid: &DataGrid,
+    destination: &AreaDefinition,
+) -> Result<DataGrid> {
+    let source_shape = source_grid.shape_yx()?;
+    let destination_shape = destination.shape();
+    match native_scale(source_shape, destination_shape)? {
+        NativeScale::Identity => {
+            add_native_coords(source_grid.clone(), Some(source_grid.coords()), destination)
+        }
+        NativeScale::Repeat { y_factor, x_factor } => {
+            let repeated = native_repeat_yx(source_grid, y_factor, x_factor)?;
+            add_native_coords(repeated, Some(source_grid.coords()), destination)
+        }
+        NativeScale::Aggregate { y_factor, x_factor } => {
+            let aggregated = native_aggregate_mean_yx(source_grid, y_factor, x_factor)?;
+            add_native_coords(aggregated, Some(source_grid.coords()), destination)
+        }
+    }
+}
+
+pub fn native_resample_yx_owned(
+    source_grid: DataGrid,
+    destination: &AreaDefinition,
+) -> Result<DataGrid> {
+    let source_shape = source_grid.shape_yx()?;
+    let destination_shape = destination.shape();
+    match native_scale(source_shape, destination_shape)? {
+        NativeScale::Identity => {
+            let shape = source_grid.shape_nd().to_vec();
+            let dims = source_grid.dims().to_vec();
+            let (values, source_coords, mask) = source_grid.into_parts();
+            let mut grid = DataArray::from_vec_named(shape, dims, values)?;
+            if let Some(mask) = mask {
+                grid.set_mask(mask)?;
+            }
+            add_native_coords_owned(grid, Some(source_coords), destination)
+        }
+        NativeScale::Repeat { y_factor, x_factor } => {
+            let shape = source_grid.shape_nd().to_vec();
+            let dims = source_grid.dims().to_vec();
+            let (values, source_coords, mask) = source_grid.into_parts();
+            let repeated =
+                repeat_yx_from_parts(shape, dims, values, mask, source_coords, y_factor, x_factor)?;
+            add_native_coords(repeated, None, destination)
+        }
+        NativeScale::Aggregate { y_factor, x_factor } => {
+            let shape = source_grid.shape_nd().to_vec();
+            let dims = source_grid.dims().to_vec();
+            let (values, source_coords, mask) = source_grid.into_parts();
+            let aggregated = aggregate_mean_yx_from_parts(
+                shape,
+                dims,
+                source_shape,
+                values,
+                mask,
+                source_coords,
+                y_factor,
+                x_factor,
+            )?;
+            add_native_coords(aggregated, None, destination)
+        }
     }
 }
 
@@ -152,6 +219,47 @@ pub fn native_resample_2d_owned(
             add_native_coords_owned(aggregated, Some(source_coords), destination)
         }
     }
+}
+
+pub fn native_repeat_yx(
+    source_grid: &DataGrid,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataGrid> {
+    validate_repeat_factors(y_factor, x_factor)?;
+    source_grid.shape_yx()?;
+    let source_values = source_grid.values().to_vec();
+    let source_mask = source_grid.mask().cloned();
+    let source_coords = source_grid.coords().clone();
+    repeat_yx_from_parts(
+        source_grid.shape_nd().to_vec(),
+        source_grid.dims().to_vec(),
+        source_values,
+        source_mask,
+        source_coords,
+        y_factor,
+        x_factor,
+    )
+}
+
+pub fn native_repeat_yx_owned(
+    source_grid: DataGrid,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataGrid> {
+    source_grid.shape_yx()?;
+    let shape = source_grid.shape_nd().to_vec();
+    let dims = source_grid.dims().to_vec();
+    let (source_values, source_coords, source_mask) = source_grid.into_parts();
+    repeat_yx_from_parts(
+        shape,
+        dims,
+        source_values,
+        source_mask,
+        source_coords,
+        y_factor,
+        x_factor,
+    )
 }
 
 pub fn native_repeat_2d(
@@ -238,6 +346,48 @@ fn repeat_2d_from_parts(
     finish_native_grid(height * y_factor, width * x_factor, values, mask_flags)
 }
 
+pub fn native_aggregate_mean_yx(
+    source_grid: &DataGrid,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataGrid> {
+    let source_shape = source_grid.shape_yx()?;
+    let source_values = source_grid.values().to_vec();
+    let source_mask = source_grid.mask().cloned();
+    let source_coords = source_grid.coords().clone();
+    aggregate_mean_yx_from_parts(
+        source_grid.shape_nd().to_vec(),
+        source_grid.dims().to_vec(),
+        source_shape,
+        source_values,
+        source_mask,
+        source_coords,
+        y_factor,
+        x_factor,
+    )
+}
+
+pub fn native_aggregate_mean_yx_owned(
+    source_grid: DataGrid,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataGrid> {
+    let source_shape = source_grid.shape_yx()?;
+    let shape = source_grid.shape_nd().to_vec();
+    let dims = source_grid.dims().to_vec();
+    let (source_values, source_coords, source_mask) = source_grid.into_parts();
+    aggregate_mean_yx_from_parts(
+        shape,
+        dims,
+        source_shape,
+        source_values,
+        source_mask,
+        source_coords,
+        y_factor,
+        x_factor,
+    )
+}
+
 pub fn native_aggregate_mean_2d(
     source_grid: &DataGrid,
     y_factor: usize,
@@ -315,6 +465,112 @@ fn aggregate_mean_2d_from_parts(
         }
     }
     finish_native_grid(out_height, out_width, values, mask_flags)
+}
+
+fn repeat_yx_from_parts(
+    source_shape_nd: Vec<usize>,
+    dims: Vec<String>,
+    source_values: Vec<f64>,
+    source_mask: Option<ValidityMask>,
+    source_coords: BTreeMap<String, Coordinate>,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataGrid> {
+    validate_repeat_factors(y_factor, x_factor)?;
+    let (y_dim, x_dim) = yx_dim_indices(&dims)?;
+    let mut output_shape = source_shape_nd.clone();
+    output_shape[y_dim] = output_shape[y_dim].checked_mul(y_factor).ok_or_else(|| {
+        RustySatError::invalid_input("native y repeat output size overflows usize")
+    })?;
+    output_shape[x_dim] = output_shape[x_dim].checked_mul(x_factor).ok_or_else(|| {
+        RustySatError::invalid_input("native x repeat output size overflows usize")
+    })?;
+    let source_strides = row_major_strides(&source_shape_nd)?;
+    let output_strides = row_major_strides(&output_shape)?;
+    let output_size = checked_shape_size(&output_shape)?;
+    let mut values = Vec::with_capacity(output_size);
+    let mut mask_flags = Vec::new();
+    if source_mask.is_some() {
+        mask_flags.reserve(output_size);
+    }
+
+    for output_idx in 0..output_size {
+        let mut indexes = unravel_index(output_idx, &output_shape, &output_strides);
+        indexes[y_dim] /= y_factor;
+        indexes[x_dim] /= x_factor;
+        let source_idx = linear_index(&indexes, &source_strides);
+        values.push(source_values[source_idx]);
+        if source_mask.is_some() {
+            mask_flags.push(
+                source_mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(source_idx))
+                    .unwrap_or(false),
+            );
+        }
+    }
+
+    let grid = finish_native_array(output_shape, dims, values, mask_flags)?;
+    add_preserved_native_coords_owned(grid, source_coords)
+}
+
+fn aggregate_mean_yx_from_parts(
+    source_shape_nd: Vec<usize>,
+    dims: Vec<String>,
+    source_yx_shape: (usize, usize),
+    source_values: Vec<f64>,
+    source_mask: Option<ValidityMask>,
+    source_coords: BTreeMap<String, Coordinate>,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataGrid> {
+    let (height, width) = source_yx_shape;
+    validate_aggregate_factors(height, width, y_factor, x_factor)?;
+    let (y_dim, x_dim) = yx_dim_indices(&dims)?;
+    let mut output_shape = source_shape_nd.clone();
+    output_shape[y_dim] /= y_factor;
+    output_shape[x_dim] /= x_factor;
+    let source_strides = row_major_strides(&source_shape_nd)?;
+    let output_strides = row_major_strides(&output_shape)?;
+    let output_size = checked_shape_size(&output_shape)?;
+    let mut values = Vec::with_capacity(output_size);
+    let mut mask_flags = Vec::with_capacity(output_size);
+
+    for output_idx in 0..output_size {
+        let output_indexes = unravel_index(output_idx, &output_shape, &output_strides);
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for dy in 0..y_factor {
+            for dx in 0..x_factor {
+                let mut source_indexes = output_indexes.clone();
+                source_indexes[y_dim] = output_indexes[y_dim] * y_factor + dy;
+                source_indexes[x_dim] = output_indexes[x_dim] * x_factor + dx;
+                let source_idx = linear_index(&source_indexes, &source_strides);
+                let masked = source_mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(source_idx))
+                    .unwrap_or(false);
+                if masked {
+                    continue;
+                }
+                let value = source_values[source_idx];
+                if value.is_finite() {
+                    sum += value;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            values.push(f64::NAN);
+            mask_flags.push(true);
+        } else {
+            values.push(sum / count as f64);
+            mask_flags.push(false);
+        }
+    }
+
+    let grid = finish_native_array(output_shape, dims, values, mask_flags)?;
+    add_preserved_native_coords_owned(grid, source_coords)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +702,79 @@ fn finish_native_grid(
     }
 }
 
+fn finish_native_array(
+    shape: Vec<usize>,
+    dims: Vec<String>,
+    values: Vec<f64>,
+    mask_flags: Vec<bool>,
+) -> Result<DataGrid> {
+    let grid = DataArray::from_vec_named(shape, dims, values)?;
+    if mask_flags.iter().any(|masked| *masked) {
+        grid.with_mask(ValidityMask::from_masked_flags(mask_flags))
+    } else {
+        Ok(grid)
+    }
+}
+
+fn yx_dim_indices(dims: &[String]) -> Result<(usize, usize)> {
+    let y_dim = dims.iter().position(|dim| dim == "y").ok_or_else(|| {
+        RustySatError::invalid_input("native y/x resampling requires a 'y' dimension")
+    })?;
+    let x_dim = dims.iter().position(|dim| dim == "x").ok_or_else(|| {
+        RustySatError::invalid_input("native y/x resampling requires an 'x' dimension")
+    })?;
+    Ok((y_dim, x_dim))
+}
+
+fn checked_shape_size(shape: &[usize]) -> Result<usize> {
+    shape.iter().try_fold(1usize, |acc, dim| {
+        acc.checked_mul(*dim)
+            .ok_or_else(|| RustySatError::invalid_input("native output shape size overflows usize"))
+    })
+}
+
+fn row_major_strides(shape: &[usize]) -> Result<Vec<usize>> {
+    let mut strides = vec![1; shape.len()];
+    let mut stride = 1usize;
+    for (idx, dim) in shape.iter().enumerate().rev() {
+        strides[idx] = stride;
+        stride = stride.checked_mul(*dim).ok_or_else(|| {
+            RustySatError::invalid_input("native array stride size overflows usize")
+        })?;
+    }
+    Ok(strides)
+}
+
+fn unravel_index(mut index: usize, shape: &[usize], strides: &[usize]) -> Vec<usize> {
+    let mut indexes = Vec::with_capacity(shape.len());
+    for (dim, stride) in shape.iter().zip(strides) {
+        let value = index / *stride;
+        indexes.push(value % *dim);
+        index %= *stride;
+    }
+    indexes
+}
+
+fn linear_index(indexes: &[usize], strides: &[usize]) -> usize {
+    indexes
+        .iter()
+        .zip(strides)
+        .map(|(index, stride)| index * stride)
+        .sum()
+}
+
+fn add_preserved_native_coords_owned(
+    mut grid: DataGrid,
+    source_coords: BTreeMap<String, Coordinate>,
+) -> Result<DataGrid> {
+    for (name, coordinate) in source_coords {
+        if should_preserve_coord(&name, &coordinate) {
+            grid.set_coordinate(name, coordinate)?;
+        }
+    }
+    Ok(grid)
+}
+
 fn add_native_coords(
     mut grid: DataGrid,
     source_coords: Option<&BTreeMap<String, Coordinate>>,
@@ -533,6 +862,37 @@ mod tests {
     }
 
     #[test]
+    fn repeats_named_yx_axes_in_band_major_array() {
+        let array = DataArray::from_vec_named(
+            vec![2, 2, 2],
+            ["bands", "y", "x"],
+            vec![1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags([
+            false, true, false, false, false, false, true, false,
+        ]))
+        .unwrap()
+        .with_coordinate("bands", Coordinate::axis("bands", vec![0.6, 0.8]).unwrap())
+        .unwrap();
+
+        let repeated = native_repeat_yx(&array, 2, 2).unwrap();
+
+        assert_eq!(repeated.shape_nd(), &[2, 4, 4]);
+        assert_eq!(repeated.dims(), &["bands", "y", "x"]);
+        assert_eq!(
+            &repeated.values()[..8],
+            &[1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0]
+        );
+        assert_eq!(
+            &repeated.values()[16..24],
+            &[10.0, 10.0, 20.0, 20.0, 10.0, 10.0, 20.0, 20.0]
+        );
+        assert_eq!(repeated.mask().unwrap().masked_count(), 8);
+        assert!(repeated.coord("bands").is_some());
+    }
+
+    #[test]
     fn aggregates_grid_by_nanmean_and_masks_empty_blocks() {
         let grid = DataGrid::new(
             4,
@@ -571,6 +931,53 @@ mod tests {
         assert_eq!(aggregated.values()[2], 26.0);
         assert_eq!(aggregated.values()[3], 26.0);
         assert!(aggregated.mask().is_none());
+    }
+
+    #[test]
+    fn aggregates_named_yx_axes_in_band_major_array() {
+        let array = DataArray::from_vec_named(
+            vec![2, 2, 2],
+            ["bands", "y", "x"],
+            vec![1.0, 3.0, 5.0, 7.0, 10.0, 30.0, 50.0, f64::NAN],
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags([
+            false, false, false, false, false, false, false, true,
+        ]))
+        .unwrap();
+
+        let aggregated = native_aggregate_mean_yx(&array, 2, 2).unwrap();
+
+        assert_eq!(aggregated.shape_nd(), &[2, 1, 1]);
+        assert_eq!(aggregated.dims(), &["bands", "y", "x"]);
+        assert_eq!(aggregated.values(), &[4.0, 30.0]);
+        assert!(aggregated.mask().is_none());
+    }
+
+    #[test]
+    fn native_resampler_accepts_higher_dimensional_yx_arrays() {
+        let source = area("source", 2, 2);
+        let destination = area("destination", 4, 4);
+        let id = DataId::new("rgb").unwrap();
+        let array = DataArray::from_vec_named(
+            vec![2, 2, 2],
+            ["bands", "y", "x"],
+            vec![1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap();
+        let dataset = Dataset::new(id).with_array(array);
+
+        let output = NativeResampler::new(source)
+            .resample(&dataset, &destination)
+            .unwrap();
+
+        let output_array = output.array().unwrap();
+        assert_eq!(output_array.shape(), &[2, 4, 4]);
+        assert_eq!(output_array.dims(), &["bands", "y", "x"]);
+        assert_eq!(
+            output.metadata().get("resampler"),
+            Some(&"native".to_string())
+        );
     }
 
     #[test]
