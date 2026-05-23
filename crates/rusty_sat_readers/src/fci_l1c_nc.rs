@@ -175,7 +175,7 @@ groups:
 
     #[test]
     fn fci_fixture_reader_exposes_counts_inventory() {
-        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
         let reader = FciL1cFixtureReader::from_source(
             "fixture.yaml",
             source,
@@ -196,7 +196,7 @@ groups:
 
     #[test]
     fn fci_fixture_reader_loads_counts_dataset() {
-        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
         let reader = FciL1cFixtureReader::from_source(
             "fixture.yaml",
             source,
@@ -244,7 +244,7 @@ groups:
 
     #[test]
     fn fci_fixture_reader_rejects_unknown_calibration() {
-        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
         let reader = FciL1cFixtureReader::from_source(
             "fixture.yaml",
             source,
@@ -262,7 +262,7 @@ groups:
 
     #[test]
     fn fci_fixture_reader_rejects_unknown_channel() {
-        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
 
         let err = FciL1cFixtureReader::from_source(
             "fixture.yaml",
@@ -278,7 +278,7 @@ groups:
 
     #[test]
     fn fci_fixture_reader_rejects_empty_channels() {
-        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
 
         let err = FciL1cFixtureReader::from_source(
             "fixture.yaml",
@@ -294,7 +294,7 @@ groups:
 
     #[test]
     fn fci_fixture_reader_deduplicates_channels() {
-        let source = NetCdfFixtureSource::from_str(FCI_FIXTURE).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
         let reader = FciL1cFixtureReader::from_source(
             "fixture.yaml",
             source,
@@ -334,7 +334,7 @@ groups:
                 shape: [1, 2]
                 values: [3, 4]
 "#;
-        let source = NetCdfFixtureSource::from_str(fixture).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(fixture).unwrap();
         let reader = FciL1cFixtureReader::from_source(
             "fixture.yaml",
             source,

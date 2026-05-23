@@ -165,7 +165,7 @@ impl ChunkShape {
                 "chunk shape must have at least one dimension",
             ));
         }
-        if chunks.iter().any(|chunk| *chunk == 0) {
+        if chunks.contains(&0) {
             return Err(RustySatError::invalid_input(
                 "chunk dimensions must be non-zero",
             ));
@@ -790,7 +790,7 @@ fn validate_shape_and_len(shape: &[usize], actual_len: usize) -> Result<()> {
             "data array shape must have at least one dimension",
         ));
     }
-    if shape.iter().any(|dim| *dim == 0) {
+    if shape.contains(&0) {
         return Err(RustySatError::invalid_input(
             "data array dimensions must be non-zero",
         ));

@@ -1093,7 +1093,7 @@ mod tests {
 
     #[test]
     fn file_handler_from_yaml_match_tracks_segment_metadata() {
-        let reader = YamlMetadataReader::from_str(AHI_HSD_STYLE_YAML).unwrap();
+        let reader = YamlMetadataReader::from_yaml_str(AHI_HSD_STYLE_YAML).unwrap();
         let matches = reader
             .match_filenames(["/data/HS_H08_FLDK_B03_S0110.DAT"])
             .unwrap();
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn file_handler_requires_segment_filename_fields() {
-        let reader = YamlMetadataReader::from_str(
+        let reader = YamlMetadataReader::from_yaml_str(
             r#"
 reader:
   name: ahi_hsd
