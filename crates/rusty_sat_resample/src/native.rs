@@ -10,7 +10,8 @@
 
 use crate::{AreaDefinition, Resampler};
 use rusty_sat_core::{
-    Coordinate, DataArray, DataGrid, Dataset, Result, RustySatError, ValidityMask,
+    AnyDataArray, Coordinate, DataArray, DataGrid, Dataset, NumericElement, Result, RustySatError,
+    ValidityMask,
 };
 use std::collections::BTreeMap;
 
@@ -35,20 +36,20 @@ impl Resampler for NativeResampler {
     }
 
     fn resample(&self, dataset: &Dataset, destination: &AreaDefinition) -> Result<Dataset> {
-        let source_grid = dataset.data().ok_or_else(|| {
-            RustySatError::invalid_input("native resampling requires f64 dataset grid values")
+        let source_array = dataset.array().ok_or_else(|| {
+            RustySatError::invalid_input("native resampling requires dataset array values")
         })?;
-        if source_grid.shape_yx()? != self.source.shape() {
+        if source_array.shape_yx()? != self.source.shape() {
             return Err(RustySatError::invalid_input(format!(
                 "dataset grid y/x shape {:?} does not match source area shape {:?}",
-                source_grid.shape_yx()?,
+                source_array.shape_yx()?,
                 self.source.shape()
             )));
         }
         validate_native_area_compatibility(&self.source, destination)?;
 
-        let resampled = native_resample_yx(source_grid, destination)?;
-        let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
+        let resampled = native_resample_any_yx(source_array, destination)?;
+        let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_array(resampled);
         for (key, value) in dataset.metadata() {
             resampled_dataset.insert_metadata(key.clone(), value.clone())?;
         }
@@ -64,23 +65,20 @@ impl Resampler for NativeResampler {
         let id = dataset.id().clone();
         let metadata = dataset.metadata().clone();
         let attrs = dataset.attrs().clone();
-        let source_grid = dataset
-            .into_array()
-            .and_then(|array| array.into_f64())
-            .ok_or_else(|| {
-                RustySatError::invalid_input("native resampling requires an f64 dataset grid")
-            })?;
-        if source_grid.shape_yx()? != self.source.shape() {
+        let source_array = dataset.into_array().ok_or_else(|| {
+            RustySatError::invalid_input("native resampling requires dataset array values")
+        })?;
+        if source_array.shape_yx()? != self.source.shape() {
             return Err(RustySatError::invalid_input(format!(
                 "dataset grid y/x shape {:?} does not match source area shape {:?}",
-                source_grid.shape_yx()?,
+                source_array.shape_yx()?,
                 self.source.shape()
             )));
         }
         validate_native_area_compatibility(&self.source, destination)?;
 
-        let resampled = native_resample_yx_owned(source_grid, destination)?;
-        let mut resampled_dataset = Dataset::new(id).with_data(resampled);
+        let resampled = native_resample_any_yx_owned(source_array, destination)?;
+        let mut resampled_dataset = Dataset::new(id).with_array(resampled);
         for (key, value) in metadata {
             resampled_dataset.insert_metadata(key, value)?;
         }
@@ -90,6 +88,94 @@ impl Resampler for NativeResampler {
         resampled_dataset.insert_metadata("area", destination.id())?;
         resampled_dataset.insert_metadata("resampler", self.name())?;
         Ok(resampled_dataset)
+    }
+}
+
+pub fn native_resample_any_yx(
+    source_array: &AnyDataArray,
+    destination: &AreaDefinition,
+) -> Result<AnyDataArray> {
+    let source_shape = source_array.shape_yx()?;
+    let destination_shape = destination.shape();
+    match native_scale(source_shape, destination_shape)? {
+        NativeScale::Identity => add_native_coords_any(source_array.clone(), destination),
+        NativeScale::Repeat { y_factor, x_factor } => {
+            let repeated = match source_array {
+                AnyDataArray::F32(array) => {
+                    native_repeat_yx_typed(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::F64(array) => native_repeat_yx(array, y_factor, x_factor)?.into(),
+                AnyDataArray::U8(array) => {
+                    native_repeat_yx_typed(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::U16(array) => {
+                    native_repeat_yx_typed(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::I16(array) => {
+                    native_repeat_yx_typed(array, y_factor, x_factor)?.into()
+                }
+            };
+            add_native_coords_any(repeated, destination)
+        }
+        NativeScale::Aggregate { y_factor, x_factor } => aggregate_any_mean_yx_from_parts(
+            source_array.shape().to_vec(),
+            source_array.dims().to_vec(),
+            source_shape,
+            source_array.values_as_f64(),
+            source_array.mask().cloned(),
+            source_array.coords().clone(),
+            y_factor,
+            x_factor,
+            destination,
+        ),
+    }
+}
+
+pub fn native_resample_any_yx_owned(
+    source_array: AnyDataArray,
+    destination: &AreaDefinition,
+) -> Result<AnyDataArray> {
+    let source_shape = source_array.shape_yx()?;
+    let destination_shape = destination.shape();
+    match native_scale(source_shape, destination_shape)? {
+        NativeScale::Identity => add_native_coords_any(source_array, destination),
+        NativeScale::Repeat { y_factor, x_factor } => {
+            let repeated = match source_array {
+                AnyDataArray::F32(array) => {
+                    native_repeat_yx_typed_owned(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::F64(array) => {
+                    native_repeat_yx_owned(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::U8(array) => {
+                    native_repeat_yx_typed_owned(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::U16(array) => {
+                    native_repeat_yx_typed_owned(array, y_factor, x_factor)?.into()
+                }
+                AnyDataArray::I16(array) => {
+                    native_repeat_yx_typed_owned(array, y_factor, x_factor)?.into()
+                }
+            };
+            add_native_coords_any(repeated, destination)
+        }
+        NativeScale::Aggregate { y_factor, x_factor } => {
+            let shape = source_array.shape().to_vec();
+            let dims = source_array.dims().to_vec();
+            let coords = source_array.coords().clone();
+            let (values, mask) = source_array.into_f64_values_and_mask();
+            aggregate_any_mean_yx_from_parts(
+                shape,
+                dims,
+                source_shape,
+                values,
+                mask,
+                coords,
+                y_factor,
+                x_factor,
+                destination,
+            )
+        }
     }
 }
 
@@ -252,6 +338,43 @@ pub fn native_repeat_yx_owned(
     let dims = source_grid.dims().to_vec();
     let (source_values, source_coords, source_mask) = source_grid.into_parts();
     repeat_yx_from_parts(
+        shape,
+        dims,
+        source_values,
+        source_mask,
+        source_coords,
+        y_factor,
+        x_factor,
+    )
+}
+
+pub fn native_repeat_yx_typed<T: NumericElement>(
+    source_array: &DataArray<T>,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataArray<T>> {
+    source_array.shape_yx()?;
+    repeat_yx_typed_from_parts(
+        source_array.shape_nd().to_vec(),
+        source_array.dims().to_vec(),
+        source_array.values().to_vec(),
+        source_array.mask().cloned(),
+        source_array.coords().clone(),
+        y_factor,
+        x_factor,
+    )
+}
+
+pub fn native_repeat_yx_typed_owned<T: NumericElement>(
+    source_array: DataArray<T>,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataArray<T>> {
+    source_array.shape_yx()?;
+    let shape = source_array.shape_nd().to_vec();
+    let dims = source_array.dims().to_vec();
+    let (source_values, source_coords, source_mask) = source_array.into_parts();
+    repeat_yx_typed_from_parts(
         shape,
         dims,
         source_values,
@@ -514,6 +637,53 @@ fn repeat_yx_from_parts(
     add_preserved_native_coords_owned(grid, source_coords)
 }
 
+fn repeat_yx_typed_from_parts<T: NumericElement>(
+    source_shape_nd: Vec<usize>,
+    dims: Vec<String>,
+    source_values: Vec<T>,
+    source_mask: Option<ValidityMask>,
+    source_coords: BTreeMap<String, Coordinate>,
+    y_factor: usize,
+    x_factor: usize,
+) -> Result<DataArray<T>> {
+    validate_repeat_factors(y_factor, x_factor)?;
+    let (y_dim, x_dim) = yx_dim_indices(&dims)?;
+    let mut output_shape = source_shape_nd.clone();
+    output_shape[y_dim] = output_shape[y_dim].checked_mul(y_factor).ok_or_else(|| {
+        RustySatError::invalid_input("native y repeat output size overflows usize")
+    })?;
+    output_shape[x_dim] = output_shape[x_dim].checked_mul(x_factor).ok_or_else(|| {
+        RustySatError::invalid_input("native x repeat output size overflows usize")
+    })?;
+    let source_strides = row_major_strides(&source_shape_nd)?;
+    let output_strides = row_major_strides(&output_shape)?;
+    let output_size = checked_shape_size(&output_shape)?;
+    let mut values = Vec::with_capacity(output_size);
+    let mut mask_flags = Vec::new();
+    if source_mask.is_some() {
+        mask_flags.reserve(output_size);
+    }
+
+    for output_idx in 0..output_size {
+        let mut indexes = unravel_index(output_idx, &output_shape, &output_strides);
+        indexes[y_dim] /= y_factor;
+        indexes[x_dim] /= x_factor;
+        let source_idx = linear_index(&indexes, &source_strides);
+        values.push(source_values[source_idx]);
+        if source_mask.is_some() {
+            mask_flags.push(
+                source_mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(source_idx))
+                    .unwrap_or(false),
+            );
+        }
+    }
+
+    let array = finish_native_array_typed(output_shape, dims, values, mask_flags)?;
+    add_preserved_native_coords_owned_typed(array, source_coords)
+}
+
 fn aggregate_mean_yx_from_parts(
     source_shape_nd: Vec<usize>,
     dims: Vec<String>,
@@ -716,6 +886,20 @@ fn finish_native_array(
     }
 }
 
+fn finish_native_array_typed<T: NumericElement>(
+    shape: Vec<usize>,
+    dims: Vec<String>,
+    values: Vec<T>,
+    mask_flags: Vec<bool>,
+) -> Result<DataArray<T>> {
+    let array = DataArray::from_vec_named(shape, dims, values)?;
+    if mask_flags.iter().any(|masked| *masked) {
+        array.with_mask(ValidityMask::from_masked_flags(mask_flags))
+    } else {
+        Ok(array)
+    }
+}
+
 fn yx_dim_indices(dims: &[String]) -> Result<(usize, usize)> {
     let y_dim = dims.iter().position(|dim| dim == "y").ok_or_else(|| {
         RustySatError::invalid_input("native y/x resampling requires a 'y' dimension")
@@ -773,6 +957,67 @@ fn add_preserved_native_coords_owned(
         }
     }
     Ok(grid)
+}
+
+fn add_preserved_native_coords_owned_typed<T: NumericElement>(
+    mut array: DataArray<T>,
+    source_coords: BTreeMap<String, Coordinate>,
+) -> Result<DataArray<T>> {
+    for (name, coordinate) in source_coords {
+        if should_preserve_coord(&name, &coordinate) {
+            array.set_coordinate(name, coordinate)?;
+        }
+    }
+    Ok(array)
+}
+
+fn aggregate_any_mean_yx_from_parts(
+    source_shape_nd: Vec<usize>,
+    dims: Vec<String>,
+    source_yx_shape: (usize, usize),
+    source_values: Vec<f64>,
+    source_mask: Option<ValidityMask>,
+    source_coords: BTreeMap<String, Coordinate>,
+    y_factor: usize,
+    x_factor: usize,
+    destination: &AreaDefinition,
+) -> Result<AnyDataArray> {
+    let aggregated = aggregate_mean_yx_from_parts(
+        source_shape_nd,
+        dims,
+        source_yx_shape,
+        source_values,
+        source_mask,
+        source_coords,
+        y_factor,
+        x_factor,
+    )?;
+    Ok(add_native_coords(aggregated, None, destination)?.into())
+}
+
+fn add_native_coords_any(array: AnyDataArray, area: &AreaDefinition) -> Result<AnyDataArray> {
+    match array {
+        AnyDataArray::F32(array) => Ok(add_native_coords_typed(array, area)?.into()),
+        AnyDataArray::F64(array) => Ok(add_native_coords_owned(array, None, area)?.into()),
+        AnyDataArray::U8(array) => Ok(add_native_coords_typed(array, area)?.into()),
+        AnyDataArray::U16(array) => Ok(add_native_coords_typed(array, area)?.into()),
+        AnyDataArray::I16(array) => Ok(add_native_coords_typed(array, area)?.into()),
+    }
+}
+
+fn add_native_coords_typed<T: NumericElement>(
+    mut array: DataArray<T>,
+    area: &AreaDefinition,
+) -> Result<DataArray<T>> {
+    array.set_coordinate(
+        "x",
+        Coordinate::axis("x", area.iter_projection_x_coords().collect::<Vec<_>>())?,
+    )?;
+    array.set_coordinate(
+        "y",
+        Coordinate::axis("y", area.iter_projection_y_coords().collect::<Vec<_>>())?,
+    )?;
+    Ok(array)
 }
 
 fn add_native_coords(
@@ -978,6 +1223,55 @@ mod tests {
             output.metadata().get("resampler"),
             Some(&"native".to_string())
         );
+    }
+
+    #[test]
+    fn native_resampler_repeats_runtime_typed_arrays_without_promoting_dtype() {
+        let source = area("source", 2, 2);
+        let destination = area("destination", 4, 4);
+        let id = DataId::new("counts").unwrap();
+        let array = DataArray::from_vec_named(vec![2, 2], ["y", "x"], vec![1_u16, 2, 3, 4])
+            .unwrap()
+            .with_mask(ValidityMask::from_masked_flags([false, true, false, false]))
+            .unwrap();
+        let dataset = Dataset::new(id).with_array(array);
+
+        let output = NativeResampler::new(source)
+            .resample(&dataset, &destination)
+            .unwrap();
+
+        let output_array = output.array().unwrap();
+        assert_eq!(output_array.dtype(), rusty_sat_core::DataType::U16);
+        assert_eq!(output_array.shape(), &[4, 4]);
+        assert_eq!(output_array.values_as_f64()[..4], [1.0, 1.0, 2.0, 2.0]);
+        assert_eq!(output_array.mask().unwrap().masked_count(), 4);
+        assert!(output_array.coord("x").is_some());
+        assert!(output_array.coord("y").is_some());
+    }
+
+    #[test]
+    fn native_resampler_aggregates_runtime_typed_arrays_to_f64_means() {
+        let source = area("source", 4, 4);
+        let destination = area("destination", 2, 2);
+        let id = DataId::new("counts").unwrap();
+        let array = DataArray::from_vec_named(
+            vec![4, 4],
+            ["y", "x"],
+            vec![1_u16, 3, 5, 7, 9, 11, 13, 15, 2, 4, 6, 8, 10, 12, 14, 16],
+        )
+        .unwrap();
+        let dataset = Dataset::new(id).with_array(array);
+
+        let output = NativeResampler::new(source)
+            .resample_owned(dataset, &destination)
+            .unwrap();
+
+        let output_array = output.array().unwrap();
+        assert_eq!(output_array.dtype(), rusty_sat_core::DataType::F64);
+        assert_eq!(output_array.shape(), &[2, 2]);
+        assert_eq!(output_array.values_as_f64(), &[6.0, 10.0, 7.0, 11.0]);
+        assert!(output_array.coord("x").is_some());
+        assert!(output_array.coord("y").is_some());
     }
 
     #[test]

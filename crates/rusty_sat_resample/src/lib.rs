@@ -34,8 +34,9 @@ pub use geometry::{
 pub use native::{
     native_aggregate_mean_2d, native_aggregate_mean_2d_owned, native_aggregate_mean_yx,
     native_aggregate_mean_yx_owned, native_repeat_2d, native_repeat_2d_owned, native_repeat_yx,
-    native_repeat_yx_owned, native_resample_2d, native_resample_2d_owned, native_resample_yx,
-    native_resample_yx_owned, NativeResampler,
+    native_repeat_yx_owned, native_repeat_yx_typed, native_repeat_yx_typed_owned,
+    native_resample_2d, native_resample_2d_owned, native_resample_any_yx,
+    native_resample_any_yx_owned, native_resample_yx, native_resample_yx_owned, NativeResampler,
 };
 pub use nearest::{
     resample_area_nearest, resample_area_nearest_lazy, resample_area_nearest_owned,
