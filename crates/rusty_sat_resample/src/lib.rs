@@ -42,9 +42,9 @@ pub use nearest::{
 };
 pub use neighbour::{
     gaussian_weight, get_area_neighbour_info, get_area_neighbour_info_with_neighbours,
-    sample_nearest_from_neighbour_info, sample_nearest_from_neighbour_info_owned,
-    sample_weighted_from_neighbour_info, sample_weighted_from_neighbour_info_owned, Neighbour,
-    NeighbourInfo, SampleMissingPolicy,
+    get_swath_neighbour_info, sample_nearest_from_neighbour_info,
+    sample_nearest_from_neighbour_info_owned, sample_weighted_from_neighbour_info,
+    sample_weighted_from_neighbour_info_owned, Neighbour, NeighbourInfo, SampleMissingPolicy,
 };
 pub use pipeline::{
     prepare_resampler, prepare_resampler_for_geometry, resample_dataset,

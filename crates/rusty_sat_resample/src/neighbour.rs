@@ -10,7 +10,7 @@
 //! reusable neighbour-info contract and provides projection-coordinate
 //! area-to-area queries that future KD-tree code can replace internally.
 
-use crate::AreaDefinition;
+use crate::{AreaDefinition, KdPointIndex2D, Point2D, SwathDefinition};
 use rusty_sat_core::{DataGrid, Result, RustySatError, ValidityMask};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -324,6 +324,76 @@ pub fn get_area_neighbour_info_with_neighbours(
     )
 }
 
+pub fn get_swath_neighbour_info(
+    source: &SwathDefinition,
+    target: &AreaDefinition,
+    radius_of_influence: Option<f64>,
+) -> Result<NeighbourInfo> {
+    if radius_of_influence.is_some_and(|radius| radius < 0.0) {
+        return Err(RustySatError::invalid_input(
+            "radius_of_influence must be non-negative",
+        ));
+    }
+    require_lonlat_area(target)?;
+    let source_lons = source.lons().ok_or_else(|| {
+        RustySatError::invalid_input("swath neighbour info requires longitude coordinates")
+    })?;
+    let source_lats = source.lats().ok_or_else(|| {
+        RustySatError::invalid_input("swath neighbour info requires latitude coordinates")
+    })?;
+
+    let source_size = source.size();
+    let target_size = target.height() * target.width();
+    let valid_input_index = source_lons
+        .iter()
+        .zip(source_lats)
+        .map(|(lon, lat)| is_valid_lonlat(*lon, *lat))
+        .collect::<Vec<_>>();
+    let valid_input_count = valid_input_index.iter().filter(|valid| **valid).count();
+    let missing_index = valid_input_count;
+    let source_to_reduced = source_to_reduced_index(&valid_input_index);
+    let mut kd_points = Vec::with_capacity(valid_input_count);
+    for (source_index, (lon, lat)) in source_lons.iter().zip(source_lats).enumerate() {
+        if valid_input_index[source_index] {
+            kd_points.push(Point2D::new(source_index, *lon, *lat)?);
+        }
+    }
+    let source_index = KdPointIndex2D::from_points(kd_points);
+    let mut valid_output_index = Vec::with_capacity(target_size);
+    let mut index_array = Vec::with_capacity(target_size);
+    let mut distance_array = Vec::with_capacity(target_size);
+
+    for (target_lon, target_lat) in target.iter_projection_coords() {
+        let valid_output = is_valid_lonlat(target_lon, target_lat);
+        valid_output_index.push(valid_output);
+        if !valid_output {
+            continue;
+        }
+        match source_index.nearest(target_lon, target_lat, radius_of_influence)? {
+            Some(nearest) => {
+                let reduced_index = source_to_reduced[nearest.index()]
+                    .expect("KD-tree only indexes valid input coordinates");
+                index_array.push(reduced_index);
+                distance_array.push(nearest.distance());
+            }
+            None => {
+                index_array.push(missing_index);
+                distance_array.push(f64::INFINITY);
+            }
+        }
+    }
+
+    NeighbourInfo::new(
+        source_size,
+        target_size,
+        1,
+        valid_input_index,
+        valid_output_index,
+        index_array,
+        distance_array,
+    )
+}
+
 pub fn sample_weighted_from_neighbour_info(
     source_grid: &DataGrid,
     output_shape: (usize, usize),
@@ -612,6 +682,41 @@ fn build_sampled_grid(
     }
 }
 
+fn source_to_reduced_index(valid_input_index: &[bool]) -> Vec<Option<usize>> {
+    let mut reduced = 0usize;
+    valid_input_index
+        .iter()
+        .map(|valid| {
+            if *valid {
+                let reduced_index = reduced;
+                reduced += 1;
+                Some(reduced_index)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_valid_lonlat(lon: f64, lat: f64) -> bool {
+    (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat)
+}
+
+fn require_lonlat_area(area: &AreaDefinition) -> Result<()> {
+    let projection = area.projection();
+    let Some(proj) = projection.get("proj").or_else(|| projection.get("proj4")) else {
+        return Err(RustySatError::unsupported(
+            "swath neighbour info without lon/lat destination projection metadata",
+        ));
+    };
+    if proj.contains("latlong") || proj.contains("longlat") {
+        return Ok(());
+    }
+    Err(RustySatError::unsupported(
+        "swath neighbour info to non-lon/lat destination area",
+    ))
+}
+
 fn clamp_pixel_index(value: f64, size: usize) -> Option<usize> {
     if !value.is_finite() || size == 0 {
         return None;
@@ -636,6 +741,10 @@ mod tests {
             extent,
         )
         .unwrap()
+    }
+
+    fn swath(height: usize, width: usize, lons: Vec<f64>, lats: Vec<f64>) -> SwathDefinition {
+        SwathDefinition::from_lonlats(height, width, lons, lats).unwrap()
     }
 
     #[test]
@@ -769,6 +878,82 @@ mod tests {
 
         assert!(matches!(
             get_area_neighbour_info(&source, &target, None).unwrap_err(),
+            RustySatError::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn swath_neighbour_info_matches_current_swath_nearest_geometry() {
+        let source = swath(2, 2, vec![0.5, 1.5, 0.5, 1.5], vec![1.5, 1.5, 0.5, 0.5]);
+        let target = area("target", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+
+        let info = get_swath_neighbour_info(&source, &target, Some(0.0)).unwrap();
+
+        assert_eq!(info.valid_input_index(), &[true, true, true, true]);
+        assert_eq!(info.valid_output_index(), &[true, true, true, true]);
+        assert_eq!(info.index_array(), &[0, 1, 2, 3]);
+        assert_eq!(info.distance_array(), &[0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            info.first_source_index_for_output(3).unwrap(),
+            Some((3, 0.0))
+        );
+    }
+
+    #[test]
+    fn swath_neighbour_info_uses_pyresample_like_lonlat_validity() {
+        let source = swath(1, 2, vec![0.5, 250.0], vec![0.5, 0.5]);
+        let target = area("target", 1, 2, [0.0, 0.0, 400.0, 1.0]);
+
+        let info = get_swath_neighbour_info(&source, &target, Some(0.0)).unwrap();
+
+        assert_eq!(info.valid_input_index(), &[true, false]);
+        assert_eq!(info.valid_output_index(), &[true, false]);
+        assert_eq!(info.index_array(), &[1]);
+        assert!(info.distance_array()[0].is_infinite());
+        assert_eq!(info.first_source_index_for_output(0).unwrap(), None);
+        assert_eq!(info.first_source_index_for_output(1).unwrap(), None);
+    }
+
+    #[test]
+    fn swath_neighbour_info_samples_with_existing_nearest_helper() {
+        let source = swath(2, 2, vec![0.5, 1.5, 0.5, 1.5], vec![1.5, 1.5, 0.5, 0.5]);
+        let target = area("target", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let grid = DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let info = get_swath_neighbour_info(&source, &target, Some(0.0)).unwrap();
+
+        let sampled = sample_nearest_from_neighbour_info(
+            &grid,
+            target.shape(),
+            &info,
+            -999.0,
+            SampleMissingPolicy::FillValue,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert!(sampled.mask().is_none());
+    }
+
+    #[test]
+    fn swath_neighbour_info_rejects_missing_or_projected_coordinates() {
+        let source = SwathDefinition::new(1, 1).unwrap();
+        let target = area("target", 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        assert!(get_swath_neighbour_info(&source, &target, None).is_err());
+
+        let source = swath(1, 1, vec![0.5], vec![0.5]);
+        let projected = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "target",
+            BTreeMap::from([("proj".to_string(), "stere".to_string())]),
+            1,
+            1,
+            [0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            get_swath_neighbour_info(&source, &projected, None).unwrap_err(),
             RustySatError::Unsupported { .. }
         ));
     }

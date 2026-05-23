@@ -1133,7 +1133,6 @@ mod tests {
 
     #[test]
     fn native_resample_yx_owned_produces_same_output_as_borrowed() {
-        let source = area("source", 2, 2);
         let destination = area("destination", 4, 4);
         let borrowed = DataArray::from_vec_named(
             vec![2, 2, 2],
