@@ -608,7 +608,7 @@ fn parse_integer(raw: &str, radix: u32, field: &Field) -> Result<PatternValue> {
         })
 }
 
-fn cleaned_number_text<'a>(raw: &'a str, parsed: &ParsedSpec) -> String {
+fn cleaned_number_text(raw: &str, parsed: &ParsedSpec) -> String {
     let trimmed = raw.trim();
     match parsed.fill {
         Some(fill) => trimmed.trim_matches(fill).trim().to_string(),

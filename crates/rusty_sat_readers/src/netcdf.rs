@@ -99,7 +99,7 @@ pub struct NetCdfFixtureSource {
 }
 
 impl NetCdfFixtureSource {
-    pub fn from_str(yaml: &str) -> Result<Self> {
+    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
         if yaml.len() > MAX_NETCDF_FIXTURE_YAML_BYTES {
             return Err(RustySatError::invalid_input(format!(
                 "NetCDF fixture YAML exceeds size limit of {MAX_NETCDF_FIXTURE_YAML_BYTES} bytes"
@@ -139,7 +139,7 @@ impl NetCdfFixtureSource {
                 path.display()
             ))
         })?;
-        Self::from_str(&yaml)
+        Self::from_yaml_str(&yaml)
     }
 
     pub fn inner(&self) -> &InMemoryNetCdfSource {
@@ -2074,7 +2074,7 @@ groups:
                   valid_range: [0, 4095]
                 values: [10, 4096, 12, 13, 65535, 15]
 "#;
-        let source = NetCdfFixtureSource::from_str(fixture).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(fixture).unwrap();
         let handler = NetCdfFileHandler::from_source(
             "fixture.yaml",
             BTreeMap::new(),
@@ -2154,7 +2154,7 @@ variables:
     values: [1]
 "#;
 
-        let err = NetCdfFixtureSource::from_str(fixture)
+        let err = NetCdfFixtureSource::from_yaml_str(fixture)
             .unwrap_err()
             .to_string();
 
@@ -2165,7 +2165,7 @@ variables:
     fn fixture_source_rejects_excessive_size() {
         let fixture = "x".repeat(MAX_NETCDF_FIXTURE_YAML_BYTES + 1);
 
-        let err = NetCdfFixtureSource::from_str(&fixture)
+        let err = NetCdfFixtureSource::from_yaml_str(&fixture)
             .unwrap_err()
             .to_string();
 
@@ -2176,7 +2176,7 @@ variables:
     fn fixture_source_rejects_excessive_depth() {
         let fixture = "- ".repeat(MAX_NETCDF_FIXTURE_YAML_DEPTH + 2);
 
-        let err = NetCdfFixtureSource::from_str(&fixture)
+        let err = NetCdfFixtureSource::from_yaml_str(&fixture)
             .unwrap_err()
             .to_string();
 
@@ -2185,7 +2185,7 @@ variables:
 
     #[test]
     fn fixture_source_rejects_non_mapping_root() {
-        let err = NetCdfFixtureSource::from_str("42").unwrap_err().to_string();
+        let err = NetCdfFixtureSource::from_yaml_str("42").unwrap_err().to_string();
 
         assert!(err.contains("root must be a mapping"));
     }
@@ -2201,7 +2201,7 @@ variables:
     values: [1]
 "#;
 
-        let err = NetCdfFixtureSource::from_str(fixture)
+        let err = NetCdfFixtureSource::from_yaml_str(fixture)
             .unwrap_err()
             .to_string();
 
@@ -2215,7 +2215,7 @@ variables:
   bad: "not a mapping"
 "#;
 
-        let err = NetCdfFixtureSource::from_str(fixture)
+        let err = NetCdfFixtureSource::from_yaml_str(fixture)
             .unwrap_err()
             .to_string();
 
@@ -2229,7 +2229,7 @@ groups:
   bad: "not a mapping"
 "#;
 
-        let err = NetCdfFixtureSource::from_str(fixture)
+        let err = NetCdfFixtureSource::from_yaml_str(fixture)
             .unwrap_err()
             .to_string();
 

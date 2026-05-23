@@ -1187,14 +1187,14 @@ impl DependencyGraph {
     pub fn dependents_of(&self, id: &DataId) -> BTreeSet<DataId> {
         self.nodes
             .iter()
-            .filter_map(|(node_id, node)| node.depends_on(id).then(|| node_id.clone()))
+            .filter(|&(_node_id, node)| node.depends_on(id)).map(|(node_id, _node)| node_id.clone())
             .collect()
     }
 
     pub fn leaves(&self) -> BTreeSet<DataId> {
         self.nodes
             .iter()
-            .filter_map(|(id, node)| (!node.has_dependencies()).then(|| id.clone()))
+            .filter(|&(_id, node)| !node.has_dependencies()).map(|(id, _node)| id.clone())
             .collect()
     }
 }

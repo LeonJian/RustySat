@@ -355,11 +355,9 @@ fn autoscale_lazy<T: NumericElement>(
     }
 
     if !min.is_finite() || !max.is_finite() {
-        return LinearScale::new(0.0, 1.0).or_else(|_| {
-            Err(RustySatError::invalid_input(format!(
+        return LinearScale::new(0.0, 1.0).map_err(|_| RustySatError::invalid_input(format!(
                 "cannot autoscale lazy PGM data; using fill value {fill_value} failed unexpectedly"
-            )))
-        });
+            )));
     }
     if min == max {
         return LinearScale::new(min, min + 1.0);
@@ -386,11 +384,9 @@ fn autoscale_values(
         max = max.max(value);
     }
     if !min.is_finite() || !max.is_finite() {
-        return LinearScale::new(0.0, 1.0).or_else(|_| {
-            Err(RustySatError::invalid_input(format!(
+        return LinearScale::new(0.0, 1.0).map_err(|_| RustySatError::invalid_input(format!(
                 "cannot autoscale PGM data; using fill value {fill_value} failed unexpectedly"
-            )))
-        });
+            )));
     }
     if min == max {
         return LinearScale::new(min, min + 1.0);

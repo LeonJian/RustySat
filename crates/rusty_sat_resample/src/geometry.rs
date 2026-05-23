@@ -156,7 +156,7 @@ pub(crate) fn validate_shape(shape: &[usize], context: &str) -> Result<()> {
             "{context} shape cannot be empty"
         )));
     }
-    if shape.iter().any(|dimension| *dimension == 0) {
+    if shape.contains(&0) {
         return Err(RustySatError::invalid_input(format!(
             "{context} dimensions must be non-zero"
         )));

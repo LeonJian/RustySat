@@ -269,7 +269,7 @@ fn validate_shape(shape: &[usize]) -> Result<()> {
             "lazy data array shape must have at least one dimension",
         ));
     }
-    if shape.iter().any(|dim| *dim == 0) {
+    if shape.contains(&0) {
         return Err(RustySatError::invalid_input(
             "lazy data array dimensions must be non-zero",
         ));

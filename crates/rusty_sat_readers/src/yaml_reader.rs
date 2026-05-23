@@ -135,7 +135,7 @@ pub struct YamlReaderConfig {
 }
 
 impl YamlReaderConfig {
-    pub fn from_str(yaml: &str) -> Result<Self> {
+    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
         let value = parse_reader_yaml_value(yaml)?;
         let mapping = value
             .as_mapping()
@@ -243,8 +243,8 @@ impl YamlMetadataReader {
         Self { config }
     }
 
-    pub fn from_str(yaml: &str) -> Result<Self> {
-        Ok(Self::from_config(YamlReaderConfig::from_str(yaml)?))
+    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
+        Ok(Self::from_config(YamlReaderConfig::from_yaml_str(yaml)?))
     }
 
     pub fn config(&self) -> &YamlReaderConfig {
@@ -673,7 +673,7 @@ datasets:
 
     #[test]
     fn parses_satpy_style_reader_yaml_metadata() {
-        let config = YamlReaderConfig::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let config = YamlReaderConfig::from_yaml_str(SEVIRI_STYLE_YAML).unwrap();
 
         assert_eq!(config.info().name(), "seviri_l1b_nc");
         assert_eq!(config.info().short_name(), Some("SEVIRI L1b NetCDF4"));
@@ -691,7 +691,7 @@ datasets:
 
     #[test]
     fn creates_dataset_ids_for_calibration_variants() {
-        let config = YamlReaderConfig::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let config = YamlReaderConfig::from_yaml_str(SEVIRI_STYLE_YAML).unwrap();
         let vis006 = config.datasets().get("VIS006").unwrap();
 
         assert_eq!(vis006.file_type(), Some("seviri_l1b_nc"));
@@ -715,7 +715,7 @@ datasets:
 
     #[test]
     fn parses_dataset_yaml_values_as_nested_metadata_attrs() {
-        let config = YamlReaderConfig::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let config = YamlReaderConfig::from_yaml_str(SEVIRI_STYLE_YAML).unwrap();
         let attrs = config.datasets().get("VIS006").unwrap().attrs();
 
         assert_eq!(attrs.get("name"), Some(&MetadataValue::string("VIS006")));
@@ -756,7 +756,7 @@ datasets:
 
     #[test]
     fn metadata_reader_exposes_inventory_but_not_array_loading() {
-        let reader = YamlMetadataReader::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let reader = YamlMetadataReader::from_yaml_str(SEVIRI_STYLE_YAML).unwrap();
         let ids = reader.available_dataset_ids();
 
         assert_eq!(reader.name(), "seviri_l1b_nc");
@@ -780,7 +780,7 @@ file_types:
   header:
     file_patterns: ['HDR_{start_time:%Y%m%d%H%M%S}.dat']
 "#;
-        let config = YamlReaderConfig::from_str(yaml).unwrap();
+        let config = YamlReaderConfig::from_yaml_str(yaml).unwrap();
 
         assert_eq!(
             config.sorted_file_type_names().unwrap(),
@@ -790,7 +790,7 @@ file_types:
 
     #[test]
     fn matches_filenames_with_file_type_and_parsed_info() {
-        let reader = YamlMetadataReader::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let reader = YamlMetadataReader::from_yaml_str(SEVIRI_STYLE_YAML).unwrap();
         let matches = reader
             .match_filenames([
                 "/data/W_XX,MSG4_20200102030405.nc",
@@ -817,7 +817,7 @@ file_types:
   nested:
     file_patterns: ['GRANULE/{platform:4s}_{start_time:%Y%m%d%H%M%S}.dat']
 "#;
-        let reader = YamlMetadataReader::from_str(yaml).unwrap();
+        let reader = YamlMetadataReader::from_yaml_str(yaml).unwrap();
         let matches = reader
             .match_filenames(["/tmp/input/GRANULE/NOAA_20200102030405.dat"])
             .unwrap();
@@ -832,7 +832,7 @@ file_types:
 
     #[test]
     fn filters_selected_filenames_without_duplicates() {
-        let reader = YamlMetadataReader::from_str(SEVIRI_STYLE_YAML).unwrap();
+        let reader = YamlMetadataReader::from_yaml_str(SEVIRI_STYLE_YAML).unwrap();
         let selected = reader
             .filter_selected_filenames([
                 "/data/W_XX,MSG4_20200102030405.nc",

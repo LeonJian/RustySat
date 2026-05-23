@@ -76,7 +76,7 @@ enum Axis {
 
 impl Axis {
     fn for_depth(depth: usize) -> Self {
-        if depth % 2 == 0 {
+        if depth.is_multiple_of(2) {
             Self::X
         } else {
             Self::Y

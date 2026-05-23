@@ -644,7 +644,7 @@ fn validate_aggregate_factors(
     x_factor: usize,
 ) -> Result<()> {
     validate_repeat_factors(y_factor, x_factor)?;
-    if height % y_factor != 0 || width % x_factor != 0 {
+    if !height.is_multiple_of(y_factor) || !width.is_multiple_of(x_factor) {
         return Err(RustySatError::invalid_input(
             "native aggregation factors must evenly divide the source shape",
         ));

@@ -24,7 +24,7 @@ impl TextGridReader {
         yaml: &str,
         filenames: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Self> {
-        let config = YamlReaderConfig::from_str(yaml)?;
+        let config = YamlReaderConfig::from_yaml_str(yaml)?;
         let files = config.match_filenames(filenames)?;
         Ok(Self { config, files })
     }
