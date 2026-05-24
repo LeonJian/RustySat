@@ -37,7 +37,7 @@ The following reference areas require especially careful parity work — do not 
 3. Pick the next unchecked roadmap item only.
 4. Read the matching Python reference docs and code before designing Rust behavior.
 5. Implement the smallest useful Rust capability.
-6. Add focused tests.
+6. Add comprehensive tests for the capability, including success paths, edge/error paths, dtype/mask/metadata preservation, owned/consuming memory paths where relevant, and at least one Satpy/reference-inspired parity case when reference behavior exists.
 7. Run `cargo check --workspace` and `cargo test --workspace`.
 8. Update this file with completed work and known gaps.
 9. Commit the completed step before moving to the next step.
@@ -53,13 +53,15 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 - The repository root should be a Git repository for Rusty Sat work.
 - Roadmap-only planning edits stay on the current branch and do not require a new feature branch.
 - Start each implementation feature or lettered implementation substep on a fresh branch named after the feature itself, for example `w2-m2d2-16-bit-png-hdr`.
-- Do not merge a completed feature branch immediately. First start the next implementation feature on its own new feature-named branch, then merge the previously completed branch after the user has had a chance to review that completed branch.
+- After a feature branch is complete, tested, and committed, merge it back to the main working branch yourself and delete the feature branch. The user no longer needs to manually review/merge/delete every implementation branch.
+- Keep the branch history understandable: one feature branch per implementation slice, one final commit or small related commits per slice, then merge and delete before starting the next implementation slice.
 - Before starting a new feature branch, confirm the previous branch is committed and the current roadmap status in this file is updated.
 - Commit every completed roadmap step or substep.
 - Keep commits small and named after the completed step, for example `step 3a data query matching`.
 - Do not commit generated build artifacts, `.DS_Store`, or `target/`.
 - Do not commit the nested Python reference checkouts under `satpy/` or `deps/`; they are local reference material unless the user explicitly requests otherwise.
 - Before each commit, run `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace`.
+- Before merging a feature branch, run `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace` on that branch. After merging, run at least `cargo check --workspace`; run the full workspace tests again if the merge was non-trivial.
 
 ## Status Markers
 
@@ -100,6 +102,18 @@ Rusty Sat must support:
 - Float output for scientific GeoTIFF/CF workflows where preserving calibrated values matters more than display-ready scaling.
 
 Do not force all image data through u8. `Image<u8>`/display output, `FloatImage<f32/f64>` enhancement buffers, and future writer-specific output dtypes should remain separate concepts.
+
+## Current Product Focus
+
+Keep the complete Satpy-compatible roadmap below, but do not try to implement every Satpy reader before the project becomes useful. The current product target is:
+
+1. Finish production-ready Himawari AHI HSD reading.
+2. Finish production-ready AHI NetCDF reading, using the shared NetCDF foundations where possible.
+3. Produce corrected, enhanced, optionally resampled AHI images through Rust-native APIs and a thin CLI/example path.
+4. Add enough GeoTIFF/PNG/writer support to preserve useful AHI output, including 16-bit/HDR/scientific paths where needed.
+5. Only after AHI HSD and AHI NetCDF are solid should broad reader expansion resume.
+
+The long-term R0-R5 reader roadmap remains valid, but full all-reader parity is explicitly deferred behind complete AHI HSD and AHI NetCDF support.
 
 ## Completed Early Roadmap
 
@@ -197,7 +211,20 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[ ]` R0.8: YAML reader completion: safe Python-tag representation, FileHandler instantiation, composite IDs, groups/bound groups, and delayed loading.
   - `[ ]` R0.9: Filename matching and grouping: `group_files`, multi-time grouping, and advanced matching.
 - `[~]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
+  - `[~]` R1-AHI-HSD: Complete Himawari AHI HSD production reader before broad reader expansion.
+    - `[x]` R1-AHI-HSD-foundation: Header parsing, YAML filename inventory, uncompressed synthetic/local counts, first calibration, Scene load, and basic PNG output.
+    - `[ ]` R1-AHI-HSD-bzip2: Add production bzip2/compressed HSD block handling with bounded memory and decompression error tests.
+    - `[ ]` R1-AHI-HSD-segments: Add multi-segment grouping and assembly for full-disk/band products with missing/duplicate segment tests.
+    - `[ ]` R1-AHI-HSD-navigation: Add AHI geostationary navigation, area/geolocation metadata, and coordinate/area attachment compatible with Satpy.
+    - `[ ]` R1-AHI-HSD-calibration-full: Add full visible/IR calibration behavior, calibration update blocks, f32 display and f64 scientific output selection, and parity tests.
+    - `[ ]` R1-AHI-HSD-scene-output: Add end-to-end real/sample HSD load -> calibrated dataset -> optional resample/enhance -> PNG/GeoTIFF-style output path.
+  - `[ ]` R1-AHI-NC: Complete AHI NetCDF reader before broad reader expansion.
+    - `[ ]` R1-AHI-NC-metadata: Inspect Satpy AHI NetCDF reader behavior and map AHI NetCDF groups/variables/attrs into the shared NetCDF metadata model.
+    - `[ ]` R1-AHI-NC-data: Load AHI NetCDF counts/radiance/reflectance/BT datasets with valid-range/fill/mask/scale handling.
+    - `[ ]` R1-AHI-NC-geometry: Attach area/geolocation coordinates and projection metadata for resampling.
+    - `[ ]` R1-AHI-NC-scene-output: Add Scene load and output tests matching representative Satpy AHI NetCDF behavior.
   - `[x]` R1-m4d3: Add first FCI L1C fixture-backed reader integration that exposes counts dataset IDs, loads measured-channel counts through the NetCDF handler, and participates in Scene load planning.
+- `[ ]` R-full-deferred: Resume broad Satpy reader parity only after AHI HSD and AHI NetCDF are complete. Keep the full reader roadmap below as the long-term compatibility target.
 - `[ ]` R2: LEO L1B readers, including VIIRS, MODIS, AVHRR, EPS, AAPP, OLCI, SLSTR, FY-3, ATMS, MetOp-SG, EarthCARE, PACE, MAIA, SCMI, and Satpy CF re-read.
 - `[ ]` R3: L2 product readers, including VIIRS L2/EDR, CLAVR-x, CMSAF, MIRS, NUCAPS, ACSPO, AMSR2, CALIOP, NWC SAF, IASI, TROPOMI, SeaDAS, Sentinel SAFE/SAR/MSI, GeoCAT, MERIS, OLCI, and SLSTR.
 - `[ ]` R4: Microwave, radio, lightning, and auxiliary readers.
@@ -351,9 +378,10 @@ Before starting or closing a milestone, check this table and update both the mil
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Done for geometry, fixture-backed FCI/NetCDF reader slice, Scene resampling extension, and exact 2D KD point-index acceleration; native NetCDF/HDF and full Pyresample KD parity remain later roadmap work |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Selected next |
 | M6-resampling-full | S1-S7 | Started with S2 top-k/weighted neighbour-info foundations and single-neighbour swath neighbour-info, S3 bilinear, S4 bucket avg/sum/count/fraction plus pipeline preparation including explicit and auto-discovered fractions, S5 EWA-style weighted accumulation plus pipeline preparation, S6 native repeat/aggregate including higher-dimensional f64 y/x axes and runtime-typed repeat/aggregate support, and S7 typed source-geometry/cache/data-reduction/area-crop/dataset-slice/reduced-dataset/reduced-resample/reduction-option/dataset-geometry-lookup/image-container/line-sample foundations including runtime dtype preservation, higher-dimensional y/x sampling, sampled coordinate remapping, and CRS-routed geographic alias area slicing; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5-next, S6-next, and S7-next |
-| M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
-| M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
-| M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
+| M7-AHI-production | R1-AHI-HSD, R1-AHI-NC, R0.2 native/NetCDF pieces as needed, W2/W3 AHI output, I1/I5/C0/C4 AHI-specific enhancement/composite slices, SC1/SC3/SC4 AHI workflows | New priority after current M6 slices: complete AHI HSD and AHI NetCDF production paths before broad reader expansion |
+| M8-writers-composites-focused | W1-W3/W5 and C0/C4/I5 pieces needed for AHI output first; keep W4/C3/C5 as later parity work | Needs AHI production reader outputs and focused writer/composite integration |
+| M9-production-core | SC1-SC6, CLI, Y, T focused on AHI workflows first | Needs AHI production reader, focused writers/composites, and golden-output tests |
+| M10-full-satpy-parity-deferred | R0-R5 full readers, M1-M5 modifiers, O1-O6 orbit, W1-W5 all writers, C0-C5 all composites | Explicitly deferred until AHI HSD and AHI NetCDF are complete and production-useful |
 
 - `[x]` M1: Early vertical slice: text grid data can become a grayscale PGM image.
 - `[x]` M2-foundation: Complete P0 DataArray/DataGrid, mask, metadata, coordinates, and CRS foundations. This supersedes the earlier idea of jumping directly to PNG/RGB composite work.
@@ -418,9 +446,16 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M6-resampling-full-y: Add higher-dimensional line/sample sampling over named `y`/`x` axes while preserving non-spatial axes and masks. Roadmap: S7.
   - `[x]` M6-resampling-full-z: Add line/sample coordinate remapping for axis, 2D, and non-spatial mixed coordinates. Roadmap: S7.
   - `[x]` M6-resampling-full-aa: Route area slicing through CRS transforms and support geographic CRS aliases without pretending projected cross-CRS math exists yet. Roadmap: S7/P0-2.
-- `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
-- `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
-- `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
+- `[ ]` M7-AHI-production: Complete production-ready AHI HSD and AHI NetCDF workflows before broad reader expansion.
+  - `[ ]` M7-AHI-production-a: Complete AHI HSD compressed production file handling and safety limits. Roadmap: R1-AHI-HSD-bzip2.
+  - `[ ]` M7-AHI-production-b: Complete AHI HSD multi-segment grouping/assembly. Roadmap: R1-AHI-HSD-segments/R0.9.
+  - `[ ]` M7-AHI-production-c: Complete AHI HSD navigation, area/geolocation metadata, and resampling integration. Roadmap: R1-AHI-HSD-navigation/S1/S7/SC3.
+  - `[ ]` M7-AHI-production-d: Complete AHI HSD calibration parity and f32/f64 output selection. Roadmap: R1-AHI-HSD-calibration-full/I1.
+  - `[ ]` M7-AHI-production-e: Complete AHI NetCDF metadata/data/geometry loading. Roadmap: R1-AHI-NC/R0.2.
+  - `[ ]` M7-AHI-production-f: Add AHI end-to-end tests from representative HSD and NetCDF inputs to corrected/resampled image output. Roadmap: T/SC1/SC3/SC4/W2/W3.
+- `[ ]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
+- `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
+- `[ ]` M10-full-satpy-parity-deferred: Resume full Satpy reader/modifier/orbit/writer/composite parity after AHI HSD and AHI NetCDF are complete.
 
 ## Workspace Architecture
 
@@ -470,11 +505,21 @@ No tracked changes affect the currently completed M3-reader AHI HSD path.
 Every step should leave the workspace passing:
 
 ```sh
+cargo fmt --all -- --check
 cargo check --workspace
 cargo test --workspace
 ```
 
-Early tests should focus on construction and API shape. Later tests should compare Rusty Sat output against Python Satpy on small fixtures.
+Every implementation slice should add tests that are broad enough to catch regressions in real workflows, not only a happy-path compile check. Prefer a layered test set:
+
+- construction/API-shape tests for new public types;
+- validation and error tests for malformed input, missing fields, unsupported features, and size/depth limits;
+- dtype, mask, coordinate, metadata, and chunk/lazy-preservation tests for array-processing code;
+- borrowed and consuming/owned path tests for memory-sensitive operations;
+- end-to-end tests for reader -> `Scene` -> resample/enhance/composite -> writer paths when the slice touches pipeline behavior;
+- Satpy/reference-inspired parity tests for representative small fixtures whenever Python reference behavior is known.
+
+For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure and negative cases for truncated files, missing segments/variables, invalid calibration metadata, unsupported compression or projection paths, and output dtype/mask preservation.
 
 ## Current Implementation State
 
