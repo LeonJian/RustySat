@@ -215,16 +215,45 @@ pub fn sample_array_from_linesample<T: NumericElement>(
     fill_value: T,
     mask_missing: bool,
 ) -> Result<DataArray<T>> {
-    let (source_height, source_width) = source.shape_yx()?;
+    let y_axis = source.dim_index("y").ok_or_else(|| {
+        RustySatError::invalid_input("line/sample source array is missing 'y' dimension")
+    })?;
+    let x_axis = source.dim_index("x").ok_or_else(|| {
+        RustySatError::invalid_input("line/sample source array is missing 'x' dimension")
+    })?;
+    let source_shape = source.shape_nd();
+    let source_height = source_shape[y_axis];
+    let source_width = source_shape[x_axis];
+    let mut output_shape = source_shape.to_vec();
+    output_shape[y_axis] = linesample.height();
+    output_shape[x_axis] = linesample.width();
+    let output_len = checked_shape_len(&output_shape)?;
+    let source_strides = row_major_strides(source_shape)?;
+    let output_strides = row_major_strides(&output_shape)?;
     let source_values = source.values();
     let source_mask = source.mask();
-    let mut output = Vec::with_capacity(linesample.len());
-    let mut mask_flags = mask_missing.then(|| Vec::with_capacity(linesample.len()));
+    let mut output = Vec::with_capacity(output_len);
+    let mut mask_flags = mask_missing.then(|| Vec::with_capacity(output_len));
 
-    for (&row, &col) in linesample.rows().iter().zip(linesample.cols()) {
+    for output_offset in 0..output_len {
+        let y = (output_offset / output_strides[y_axis]) % output_shape[y_axis];
+        let x = (output_offset / output_strides[x_axis]) % output_shape[x_axis];
+        let line_sample_offset = y * linesample.width() + x;
+        let row = linesample.rows()[line_sample_offset];
+        let col = linesample.cols()[line_sample_offset];
         let source_index = valid_source_index(row, col, source_height, source_width);
         let is_missing = source_index
-            .map(|index| {
+            .map(|yx_index| {
+                let index = remap_output_to_source_offset(
+                    output_offset,
+                    &output_shape,
+                    &output_strides,
+                    &source_strides,
+                    y_axis,
+                    x_axis,
+                    yx_index,
+                    source_width,
+                );
                 source_mask
                     .and_then(|mask| mask.is_masked(index))
                     .unwrap_or(false)
@@ -237,7 +266,17 @@ pub fn sample_array_from_linesample<T: NumericElement>(
                 flags.push(true);
             }
         } else {
-            let index = source_index.expect("non-missing line/sample must have a source index");
+            let yx_index = source_index.expect("non-missing line/sample must have a source index");
+            let index = remap_output_to_source_offset(
+                output_offset,
+                &output_shape,
+                &output_strides,
+                &source_strides,
+                y_axis,
+                x_axis,
+                yx_index,
+                source_width,
+            );
             output.push(source_values[index]);
             if let Some(flags) = mask_flags.as_mut() {
                 flags.push(false);
@@ -245,11 +284,12 @@ pub fn sample_array_from_linesample<T: NumericElement>(
         }
     }
 
-    let mut array = DataArray::from_vec_named(
-        vec![linesample.height(), linesample.width()],
-        ["y", "x"],
-        output,
-    )?;
+    let mut array = DataArray::from_vec_named(output_shape, source.dims().to_vec(), output)?;
+    for (name, coord) in source.coords() {
+        if coord.dims().iter().all(|dim| dim != "y" && dim != "x") {
+            array.set_coordinate(name.clone(), coord.clone())?;
+        }
+    }
     if let Some(flags) = mask_flags {
         array.set_mask(ValidityMask::from_masked_flags(flags))?;
     }
@@ -268,6 +308,59 @@ fn valid_source_index(
         return None;
     }
     Some(row * source_width + col)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remap_output_to_source_offset(
+    output_offset: usize,
+    output_shape: &[usize],
+    output_strides: &[usize],
+    source_strides: &[usize],
+    y_axis: usize,
+    x_axis: usize,
+    yx_index: usize,
+    source_width: usize,
+) -> usize {
+    let source_y = yx_index / source_width;
+    let source_x = yx_index % source_width;
+    let mut source_offset = 0;
+    for axis in 0..output_shape.len() {
+        let index = if axis == y_axis {
+            source_y
+        } else if axis == x_axis {
+            source_x
+        } else {
+            (output_offset / output_strides[axis]) % output_shape[axis]
+        };
+        source_offset += index * source_strides[axis];
+    }
+    source_offset
+}
+
+fn checked_shape_len(shape: &[usize]) -> Result<usize> {
+    shape.iter().try_fold(1usize, |total, size| {
+        if *size == 0 {
+            return Err(RustySatError::invalid_input(
+                "line/sample output shape dimensions must be non-zero",
+            ));
+        }
+        total
+            .checked_mul(*size)
+            .ok_or_else(|| RustySatError::invalid_input("line/sample output shape overflows usize"))
+    })
+}
+
+fn row_major_strides(shape: &[usize]) -> Result<Vec<usize>> {
+    let _ = checked_shape_len(shape)?;
+    let mut strides = vec![1; shape.len()];
+    let mut stride = 1usize;
+    for axis in (0..shape.len()).rev() {
+        strides[axis] = stride;
+        stride = stride.checked_mul(shape[axis]).ok_or_else(|| {
+            RustySatError::invalid_input("line/sample row-major stride overflows usize")
+        })?;
+    }
+    Ok(strides)
 }
 
 fn fill_type_error(expected: &str) -> RustySatError {
@@ -387,5 +480,73 @@ mod tests {
                 .unwrap_err();
 
         assert!(err.to_string().contains("must match source dtype u8"));
+    }
+
+    #[test]
+    fn samples_band_major_yx_arrays_without_flattening_bands() {
+        let source = DataArray::<u16>::from_vec_named(
+            vec![2, 2, 3],
+            ["bands", "y", "x"],
+            vec![
+                10, 11, 12, 13, 14, 15, //
+                20, 21, 22, 23, 24, 25,
+            ],
+        )
+        .unwrap()
+        .with_coordinate(
+            "bands",
+            rusty_sat_core::Coordinate::axis("bands", vec![0.6, 0.8]).unwrap(),
+        )
+        .unwrap();
+        let lines = LineSampleGrid::new(1, 2, [0, 1], [2, 0]).unwrap();
+
+        let output = sample_array_from_linesample(&source, &lines, 999, false).unwrap();
+
+        assert_eq!(output.shape_nd(), &[2, 1, 2]);
+        assert_eq!(output.dims(), &["bands", "y", "x"]);
+        assert_eq!(output.values(), &[12, 13, 22, 23]);
+        assert_eq!(output.coord("bands").unwrap().values(), &[0.6_f64, 0.8_f64]);
+        assert!(output.coord("y").is_none());
+        assert!(output.coord("x").is_none());
+    }
+
+    #[test]
+    fn samples_yx_axes_not_at_end() {
+        let source = DataArray::<u8>::from_vec_named(
+            vec![2, 2, 2],
+            ["y", "x", "bands"],
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        .unwrap();
+        let lines = LineSampleGrid::new(1, 2, [0, 1], [1, 0]).unwrap();
+
+        let output = sample_array_from_linesample(&source, &lines, 255, false).unwrap();
+
+        assert_eq!(output.shape_nd(), &[1, 2, 2]);
+        assert_eq!(output.dims(), &["y", "x", "bands"]);
+        assert_eq!(output.values(), &[3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn band_major_sampling_propagates_per_band_masks() {
+        let source = DataArray::<i16>::from_vec_named(
+            vec![2, 2, 2],
+            ["bands", "y", "x"],
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags([
+            false, true, false, false, false, false, true, false,
+        ]))
+        .unwrap();
+        let lines = LineSampleGrid::new(1, 2, [0, 1], [1, 0]).unwrap();
+
+        let output = sample_array_from_linesample(&source, &lines, -999, true).unwrap();
+
+        assert_eq!(output.shape_nd(), &[2, 1, 2]);
+        assert_eq!(output.values(), &[-999, 3, 6, -999]);
+        assert_eq!(output.mask().unwrap().masked_count(), 2);
+        assert_eq!(output.mask().unwrap().is_masked(0), Some(true));
+        assert_eq!(output.mask().unwrap().is_masked(3), Some(true));
     }
 }
