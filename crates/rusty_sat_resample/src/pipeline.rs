@@ -8,9 +8,9 @@
 //! of dynamically importing Python classes by name.
 
 use crate::{
-    AreaDefinition, BilinearAreaResampler, BucketFractionResampler, BucketResampler,
-    BucketStatistic, EwaOptions, EwaResampler, NativeResampler, NearestAreaResampler, Resampler,
-    SwathDefinition,
+    reduce_area_dataset, reduce_area_dataset_owned, AreaDefinition, BilinearAreaResampler,
+    BucketFractionResampler, BucketResampler, BucketStatistic, EwaOptions, EwaResampler,
+    NativeResampler, NearestAreaResampler, Resampler, SwathDefinition,
 };
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::str::FromStr;
@@ -522,6 +522,31 @@ pub fn resample_dataset_cached(
     resampler.resample(dataset, destination)
 }
 
+pub fn resample_area_dataset_reduced(
+    dataset: &Dataset,
+    source: AreaDefinition,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let reduction = reduce_area_dataset(dataset, &source, destination)?;
+    let (reduced_dataset, reduced_source, _) = reduction.into_parts();
+    let resampler = prepare_resampler(reduced_source, destination, options)?;
+    resampler.resample_owned(reduced_dataset, destination)
+}
+
+pub fn resample_area_dataset_reduced_cached(
+    cache: &mut ResamplerCache,
+    dataset: &Dataset,
+    source: AreaDefinition,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let reduction = reduce_area_dataset(dataset, &source, destination)?;
+    let (reduced_dataset, reduced_source, _) = reduction.into_parts();
+    let resampler = cache.prepare(reduced_source, destination, options)?;
+    resampler.resample_owned(reduced_dataset, destination)
+}
+
 pub fn resample_dataset_from_geometry_cached(
     cache: &mut ResamplerCache,
     dataset: &Dataset,
@@ -551,6 +576,31 @@ pub fn resample_dataset_owned(
 ) -> Result<Dataset> {
     let resampler = prepare_resampler(source, destination, options)?;
     resampler.resample_owned(dataset, destination)
+}
+
+pub fn resample_area_dataset_reduced_owned(
+    dataset: Dataset,
+    source: AreaDefinition,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let reduction = reduce_area_dataset_owned(dataset, &source, destination)?;
+    let (reduced_dataset, reduced_source, _) = reduction.into_parts();
+    let resampler = prepare_resampler(reduced_source, destination, options)?;
+    resampler.resample_owned(reduced_dataset, destination)
+}
+
+pub fn resample_area_dataset_reduced_owned_cached(
+    cache: &mut ResamplerCache,
+    dataset: Dataset,
+    source: AreaDefinition,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let reduction = reduce_area_dataset_owned(dataset, &source, destination)?;
+    let (reduced_dataset, reduced_source, _) = reduction.into_parts();
+    let resampler = cache.prepare(reduced_source, destination, options)?;
+    resampler.resample_owned(reduced_dataset, destination)
 }
 
 pub fn resample_dataset_owned_cached(
@@ -743,6 +793,83 @@ mod tests {
             output.metadata().get("resampler"),
             Some(&"nearest_area".to_string())
         );
+    }
+
+    #[test]
+    fn reduced_area_resample_crops_before_resampling() {
+        let source = area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let destination = area("destination", 2, 2, [1.0, 1.0, 3.0, 3.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(4, 4, (0..16).map(f64::from).collect()).unwrap());
+
+        let output = resample_area_dataset_reduced(
+            &dataset,
+            source,
+            &destination,
+            ResampleOptions::nearest_area(),
+        )
+        .unwrap();
+
+        assert_eq!(output.data().unwrap().shape(), (2, 2));
+        assert_eq!(output.data().unwrap().values(), &[5.0, 6.0, 9.0, 10.0]);
+        assert_eq!(
+            output.metadata().get("area"),
+            Some(&"destination".to_string())
+        );
+    }
+
+    #[test]
+    fn reduced_area_resample_owned_matches_borrowed() {
+        let source = area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let destination = area("destination", 2, 2, [1.0, 1.0, 3.0, 3.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(4, 4, (0..16).map(f64::from).collect()).unwrap());
+
+        let borrowed = resample_area_dataset_reduced(
+            &dataset,
+            source.clone(),
+            &destination,
+            ResampleOptions::nearest_area(),
+        )
+        .unwrap();
+        let owned = resample_area_dataset_reduced_owned(
+            dataset,
+            source,
+            &destination,
+            ResampleOptions::nearest_area(),
+        )
+        .unwrap();
+
+        assert_eq!(borrowed, owned);
+    }
+
+    #[test]
+    fn reduced_area_resample_cached_uses_reduced_source_area_key() {
+        let source = area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let destination = area("destination", 2, 2, [1.0, 1.0, 3.0, 3.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(4, 4, (0..16).map(f64::from).collect()).unwrap());
+        let mut cache = ResamplerCache::new();
+
+        let first = resample_area_dataset_reduced_cached(
+            &mut cache,
+            &dataset,
+            source.clone(),
+            &destination,
+            ResampleOptions::nearest_area(),
+        )
+        .unwrap();
+        let second = resample_area_dataset_reduced_cached(
+            &mut cache,
+            &dataset,
+            source,
+            &destination,
+            ResampleOptions::nearest_area(),
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

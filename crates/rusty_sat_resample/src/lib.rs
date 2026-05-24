@@ -55,7 +55,9 @@ pub use neighbour::{
     sample_weighted_from_neighbour_info_owned, Neighbour, NeighbourInfo, SampleMissingPolicy,
 };
 pub use pipeline::{
-    prepare_resampler, prepare_resampler_for_geometry, resample_dataset, resample_dataset_cached,
+    prepare_resampler, prepare_resampler_for_geometry, resample_area_dataset_reduced,
+    resample_area_dataset_reduced_cached, resample_area_dataset_reduced_owned,
+    resample_area_dataset_reduced_owned_cached, resample_dataset, resample_dataset_cached,
     resample_dataset_from_geometry, resample_dataset_from_geometry_cached, resample_dataset_owned,
     resample_dataset_owned_cached, resample_dataset_owned_from_geometry,
     resample_dataset_owned_from_geometry_cached, PreparedResampler, ResampleOptions,
