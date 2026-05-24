@@ -8,6 +8,7 @@ pub mod data_reduce;
 pub mod ewa;
 pub mod geometry;
 pub mod image_container;
+pub mod linesample;
 pub mod native;
 pub mod nearest;
 pub mod neighbour;
@@ -40,6 +41,10 @@ pub use geometry::{
     CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
 };
 pub use image_container::ImageContainer;
+pub use linesample::{
+    get_image_from_linesample, get_image_from_linesample_masked_missing,
+    sample_grid_from_linesample, LineSampleGrid,
+};
 pub use native::{
     native_aggregate_mean_2d, native_aggregate_mean_2d_owned, native_aggregate_mean_yx,
     native_aggregate_mean_yx_owned, native_repeat_2d, native_repeat_2d_owned, native_repeat_yx,
