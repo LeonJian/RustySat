@@ -544,6 +544,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 ### Known Inefficiencies (to address in future roadmap steps)
 
 - `Dataset::insert_metadata()` writes to both `self.metadata` and `self.attrs` — transitional dual-write; plan to remove flat `metadata` map entirely.
+- `ResamplerCache` uses unbounded linear-scan lookup. For multi-channel scene processing the current O(n) scan and unlimited growth are acceptable, but production throughput would benefit from a `HashMap` key and a configurable capacity limit with LRU eviction.
 - YAML parsing has byte-size and nesting-depth guardrails, but the current maintained `serde_norway` stack still uses `unsafe-libyaml-norway`. Revisit if a mature pure-Rust Serde YAML frontend becomes available without losing Satpy YAML compatibility.
 - `SourceChunkCache` in nearest resampler is bounded with a small FIFO cache. Future work should make cache sizing configurable and consider LRU/tile traversal for better hit rates on large scenes.
 - `autoscale_lazy` in PGM writer reads all chunks twice (once for min/max, once for write) — when the caller does not provide an explicit scale, the only way to avoid the double pass is to cache chunked f64 data during the first pass and encode from cache, trading memory for I/O.

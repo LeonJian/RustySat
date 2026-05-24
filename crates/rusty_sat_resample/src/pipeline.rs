@@ -1043,4 +1043,48 @@ mod tests {
             .with_radius_of_influence(-0.5)
             .is_err());
     }
+
+    #[test]
+    fn resampler_cache_distinguishes_swath_and_area_geometry() {
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let mut cache = ResamplerCache::new();
+
+        cache
+            .prepare_for_geometry(
+                SourceGeometry::area(area("src", 2, 2, [0.0, 0.0, 2.0, 2.0])),
+                &destination,
+                ResampleOptions::nearest_area(),
+            )
+            .unwrap();
+        cache
+            .prepare_for_geometry(
+                SourceGeometry::swath(swath()),
+                &destination,
+                ResampleOptions::bucket_average(),
+            )
+            .unwrap();
+
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn cached_owned_resample_dataset_works() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 4, 4, [0.0, 0.0, 2.0, 2.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let mut cache = ResamplerCache::new();
+
+        let output = resample_dataset_owned_cached(
+            &mut cache,
+            dataset,
+            source,
+            &destination,
+            ResampleOptions::native(),
+        )
+        .unwrap();
+
+        assert_eq!(output.data().unwrap().shape(), (4, 4));
+        assert_eq!(cache.len(), 1);
+    }
 }
