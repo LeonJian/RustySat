@@ -166,10 +166,11 @@ impl ProjCrs {
     }
 
     pub fn is_geographic(&self) -> bool {
-        matches!(
-            self.projection_name(),
-            Some("longlat" | "latlong" | "lonlat")
-        )
+        match self.projection_name() {
+            Some("longlat" | "latlong" | "lonlat") => true,
+            Some(_) => false,
+            None => self.param("epsg") == Some(Some("4326")),
+        }
     }
 
     pub fn equivalent_to(&self, other: &Self) -> bool {
@@ -202,7 +203,7 @@ impl ProjCrs {
     }
 
     pub fn transform_to(&self, target: &Self, coordinate: Coordinate2D) -> Result<Coordinate2D> {
-        if self.equivalent_to(target) {
+        if self.equivalent_to(target) || (self.is_geographic() && target.is_geographic()) {
             return Ok(coordinate);
         }
         Err(RustySatError::unsupported(format!(
@@ -410,6 +411,7 @@ mod tests {
         let crs = ProjCrs::from_proj4_str("EPSG:04326").unwrap();
 
         assert_eq!(crs.param("epsg"), Some(Some("4326")));
+        assert!(crs.is_geographic());
         assert_eq!(crs.to_proj4_string(), "+epsg=4326");
     }
 
@@ -477,6 +479,17 @@ mod tests {
                 .unwrap(),
             vec![coordinate, Coordinate2D::new(0.0, 0.0).unwrap()]
         );
+    }
+
+    #[test]
+    fn geographic_alias_transforms_are_identity() {
+        let epsg = ProjCrs::from_proj4_str("EPSG:4326").unwrap();
+        let longlat = ProjCrs::from_proj4_str("+proj=longlat +datum=WGS84").unwrap();
+        let coordinate = Coordinate2D::new(12.5, -45.25).unwrap();
+
+        assert!(!epsg.equivalent_to(&longlat));
+        assert_eq!(epsg.transform_to(&longlat, coordinate).unwrap(), coordinate);
+        assert_eq!(longlat.transform_to(&epsg, coordinate).unwrap(), coordinate);
     }
 
     #[test]

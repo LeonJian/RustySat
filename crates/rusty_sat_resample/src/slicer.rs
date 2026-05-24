@@ -6,12 +6,13 @@
 //! - `deps/pyresample/pyresample/resampler.py`
 //! - `satpy/satpy/scene.py::_reduce_data`
 //!
-//! This module intentionally starts with the same-projection `AreaDefinition`
-//! path used by Satpy's common data-reduction flow. Cross-projection polygon
-//! slicing remains a later S7 task because Rusty Sat does not have a real
-//! projection transform backend yet.
+//! This module starts with the `AreaDefinition` path used by Satpy's common
+//! data-reduction flow. Real projected cross-CRS polygon slicing remains a
+//! later S7 task, but the code routes extent coordinates through the CRS API so
+//! safe geographic/WGS84 aliases work now and future transform backends can
+//! plug in without changing the slicing API.
 
-use crate::AreaDefinition;
+use crate::{AreaDefinition, Coordinate2D};
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::ops::Range;
 
@@ -108,16 +109,15 @@ pub fn get_area_slices_with_divisibility(
     target: &AreaDefinition,
     shape_divisible_by: Option<usize>,
 ) -> Result<AreaSlice> {
-    ensure_same_projection(source, target)?;
-
-    let [target_llx, target_lly, target_urx, target_ury] = target.area_extent();
+    let [target_llx, target_lly, target_urx, target_ury] =
+        target_extent_in_source_projection(source, target)?;
     if !target_llx.is_finite()
         || !target_lly.is_finite()
         || !target_urx.is_finite()
         || !target_ury.is_finite()
     {
         return Err(RustySatError::invalid_input(
-            "target area extent must be finite",
+            "target area extent in source projection must be finite",
         ));
     }
 
@@ -273,15 +273,33 @@ fn validate_reduced_dataset_shape(dataset: &Dataset, source_area: &AreaDefinitio
     Ok(())
 }
 
-fn ensure_same_projection(source: &AreaDefinition, target: &AreaDefinition) -> Result<()> {
+fn target_extent_in_source_projection(
+    source: &AreaDefinition,
+    target: &AreaDefinition,
+) -> Result<[f64; 4]> {
     let source_crs = source.crs()?;
     let target_crs = target.crs()?;
-    if source_crs.equivalent_to(&target_crs) {
-        return Ok(());
+    let [llx, lly, urx, ury] = target.area_extent();
+    let corners = target_crs.transform_many_to(
+        &source_crs,
+        [
+            Coordinate2D::new(llx, lly)?,
+            Coordinate2D::new(llx, ury)?,
+            Coordinate2D::new(urx, lly)?,
+            Coordinate2D::new(urx, ury)?,
+        ],
+    )?;
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for corner in corners {
+        min_x = min_x.min(corner.x());
+        min_y = min_y.min(corner.y());
+        max_x = max_x.max(corner.x());
+        max_y = max_y.max(corner.y());
     }
-    Err(RustySatError::unsupported(
-        "cross-projection area slicing before transform backend",
-    ))
+    Ok([min_x, min_y, max_x, max_y])
 }
 
 fn array_coordinates_from_projection(
@@ -392,6 +410,27 @@ mod tests {
     fn computes_same_projection_area_slices_with_pyresample_style_margin() {
         let source = lonlat_area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
         let target = lonlat_area("target", 2, 2, [1.0, 1.0, 3.0, 3.0]);
+
+        let slices = get_area_slices(&source, &target).unwrap();
+
+        assert_eq!(slices.x(), 0..3);
+        assert_eq!(slices.y(), 0..3);
+        assert_eq!(slices.shape(), (3, 3));
+    }
+
+    #[test]
+    fn geographic_crs_alias_area_slices_use_identity_transform() {
+        let source = lonlat_area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let target = AreaDefinition::from_parts(
+            "target",
+            "target",
+            "epsg4326",
+            BTreeMap::from([("proj4".to_string(), "EPSG:4326".to_string())]),
+            2,
+            2,
+            [1.0, 1.0, 3.0, 3.0],
+        )
+        .unwrap();
 
         let slices = get_area_slices(&source, &target).unwrap();
 
