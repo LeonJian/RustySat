@@ -49,9 +49,11 @@ pub use neighbour::{
     sample_weighted_from_neighbour_info_owned, Neighbour, NeighbourInfo, SampleMissingPolicy,
 };
 pub use pipeline::{
-    prepare_resampler, prepare_resampler_for_geometry, resample_dataset,
-    resample_dataset_from_geometry, resample_dataset_owned, resample_dataset_owned_from_geometry,
-    PreparedResampler, ResampleOptions, ResamplerMethod, SourceGeometry,
+    prepare_resampler, prepare_resampler_for_geometry, resample_dataset, resample_dataset_cached,
+    resample_dataset_from_geometry, resample_dataset_from_geometry_cached, resample_dataset_owned,
+    resample_dataset_owned_cached, resample_dataset_owned_from_geometry,
+    resample_dataset_owned_from_geometry_cached, PreparedResampler, ResampleOptions,
+    ResamplerCache, ResamplerMethod, SourceGeometry,
 };
 pub use scene::SceneResampleExt;
 pub use spatial_index::{KdPointIndex2D, NearestPoint, Point2D};

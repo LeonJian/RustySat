@@ -269,7 +269,7 @@ impl Resampler for PreparedResampler {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SourceGeometry {
     Area(AreaDefinition),
     Swath(SwathDefinition),
@@ -282,6 +282,75 @@ impl SourceGeometry {
 
     pub fn swath(swath: SwathDefinition) -> Self {
         Self::Swath(swath)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResamplerCache {
+    entries: Vec<CachedResampler>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedResampler {
+    source: SourceGeometry,
+    destination: AreaDefinition,
+    options: ResampleOptions,
+    resampler: PreparedResampler,
+}
+
+impl ResamplerCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn prepare(
+        &mut self,
+        source: AreaDefinition,
+        destination: &AreaDefinition,
+        options: ResampleOptions,
+    ) -> Result<&PreparedResampler> {
+        self.prepare_for_geometry(SourceGeometry::Area(source), destination, options)
+    }
+
+    pub fn prepare_for_geometry(
+        &mut self,
+        source: SourceGeometry,
+        destination: &AreaDefinition,
+        options: ResampleOptions,
+    ) -> Result<&PreparedResampler> {
+        if let Some(index) = self.entries.iter().position(|entry| {
+            entry.source == source
+                && entry.destination == *destination
+                && resample_options_equivalent(&entry.options, &options)
+        }) {
+            return Ok(&self.entries[index].resampler);
+        }
+
+        let resampler =
+            prepare_resampler_for_geometry(source.clone(), destination, options.clone())?;
+        self.entries.push(CachedResampler {
+            source,
+            destination: destination.clone(),
+            options,
+            resampler,
+        });
+        Ok(&self
+            .entries
+            .last()
+            .expect("cache entry was just inserted")
+            .resampler)
     }
 }
 
@@ -442,6 +511,28 @@ pub fn resample_dataset_from_geometry(
     resampler.resample(dataset, destination)
 }
 
+pub fn resample_dataset_cached(
+    cache: &mut ResamplerCache,
+    dataset: &Dataset,
+    source: AreaDefinition,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let resampler = cache.prepare(source, destination, options)?;
+    resampler.resample(dataset, destination)
+}
+
+pub fn resample_dataset_from_geometry_cached(
+    cache: &mut ResamplerCache,
+    dataset: &Dataset,
+    source: SourceGeometry,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let resampler = cache.prepare_for_geometry(source, destination, options)?;
+    resampler.resample(dataset, destination)
+}
+
 pub fn resample_dataset_owned_from_geometry(
     dataset: Dataset,
     source: SourceGeometry,
@@ -460,6 +551,51 @@ pub fn resample_dataset_owned(
 ) -> Result<Dataset> {
     let resampler = prepare_resampler(source, destination, options)?;
     resampler.resample_owned(dataset, destination)
+}
+
+pub fn resample_dataset_owned_cached(
+    cache: &mut ResamplerCache,
+    dataset: Dataset,
+    source: AreaDefinition,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let resampler = cache.prepare(source, destination, options)?;
+    resampler.resample_owned(dataset, destination)
+}
+
+pub fn resample_dataset_owned_from_geometry_cached(
+    cache: &mut ResamplerCache,
+    dataset: Dataset,
+    source: SourceGeometry,
+    destination: &AreaDefinition,
+    options: ResampleOptions,
+) -> Result<Dataset> {
+    let resampler = cache.prepare_for_geometry(source, destination, options)?;
+    resampler.resample_owned(dataset, destination)
+}
+
+fn resample_options_equivalent(left: &ResampleOptions, right: &ResampleOptions) -> bool {
+    left.method == right.method
+        && optional_f64_bits_eq(left.radius_of_influence, right.radius_of_influence)
+        && left.fill_value.to_bits() == right.fill_value.to_bits()
+        && left.mask_missing == right.mask_missing
+        && left.skipna == right.skipna
+        && left.bucket_categories_auto == right.bucket_categories_auto
+        && left.bucket_categories.len() == right.bucket_categories.len()
+        && left
+            .bucket_categories
+            .iter()
+            .zip(&right.bucket_categories)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn optional_f64_bits_eq(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -780,6 +916,84 @@ mod tests {
         let output = resampler.resample(&dataset, &destination).unwrap();
 
         assert_eq!(output.data().unwrap().shape(), (4, 4));
+    }
+
+    #[test]
+    fn resampler_cache_reuses_matching_nan_default_options() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let mut cache = ResamplerCache::new();
+
+        let first = cache
+            .prepare(source.clone(), &destination, ResampleOptions::default())
+            .unwrap()
+            .method();
+        let second = cache
+            .prepare(source, &destination, ResampleOptions::default())
+            .unwrap()
+            .method();
+
+        assert_eq!(first, ResamplerMethod::NearestArea);
+        assert_eq!(second, ResamplerMethod::NearestArea);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn resampler_cache_distinguishes_options_and_can_clear() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let mut cache = ResamplerCache::new();
+
+        cache
+            .prepare(
+                source.clone(),
+                &destination,
+                ResampleOptions::nearest_area().with_fill_value(-1.0),
+            )
+            .unwrap();
+        cache
+            .prepare(
+                source,
+                &destination,
+                ResampleOptions::nearest_area().with_fill_value(-2.0),
+            )
+            .unwrap();
+
+        assert_eq!(cache.len(), 2);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn cached_resample_dataset_uses_prepared_resampler() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let mut cache = ResamplerCache::new();
+
+        let first = resample_dataset_cached(
+            &mut cache,
+            &dataset,
+            source.clone(),
+            &destination,
+            ResampleOptions::default(),
+        )
+        .unwrap();
+        let second = resample_dataset_cached(
+            &mut cache,
+            &dataset,
+            source,
+            &destination,
+            ResampleOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.data().unwrap().values(),
+            second.data().unwrap().values()
+        );
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

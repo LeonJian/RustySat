@@ -239,7 +239,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` S7-m6b: Add typed `prepare_resampler`, `resample_dataset`, and `resample_dataset_owned` helpers for current nearest/native resamplers after inspecting Satpy `resample/base.py`.
   - `[x]` S7-m6h: Add explicit `SourceGeometry` pipeline preparation for current swath-based bucket and EWA resamplers while preserving area-only convenience APIs.
   - `[x]` S7-m6k: Add typed pipeline method/options for explicit-category bucket fraction output.
-  - `[ ]` S7-next: Add resampler caching, data reduction, slicers, image containers, crop helpers, and CRS cross-projection resampling.
+  - `[x]` S7-m6n: Add explicit `ResamplerCache` for prepared resamplers keyed by source geometry, destination area, and options, including cached borrowed/owned dataset helpers.
+  - `[ ]` S7-next: Add data reduction, slicers, image containers, crop helpers, CRS cross-projection resampling, and automatic source-area/swath lookup from dataset attrs.
 
 ### I: Image And Enhancement
 
@@ -390,6 +391,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M6-resampling-full-k: Add explicit-category bucket fraction through the typed resampling pipeline. Roadmap: S4/S7.
   - `[x]` M6-resampling-full-l: Add automatic bucket-fraction category discovery for direct and pipeline usage. Roadmap: S4.
   - `[x]` M6-resampling-full-m: Add runtime-typed native resampling with dtype-preserving repeat and `f64` aggregate means. Roadmap: S6.
+  - `[x]` M6-resampling-full-n: Add explicit prepared-resampler cache and cached dataset resampling helpers. Roadmap: S7.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
 - `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
 - `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
@@ -507,7 +509,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `BucketResampler` / `BucketFractionResampler`: lon/lat swath-to-geographic-area bucket average, sum, count, and explicit/auto-category fraction for 2D f64 grids; fractions return `categories,y,x` arrays; skipna/fill behavior, owned resampling, destination x/y coordinates, metadata preservation, Satpy-like count attrs, and typed pipeline preparation through `SourceGeometry::Swath` | Projected target backends, multidimensional/band-aware buckets, chunked/lazy bucket execution, and Scene-level preparation integration |
 | `EwaResampler`: dependency-free lon/lat swath-to-geographic-area EWA-style weighted accumulation for 2D f64 grids, configurable radius/weight/fill/masked-missing policy, source-mask skipping, destination x/y coordinates, metadata preservation, owned resampling, and typed pipeline preparation through `SourceGeometry::Swath` | Full Pyresample Fornav/LLS2 parity, scan-aware `rows_per_scan`, maximum-weight mode, chunked execution, multi-band sampling, geocentric/cross-projection distances, and production EWA performance |
 | `NativeResampler`: Satpy-style native repeat for integer upscaling, nanmean aggregation for integer downscaling, equal-shape pass-through, mixed-axis rejection, mask propagation, destination x/y coordinates, metadata preservation, higher-dimensional arrays by resampling named `y,x` axes, runtime-typed identity/repeat that preserves `f32`/`f64`/`u8`/`u16`/`i16`, and aggregate means promoted to `f64` | Lazy/chunked native execution and full Satpy area-choice integration |
-| `prepare_resampler`, `prepare_resampler_for_geometry`, `resample_dataset`, `resample_dataset_owned`, and `SourceGeometry`: typed Satpy-style pipeline helpers for selecting current area-based nearest/bilinear/native resamplers and swath-based bucket/EWA resamplers, including explicit-category bucket fractions, with borrowed and consuming dataset paths | Resampler caching, automatic source-area/swath lookup from dataset attrs, data reduction, slicers, crop helpers, or CRS cross-projection resampling |
+| `prepare_resampler`, `prepare_resampler_for_geometry`, `ResamplerCache`, `resample_dataset`, `resample_dataset_owned`, and `SourceGeometry`: typed Satpy-style pipeline helpers for selecting current area-based nearest/bilinear/native resamplers and swath-based bucket/EWA resamplers, including explicit-category bucket fractions, explicit prepared-resampler caching, and borrowed/consuming dataset paths | Automatic source-area/swath lookup from dataset attrs, data reduction, slicers, crop helpers, or CRS cross-projection resampling |
 
 ### rusty_sat_composites
 
