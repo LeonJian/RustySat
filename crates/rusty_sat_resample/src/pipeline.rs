@@ -8,9 +8,10 @@
 //! of dynamically importing Python classes by name.
 
 use crate::{
-    reduce_area_dataset, reduce_area_dataset_owned, AreaDefinition, BilinearAreaResampler,
-    BucketFractionResampler, BucketResampler, BucketStatistic, EwaOptions, EwaResampler,
-    NativeResampler, NearestAreaResampler, Resampler, SwathDefinition,
+    reduce_area_dataset_owned_with_divisibility, reduce_area_dataset_with_divisibility,
+    AreaDefinition, BilinearAreaResampler, BucketFractionResampler, BucketResampler,
+    BucketStatistic, EwaOptions, EwaResampler, NativeResampler, NearestAreaResampler, Resampler,
+    SwathDefinition,
 };
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::str::FromStr;
@@ -73,6 +74,8 @@ pub struct ResampleOptions {
     fill_value: f64,
     mask_missing: bool,
     skipna: bool,
+    reduce_data: bool,
+    shape_divisible_by: Option<usize>,
     bucket_categories: Vec<f64>,
     bucket_categories_auto: bool,
 }
@@ -85,6 +88,8 @@ impl Default for ResampleOptions {
             fill_value: f64::NAN,
             mask_missing: false,
             skipna: true,
+            reduce_data: false,
+            shape_divisible_by: None,
             bucket_categories: Vec::new(),
             bucket_categories_auto: false,
         }
@@ -155,6 +160,14 @@ impl ResampleOptions {
         self.skipna
     }
 
+    pub fn reduce_data(&self) -> bool {
+        self.reduce_data
+    }
+
+    pub fn shape_divisible_by(&self) -> Option<usize> {
+        self.shape_divisible_by
+    }
+
     pub fn bucket_categories(&self) -> &[f64] {
         &self.bucket_categories
     }
@@ -192,6 +205,33 @@ impl ResampleOptions {
     pub fn with_skipna(mut self, skipna: bool) -> Self {
         self.skipna = skipna;
         self
+    }
+
+    pub fn with_reduce_data(mut self, reduce_data: bool) -> Self {
+        self.reduce_data = reduce_data;
+        if !reduce_data {
+            self.shape_divisible_by = None;
+        }
+        self
+    }
+
+    pub fn with_data_reduction(self) -> Self {
+        self.with_reduce_data(true)
+    }
+
+    pub fn without_data_reduction(self) -> Self {
+        self.with_reduce_data(false)
+    }
+
+    pub fn with_shape_divisible_by(mut self, factor: usize) -> Result<Self> {
+        if factor == 0 {
+            return Err(RustySatError::invalid_input(
+                "shape_divisible_by must be greater than zero",
+            ));
+        }
+        self.shape_divisible_by = Some(factor);
+        self.reduce_data = true;
+        Ok(self)
     }
 
     pub fn with_bucket_categories(mut self, categories: impl Into<Vec<f64>>) -> Self {
@@ -497,6 +537,9 @@ pub fn resample_dataset(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
+    if options.reduce_data {
+        return resample_area_dataset_reduced(dataset, source, destination, options);
+    }
     let resampler = prepare_resampler(source, destination, options)?;
     resampler.resample(dataset, destination)
 }
@@ -518,6 +561,9 @@ pub fn resample_dataset_cached(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
+    if options.reduce_data {
+        return resample_area_dataset_reduced_cached(cache, dataset, source, destination, options);
+    }
     let resampler = cache.prepare(source, destination, options)?;
     resampler.resample(dataset, destination)
 }
@@ -528,7 +574,9 @@ pub fn resample_area_dataset_reduced(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
-    let reduction = reduce_area_dataset(dataset, &source, destination)?;
+    let shape_divisible_by = options.shape_divisible_by;
+    let reduction =
+        reduce_area_dataset_with_divisibility(dataset, &source, destination, shape_divisible_by)?;
     let (reduced_dataset, reduced_source, _) = reduction.into_parts();
     let resampler = prepare_resampler(reduced_source, destination, options)?;
     resampler.resample_owned(reduced_dataset, destination)
@@ -541,7 +589,9 @@ pub fn resample_area_dataset_reduced_cached(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
-    let reduction = reduce_area_dataset(dataset, &source, destination)?;
+    let shape_divisible_by = options.shape_divisible_by;
+    let reduction =
+        reduce_area_dataset_with_divisibility(dataset, &source, destination, shape_divisible_by)?;
     let (reduced_dataset, reduced_source, _) = reduction.into_parts();
     let resampler = cache.prepare(reduced_source, destination, options)?;
     resampler.resample_owned(reduced_dataset, destination)
@@ -574,6 +624,9 @@ pub fn resample_dataset_owned(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
+    if options.reduce_data {
+        return resample_area_dataset_reduced_owned(dataset, source, destination, options);
+    }
     let resampler = prepare_resampler(source, destination, options)?;
     resampler.resample_owned(dataset, destination)
 }
@@ -584,7 +637,13 @@ pub fn resample_area_dataset_reduced_owned(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
-    let reduction = reduce_area_dataset_owned(dataset, &source, destination)?;
+    let shape_divisible_by = options.shape_divisible_by;
+    let reduction = reduce_area_dataset_owned_with_divisibility(
+        dataset,
+        &source,
+        destination,
+        shape_divisible_by,
+    )?;
     let (reduced_dataset, reduced_source, _) = reduction.into_parts();
     let resampler = prepare_resampler(reduced_source, destination, options)?;
     resampler.resample_owned(reduced_dataset, destination)
@@ -597,7 +656,13 @@ pub fn resample_area_dataset_reduced_owned_cached(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
-    let reduction = reduce_area_dataset_owned(dataset, &source, destination)?;
+    let shape_divisible_by = options.shape_divisible_by;
+    let reduction = reduce_area_dataset_owned_with_divisibility(
+        dataset,
+        &source,
+        destination,
+        shape_divisible_by,
+    )?;
     let (reduced_dataset, reduced_source, _) = reduction.into_parts();
     let resampler = cache.prepare(reduced_source, destination, options)?;
     resampler.resample_owned(reduced_dataset, destination)
@@ -610,6 +675,15 @@ pub fn resample_dataset_owned_cached(
     destination: &AreaDefinition,
     options: ResampleOptions,
 ) -> Result<Dataset> {
+    if options.reduce_data {
+        return resample_area_dataset_reduced_owned_cached(
+            cache,
+            dataset,
+            source,
+            destination,
+            options,
+        );
+    }
     let resampler = cache.prepare(source, destination, options)?;
     resampler.resample_owned(dataset, destination)
 }
@@ -631,6 +705,8 @@ fn resample_options_equivalent(left: &ResampleOptions, right: &ResampleOptions) 
         && left.fill_value.to_bits() == right.fill_value.to_bits()
         && left.mask_missing == right.mask_missing
         && left.skipna == right.skipna
+        && left.reduce_data == right.reduce_data
+        && left.shape_divisible_by == right.shape_divisible_by
         && left.bucket_categories_auto == right.bucket_categories_auto
         && left.bucket_categories.len() == right.bucket_categories.len()
         && left
@@ -870,6 +946,82 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn resample_options_track_data_reduction_knobs() {
+        let default = ResampleOptions::nearest_area();
+        assert!(!default.reduce_data());
+        assert_eq!(default.shape_divisible_by(), None);
+
+        let reduced = default.clone().with_data_reduction();
+        assert!(reduced.reduce_data());
+        assert_eq!(reduced.shape_divisible_by(), None);
+
+        let unreduced = reduced.without_data_reduction();
+        assert!(!unreduced.reduce_data());
+        assert_eq!(unreduced.shape_divisible_by(), None);
+
+        let divisible = default.with_shape_divisible_by(4).unwrap();
+        assert!(divisible.reduce_data());
+        assert_eq!(divisible.shape_divisible_by(), Some(4));
+        assert_eq!(
+            divisible.without_data_reduction().shape_divisible_by(),
+            None
+        );
+
+        assert!(ResampleOptions::nearest_area()
+            .with_shape_divisible_by(0)
+            .is_err());
+    }
+
+    #[test]
+    fn resample_dataset_honors_reduction_option() {
+        let source = area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let destination = area("destination", 2, 2, [1.0, 1.0, 3.0, 3.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(4, 4, (0..16).map(f64::from).collect()).unwrap());
+
+        let output = resample_dataset(
+            &dataset,
+            source,
+            &destination,
+            ResampleOptions::nearest_area().with_data_reduction(),
+        )
+        .unwrap();
+
+        assert_eq!(output.data().unwrap().shape(), (2, 2));
+        assert_eq!(output.data().unwrap().values(), &[5.0, 6.0, 9.0, 10.0]);
+    }
+
+    #[test]
+    fn resampler_cache_distinguishes_reduction_options() {
+        let source = area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let destination = area("destination", 2, 2, [1.0, 1.0, 3.0, 3.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap())
+            .with_data(DataGrid::new(4, 4, (0..16).map(f64::from).collect()).unwrap());
+        let mut cache = ResamplerCache::new();
+
+        resample_dataset_cached(
+            &mut cache,
+            &dataset,
+            source.clone(),
+            &destination,
+            ResampleOptions::nearest_area().with_data_reduction(),
+        )
+        .unwrap();
+        resample_dataset_cached(
+            &mut cache,
+            &dataset,
+            source,
+            &destination,
+            ResampleOptions::nearest_area()
+                .with_shape_divisible_by(2)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
