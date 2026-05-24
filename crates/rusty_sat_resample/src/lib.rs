@@ -63,8 +63,10 @@ pub use pipeline::{
 };
 pub use scene::SceneResampleExt;
 pub use slicer::{
-    crop_source_area, get_area_slices, get_area_slices_with_divisibility, slice_area,
-    slice_dataset_yx, slice_dataset_yx_owned, AreaCrop, AreaSlice,
+    crop_source_area, get_area_slices, get_area_slices_with_divisibility, reduce_area_dataset,
+    reduce_area_dataset_owned, reduce_area_dataset_owned_with_divisibility,
+    reduce_area_dataset_with_divisibility, slice_area, slice_dataset_yx, slice_dataset_yx_owned,
+    AreaCrop, AreaDataReduction, AreaSlice,
 };
 pub use spatial_index::{KdPointIndex2D, NearestPoint, Point2D};
 pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};

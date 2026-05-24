@@ -29,6 +29,13 @@ pub struct AreaCrop {
     slices: AreaSlice,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AreaDataReduction {
+    source_area: AreaDefinition,
+    slices: AreaSlice,
+    dataset: Dataset,
+}
+
 impl AreaSlice {
     pub fn new(x: Range<usize>, y: Range<usize>) -> Result<Self> {
         if x.start >= x.end || y.start >= y.end {
@@ -71,6 +78,24 @@ impl AreaCrop {
 
     pub fn into_parts(self) -> (AreaDefinition, AreaSlice) {
         (self.source_area, self.slices)
+    }
+}
+
+impl AreaDataReduction {
+    pub fn source_area(&self) -> &AreaDefinition {
+        &self.source_area
+    }
+
+    pub fn slices(&self) -> &AreaSlice {
+        &self.slices
+    }
+
+    pub fn dataset(&self) -> &Dataset {
+        &self.dataset
+    }
+
+    pub fn into_parts(self) -> (Dataset, AreaDefinition, AreaSlice) {
+        (self.dataset, self.source_area, self.slices)
     }
 }
 
@@ -156,6 +181,56 @@ pub fn crop_source_area(source: &AreaDefinition, target: &AreaDefinition) -> Res
     })
 }
 
+pub fn reduce_area_dataset(
+    dataset: &Dataset,
+    source: &AreaDefinition,
+    target: &AreaDefinition,
+) -> Result<AreaDataReduction> {
+    reduce_area_dataset_with_divisibility(dataset, source, target, None)
+}
+
+pub fn reduce_area_dataset_with_divisibility(
+    dataset: &Dataset,
+    source: &AreaDefinition,
+    target: &AreaDefinition,
+    shape_divisible_by: Option<usize>,
+) -> Result<AreaDataReduction> {
+    let slices = get_area_slices_with_divisibility(source, target, shape_divisible_by)?;
+    let source_area = slice_area(source, &slices)?;
+    let dataset = slice_dataset_yx(dataset, &slices)?;
+    validate_reduced_dataset_shape(&dataset, &source_area)?;
+    Ok(AreaDataReduction {
+        source_area,
+        slices,
+        dataset,
+    })
+}
+
+pub fn reduce_area_dataset_owned(
+    dataset: Dataset,
+    source: &AreaDefinition,
+    target: &AreaDefinition,
+) -> Result<AreaDataReduction> {
+    reduce_area_dataset_owned_with_divisibility(dataset, source, target, None)
+}
+
+pub fn reduce_area_dataset_owned_with_divisibility(
+    dataset: Dataset,
+    source: &AreaDefinition,
+    target: &AreaDefinition,
+    shape_divisible_by: Option<usize>,
+) -> Result<AreaDataReduction> {
+    let slices = get_area_slices_with_divisibility(source, target, shape_divisible_by)?;
+    let source_area = slice_area(source, &slices)?;
+    let dataset = slice_dataset_yx_owned(dataset, &slices)?;
+    validate_reduced_dataset_shape(&dataset, &source_area)?;
+    Ok(AreaDataReduction {
+        source_area,
+        slices,
+        dataset,
+    })
+}
+
 pub fn slice_dataset_yx(dataset: &Dataset, slices: &AreaSlice) -> Result<Dataset> {
     let array = dataset.array().ok_or_else(|| {
         RustySatError::invalid_input(format!(
@@ -177,6 +252,25 @@ pub fn slice_dataset_yx_owned(mut dataset: Dataset, slices: &AreaSlice) -> Resul
     })?;
     dataset.set_array(array.slice_yx_owned(slices.y(), slices.x())?);
     Ok(dataset)
+}
+
+fn validate_reduced_dataset_shape(dataset: &Dataset, source_area: &AreaDefinition) -> Result<()> {
+    let array = dataset.array().ok_or_else(|| {
+        RustySatError::invalid_input(format!(
+            "dataset '{}' has no array after reduction",
+            dataset.id().name()
+        ))
+    })?;
+    let shape = array.shape_yx()?;
+    if shape != source_area.shape() {
+        return Err(RustySatError::invalid_input(format!(
+            "reduced dataset '{}' y/x shape {:?} does not match reduced source area {:?}",
+            dataset.id().name(),
+            shape,
+            source_area.shape()
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_same_projection(source: &AreaDefinition, target: &AreaDefinition) -> Result<()> {
@@ -404,5 +498,56 @@ mod tests {
             vec![4.0, 5.0, 8.0, 9.0]
         );
         assert_eq!(borrowed, owned);
+    }
+
+    #[test]
+    fn reduces_area_dataset_and_returns_cropped_source_area() {
+        let source = lonlat_area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let target = lonlat_area("target", 2, 2, [1.1, 1.1, 2.9, 2.9]);
+        let dataset = Dataset::new(DataId::new("counts").unwrap()).with_array(
+            DataArray::<u16>::from_vec(vec![4, 4], (0..16).collect::<Vec<_>>()).unwrap(),
+        );
+
+        let reduction = reduce_area_dataset(&dataset, &source, &target).unwrap();
+        let owned = reduce_area_dataset_owned(dataset, &source, &target).unwrap();
+
+        assert_eq!(reduction.slices().x(), 1..3);
+        assert_eq!(reduction.slices().y(), 1..3);
+        assert_eq!(reduction.source_area().shape(), (2, 2));
+        assert_eq!(reduction.source_area().area_extent(), [1.0, 1.0, 3.0, 3.0]);
+        assert_eq!(reduction.dataset().array().unwrap().shape(), &[2, 2]);
+        assert_eq!(
+            reduction.dataset().array().unwrap().values_as_f64(),
+            vec![5.0, 6.0, 9.0, 10.0]
+        );
+        assert_eq!(reduction, owned);
+    }
+
+    #[test]
+    fn reduce_area_dataset_supports_shape_divisible_slices() {
+        let source = lonlat_area("source", 8, 8, [0.0, 0.0, 8.0, 8.0]);
+        let target = lonlat_area("target", 3, 3, [2.1, 2.1, 4.9, 4.9]);
+        let dataset = Dataset::new(DataId::new("counts").unwrap()).with_array(
+            DataArray::<u16>::from_vec(vec![8, 8], (0..64).collect::<Vec<_>>()).unwrap(),
+        );
+
+        let reduction =
+            reduce_area_dataset_with_divisibility(&dataset, &source, &target, Some(4)).unwrap();
+
+        assert_eq!(reduction.slices().shape(), (4, 4));
+        assert_eq!(reduction.source_area().shape(), (4, 4));
+        assert_eq!(reduction.dataset().array().unwrap().shape(), &[4, 4]);
+    }
+
+    #[test]
+    fn reduce_area_dataset_rejects_arrays_without_matching_yx_dimensions() {
+        let source = lonlat_area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        let target = lonlat_area("target", 2, 2, [1.1, 1.1, 2.9, 2.9]);
+        let dataset = Dataset::new(DataId::new("counts").unwrap()).with_array(
+            DataArray::<u16>::from_vec_named(vec![16], ["samples"], (0..16).collect::<Vec<_>>())
+                .unwrap(),
+        );
+
+        assert!(reduce_area_dataset(&dataset, &source, &target).is_err());
     }
 }
