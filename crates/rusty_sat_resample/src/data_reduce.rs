@@ -453,4 +453,58 @@ mod tests {
 
         assert_eq!(valid, vec![true, true]);
     }
+
+    #[test]
+    fn north_pole_area_filters_by_lat_min() {
+        let boundary_lons =
+            LonLatBoundaries::new([0.0, 90.0], [90.0, 90.0], [90.0, 0.0], [0.0, 0.0]).unwrap();
+        let boundary_lats =
+            LonLatBoundaries::new([80.0, 80.0], [80.0, 90.0], [90.0, 90.0], [90.0, 80.0]).unwrap();
+        let lons = vec![45.0, 180.0];
+        let lats = vec![85.0, 70.0];
+
+        let valid = get_valid_index_from_lonlat_boundaries(
+            &boundary_lons,
+            &boundary_lats,
+            &lons,
+            &lats,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(valid, vec![true, false]);
+    }
+
+    #[test]
+    fn radius_of_influence_expands_acceptance_region() {
+        let (boundary_lons, boundary_lats) = square_boundary();
+        let lons = vec![9.5, 10.2];
+        let lats = vec![5.0, 5.0];
+
+        let tight = get_valid_index_from_lonlat_boundaries(
+            &boundary_lons,
+            &boundary_lats,
+            &lons,
+            &lats,
+            0.0,
+        )
+        .unwrap();
+        let wide = get_valid_index_from_lonlat_boundaries(
+            &boundary_lons,
+            &boundary_lats,
+            &lons,
+            &lats,
+            100_000.0,
+        )
+        .unwrap();
+
+        assert_eq!(tight, vec![true, false]);
+        assert_eq!(wide, vec![true, true]);
+    }
+
+    #[test]
+    fn validate_grid_shape_rejects_zero_dimensions() {
+        assert!(validate_grid_shape(0, 1, 0).is_err());
+        assert!(validate_grid_shape(1, 0, 0).is_err());
+    }
 }
