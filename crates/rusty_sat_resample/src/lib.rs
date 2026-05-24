@@ -13,6 +13,7 @@ pub mod neighbour;
 pub mod pipeline;
 pub mod scene;
 pub mod slicer;
+pub mod source_geometry;
 pub mod spatial_index;
 pub mod swath;
 
@@ -69,6 +70,12 @@ pub use slicer::{
     reduce_area_dataset_owned, reduce_area_dataset_owned_with_divisibility,
     reduce_area_dataset_with_divisibility, slice_area, slice_dataset_yx, slice_dataset_yx_owned,
     AreaCrop, AreaDataReduction, AreaSlice,
+};
+pub use source_geometry::{
+    area_from_metadata_value, area_to_metadata_value, resample_dataset_from_attrs,
+    resample_dataset_from_attrs_cached, resample_dataset_owned_from_attrs,
+    resample_dataset_owned_from_attrs_cached, set_dataset_area_attr, source_geometry_from_dataset,
+    with_area_attr, AREA_ATTR_KEY,
 };
 pub use spatial_index::{KdPointIndex2D, NearestPoint, Point2D};
 pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};
