@@ -7,6 +7,7 @@ pub mod crs;
 pub mod data_reduce;
 pub mod ewa;
 pub mod geometry;
+pub mod image_container;
 pub mod native;
 pub mod nearest;
 pub mod neighbour;
@@ -38,6 +39,7 @@ pub use ewa::{resample_swath_ewa, resample_swath_ewa_owned, EwaOptions, EwaResam
 pub use geometry::{
     CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
 };
+pub use image_container::ImageContainer;
 pub use native::{
     native_aggregate_mean_2d, native_aggregate_mean_2d_owned, native_aggregate_mean_yx,
     native_aggregate_mean_yx_owned, native_repeat_2d, native_repeat_2d_owned, native_repeat_yx,
