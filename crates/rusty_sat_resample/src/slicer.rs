@@ -343,4 +343,23 @@ mod tests {
             Err(RustySatError::Unsupported { .. })
         ));
     }
+
+    #[test]
+    fn area_slice_rejects_empty_ranges() {
+        assert!(AreaSlice::new(1..1, 0..2).is_err());
+        assert!(AreaSlice::new(0..2, 1..1).is_err());
+    }
+
+    #[test]
+    fn slices_clamp_when_target_straddles_source_edge() {
+        let source = lonlat_area("source", 4, 4, [0.0, 0.0, 4.0, 4.0]);
+        // Target extends from inside source to well outside it.
+        let target = lonlat_area("straddle", 2, 2, [1.0, 1.0, 6.0, 6.0]);
+
+        let slices = get_area_slices(&source, &target).unwrap();
+
+        // x stop clamps to source width; y starts from the lower-left corner.
+        assert_eq!(slices.x().end, 4);
+        assert_eq!(slices.y().start, 0);
+    }
 }
