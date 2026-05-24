@@ -911,22 +911,11 @@ fn yx_dim_indices(dims: &[String]) -> Result<(usize, usize)> {
 }
 
 fn checked_shape_size(shape: &[usize]) -> Result<usize> {
-    shape.iter().try_fold(1usize, |acc, dim| {
-        acc.checked_mul(*dim)
-            .ok_or_else(|| RustySatError::invalid_input("native output shape size overflows usize"))
-    })
+    crate::nd_utils::checked_shape_size(shape)
 }
 
 fn row_major_strides(shape: &[usize]) -> Result<Vec<usize>> {
-    let mut strides = vec![1; shape.len()];
-    let mut stride = 1usize;
-    for (idx, dim) in shape.iter().enumerate().rev() {
-        strides[idx] = stride;
-        stride = stride.checked_mul(*dim).ok_or_else(|| {
-            RustySatError::invalid_input("native array stride size overflows usize")
-        })?;
-    }
-    Ok(strides)
+    crate::nd_utils::row_major_strides(shape)
 }
 
 fn unravel_index(mut index: usize, shape: &[usize], strides: &[usize]) -> Vec<usize> {

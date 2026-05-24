@@ -227,9 +227,9 @@ pub fn sample_array_from_linesample<T: NumericElement>(
     let mut output_shape = source_shape.to_vec();
     output_shape[y_axis] = linesample.height();
     output_shape[x_axis] = linesample.width();
-    let output_len = checked_shape_len(&output_shape)?;
-    let source_strides = row_major_strides(source_shape)?;
-    let output_strides = row_major_strides(&output_shape)?;
+    let output_len = crate::nd_utils::checked_shape_size(&output_shape)?;
+    let source_strides = crate::nd_utils::row_major_strides(source_shape)?;
+    let output_strides = crate::nd_utils::row_major_strides(&output_shape)?;
     let source_values = source.values();
     let source_mask = source.mask();
     let mut output = Vec::with_capacity(output_len);
@@ -335,32 +335,6 @@ fn remap_output_to_source_offset(
         source_offset += index * source_strides[axis];
     }
     source_offset
-}
-
-fn checked_shape_len(shape: &[usize]) -> Result<usize> {
-    shape.iter().try_fold(1usize, |total, size| {
-        if *size == 0 {
-            return Err(RustySatError::invalid_input(
-                "line/sample output shape dimensions must be non-zero",
-            ));
-        }
-        total
-            .checked_mul(*size)
-            .ok_or_else(|| RustySatError::invalid_input("line/sample output shape overflows usize"))
-    })
-}
-
-fn row_major_strides(shape: &[usize]) -> Result<Vec<usize>> {
-    let _ = checked_shape_len(shape)?;
-    let mut strides = vec![1; shape.len()];
-    let mut stride = 1usize;
-    for axis in (0..shape.len()).rev() {
-        strides[axis] = stride;
-        stride = stride.checked_mul(shape[axis]).ok_or_else(|| {
-            RustySatError::invalid_input("line/sample row-major stride overflows usize")
-        })?;
-    }
-    Ok(strides)
 }
 
 fn fill_type_error(expected: &str) -> RustySatError {

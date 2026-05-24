@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod image_container;
 pub mod linesample;
 pub mod native;
+mod nd_utils;
 pub mod nearest;
 pub mod neighbour;
 pub mod pipeline;
