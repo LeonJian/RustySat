@@ -9,7 +9,8 @@
 //! can keep integer/HDR buffers out of unnecessary `f64` promotion.
 
 use rusty_sat_core::{
-    AnyDataArray, DataArray, DataGrid, NumericElement, Result, RustySatError, ValidityMask,
+    AnyDataArray, Coordinate, DataArray, DataGrid, NumericElement, Result, RustySatError,
+    ValidityMask,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,11 +285,19 @@ pub fn sample_array_from_linesample<T: NumericElement>(
         }
     }
 
-    let mut array = DataArray::from_vec_named(output_shape, source.dims().to_vec(), output)?;
+    let mut array =
+        DataArray::from_vec_named(output_shape.clone(), source.dims().to_vec(), output)?;
     for (name, coord) in source.coords() {
-        if coord.dims().iter().all(|dim| dim != "y" && dim != "x") {
-            array.set_coordinate(name.clone(), coord.clone())?;
-        }
+        let sampled_coord = sample_coordinate_from_linesample(
+            coord,
+            source.dims(),
+            source_shape,
+            &output_shape,
+            linesample,
+            source_height,
+            source_width,
+        )?;
+        array.set_coordinate(name.clone(), sampled_coord)?;
     }
     if let Some(flags) = mask_flags {
         array.set_mask(ValidityMask::from_masked_flags(flags))?;
@@ -335,6 +344,110 @@ fn remap_output_to_source_offset(
         source_offset += index * source_strides[axis];
     }
     source_offset
+}
+
+fn sample_coordinate_from_linesample(
+    coord: &Coordinate,
+    source_dims: &[String],
+    source_shape: &[usize],
+    output_shape: &[usize],
+    linesample: &LineSampleGrid,
+    source_height: usize,
+    source_width: usize,
+) -> Result<Coordinate> {
+    if coord.dims().iter().all(|dim| dim != "y" && dim != "x") {
+        return Ok(coord.clone());
+    }
+
+    let output_dims = sampled_coordinate_dims(coord, source_dims);
+    let coord_source_shape = coordinate_shape(coord.dims(), source_dims, source_shape)?;
+    let coord_output_shape = coordinate_shape(&output_dims, source_dims, output_shape)?;
+    let coord_source_strides = crate::nd_utils::row_major_strides(&coord_source_shape)?;
+    let coord_output_strides = crate::nd_utils::row_major_strides(&coord_output_shape)?;
+    let coord_output_len = crate::nd_utils::checked_shape_size(&coord_output_shape)?;
+    let mut values = Vec::with_capacity(coord_output_len);
+
+    for output_offset in 0..coord_output_len {
+        let output_indices =
+            unravel_offset(output_offset, &coord_output_shape, &coord_output_strides);
+        let y_index = coordinate_dim_index(&output_dims, "y")
+            .map(|axis| output_indices[axis])
+            .unwrap_or(0);
+        let x_index = coordinate_dim_index(&output_dims, "x")
+            .map(|axis| output_indices[axis])
+            .unwrap_or(0);
+        let line_sample_offset = y_index * linesample.width() + x_index;
+        let source_index = valid_source_index(
+            linesample.rows()[line_sample_offset],
+            linesample.cols()[line_sample_offset],
+            source_height,
+            source_width,
+        );
+
+        let Some(yx_index) = source_index else {
+            values.push(f64::NAN);
+            continue;
+        };
+
+        let source_y = yx_index / source_width;
+        let source_x = yx_index % source_width;
+        let mut coord_source_offset = 0usize;
+        for (axis, dim) in coord.dims().iter().enumerate() {
+            let index = if dim == "y" {
+                source_y
+            } else if dim == "x" {
+                source_x
+            } else {
+                let output_axis = coordinate_dim_index(&output_dims, dim).expect(
+                    "non-spatial coordinate dim must be present in sampled coordinate dims",
+                );
+                output_indices[output_axis]
+            };
+            coord_source_offset += index * coord_source_strides[axis];
+        }
+        values.push(coord.values()[coord_source_offset]);
+    }
+
+    Coordinate::new(output_dims, values)
+}
+
+fn sampled_coordinate_dims(coord: &Coordinate, source_dims: &[String]) -> Vec<String> {
+    source_dims
+        .iter()
+        .filter(|dim| dim.as_str() == "y" || dim.as_str() == "x" || coord.dims().contains(dim))
+        .cloned()
+        .collect()
+}
+
+fn coordinate_shape(
+    coord_dims: &[String],
+    data_dims: &[String],
+    data_shape: &[usize],
+) -> Result<Vec<usize>> {
+    coord_dims
+        .iter()
+        .map(|dim| {
+            data_dims
+                .iter()
+                .position(|candidate| candidate == dim)
+                .map(|axis| data_shape[axis])
+                .ok_or_else(|| {
+                    RustySatError::invalid_input(format!(
+                        "coordinate dimension '{dim}' is not a data dimension"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn unravel_offset(offset: usize, shape: &[usize], strides: &[usize]) -> Vec<usize> {
+    (0..shape.len())
+        .map(|axis| (offset / strides[axis]) % shape[axis])
+        .collect()
+}
+
+fn coordinate_dim_index(dims: &[String], dim: &str) -> Option<usize> {
+    dims.iter().position(|candidate| candidate == dim)
 }
 
 fn fill_type_error(expected: &str) -> RustySatError {
@@ -522,5 +635,77 @@ mod tests {
         assert_eq!(output.mask().unwrap().masked_count(), 2);
         assert_eq!(output.mask().unwrap().is_masked(0), Some(true));
         assert_eq!(output.mask().unwrap().is_masked(3), Some(true));
+    }
+
+    #[test]
+    fn line_sample_promotes_axis_coordinates_to_sampled_2d_coords() {
+        let source =
+            DataArray::<u8>::from_vec_named(vec![2, 3], ["y", "x"], vec![1, 2, 3, 4, 5, 6])
+                .unwrap()
+                .with_coordinate("y", Coordinate::axis("y", vec![10.0, 20.0]).unwrap())
+                .unwrap()
+                .with_coordinate(
+                    "x",
+                    Coordinate::axis("x", vec![100.0, 200.0, 300.0]).unwrap(),
+                )
+                .unwrap();
+        let lines = LineSampleGrid::new(2, 2, [0, 1, -1, 0], [2, 0, 0, 3]).unwrap();
+
+        let output = sample_array_from_linesample(&source, &lines, 255, false).unwrap();
+
+        assert_eq!(output.shape_nd(), &[2, 2]);
+        assert_eq!(output.values(), &[3, 4, 255, 255]);
+        assert_eq!(output.coord("y").unwrap().dims(), &["y", "x"]);
+        assert_eq!(output.coord("x").unwrap().dims(), &["y", "x"]);
+        assert_eq!(output.coord("y").unwrap().values()[0..2], [10.0, 20.0]);
+        assert!(output.coord("y").unwrap().values()[2].is_nan());
+        assert!(output.coord("y").unwrap().values()[3].is_nan());
+        assert_eq!(output.coord("x").unwrap().values()[0..2], [300.0, 100.0]);
+        assert!(output.coord("x").unwrap().values()[2].is_nan());
+        assert!(output.coord("x").unwrap().values()[3].is_nan());
+    }
+
+    #[test]
+    fn line_sample_remaps_2d_and_band_spatial_coordinates() {
+        let source = DataArray::<u16>::from_vec_named(
+            vec![2, 2, 3],
+            ["bands", "y", "x"],
+            vec![
+                10, 11, 12, 13, 14, 15, //
+                20, 21, 22, 23, 24, 25,
+            ],
+        )
+        .unwrap()
+        .with_coordinate(
+            "longitude",
+            Coordinate::new(["y", "x"], vec![100.0, 101.0, 102.0, 110.0, 111.0, 112.0]).unwrap(),
+        )
+        .unwrap()
+        .with_coordinate(
+            "band_quality",
+            Coordinate::new(
+                ["bands", "y"],
+                vec![
+                    0.0, 1.0, //
+                    10.0, 11.0,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let lines = LineSampleGrid::new(1, 2, [0, 1], [2, 0]).unwrap();
+
+        let output = sample_array_from_linesample(&source, &lines, 999, false).unwrap();
+
+        assert_eq!(output.coord("longitude").unwrap().dims(), &["y", "x"]);
+        assert_eq!(output.coord("longitude").unwrap().values(), &[102.0, 110.0]);
+        assert_eq!(
+            output.coord("band_quality").unwrap().dims(),
+            &["bands", "y", "x"]
+        );
+        assert_eq!(
+            output.coord("band_quality").unwrap().values(),
+            &[0.0, 1.0, 10.0, 11.0]
+        );
     }
 }
