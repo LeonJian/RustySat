@@ -241,7 +241,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` S7-m6k: Add typed pipeline method/options for explicit-category bucket fraction output.
   - `[x]` S7-m6n: Add explicit `ResamplerCache` for prepared resamplers keyed by source geometry, destination area, and options, including cached borrowed/owned dataset helpers.
   - `[x]` S7-m6o: Add Pyresample-style lon/lat boundary and grid validity filtering foundations for coarse swath data reduction.
-  - `[ ]` S7-next: Add dataset slicing around data reduction, slicers, image containers, crop helpers, CRS cross-projection resampling, and automatic source-area/swath lookup from dataset attrs.
+  - `[x]` S7-m6p: Add same-projection `AreaDefinition` slicing and crop-source-area helpers after inspecting Pyresample `get_area_slices`, `slicer.py`, and Satpy `_reduce_data`.
+  - `[ ]` S7-next: Add dataset slicing around data reduction, swath/cross-projection slicers, image containers, CRS cross-projection resampling, and automatic source-area/swath lookup from dataset attrs.
 
 ### I: Image And Enhancement
 
@@ -338,7 +339,7 @@ Before starting or closing a milestone, check this table and update both the mil
 | M3-reader | R0.1, R0.3 or format-specific HSD base as needed, R0.8 partial, R1.3 AHI HSD/L1B priority slice, SC1 load path, W2 output path | Done for synthetic/local uncompressed  HSD basic PNG output; production HSD gaps remain for follow-up reader roadmap slices |
 | M4-resample | S1 partial, S2 partial, R1.13 or another NetCDF reader slice, SC3 resampling integration | Done for geometry, fixture-backed FCI/NetCDF reader slice, Scene resampling extension, and exact 2D KD point-index acceleration; native NetCDF/HDF and full Pyresample KD parity remain later roadmap work |
 | M5-enhance-composite | I1 broader stretch/finalize, I5 enhancer framework, C1 arithmetic, C2 spectral | Selected next |
-| M6-resampling-full | S1-S7 | Started with S2 top-k/weighted neighbour-info foundations and single-neighbour swath neighbour-info, S3 bilinear, S4 bucket avg/sum/count/fraction plus pipeline preparation including explicit and auto-discovered fractions, S5 EWA-style weighted accumulation plus pipeline preparation, S6 native repeat/aggregate including higher-dimensional f64 y/x axes and runtime-typed repeat/aggregate support, and S7 typed source-geometry pipeline foundations; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5-next, S6-next, and S7-next |
+| M6-resampling-full | S1-S7 | Started with S2 top-k/weighted neighbour-info foundations and single-neighbour swath neighbour-info, S3 bilinear, S4 bucket avg/sum/count/fraction plus pipeline preparation including explicit and auto-discovered fractions, S5 EWA-style weighted accumulation plus pipeline preparation, S6 native repeat/aggregate including higher-dimensional f64 y/x axes and runtime-typed repeat/aggregate support, and S7 typed source-geometry/cache/data-reduction/area-crop foundations; remaining gaps are S1-next, S2-next, S3-next, S4-next, S5-next, S6-next, and S7-next |
 | M7-writers-composites-full | W1-W5 and C0-C5 | Needs M2/M5 output and composite foundations |
 | M8-readers-modifiers-orbit | R0-R5, M1-M5, O1-O6 | Needs reader framework and test infrastructure |
 | M9-production | SC1-SC6, CLI, Y, T | Needs all prior functional milestones |
@@ -394,6 +395,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M6-resampling-full-m: Add runtime-typed native resampling with dtype-preserving repeat and `f64` aggregate means. Roadmap: S6.
   - `[x]` M6-resampling-full-n: Add explicit prepared-resampler cache and cached dataset resampling helpers. Roadmap: S7.
   - `[x]` M6-resampling-full-o: Add lon/lat grid and boundary validity filters for coarse swath data reduction. Roadmap: S7.
+  - `[x]` M6-resampling-full-p: Add same-projection area slices and crop-source-area helpers for the first Satpy/Pyresample-style area data-reduction path. Roadmap: S7.
 - `[ ]` M7-writers-composites-full: GeoTIFF, CF, and broader composite parity.
 - `[ ]` M8-readers-modifiers-orbit: Expand real readers, modifiers, and orbit/geolocation support.
 - `[ ]` M9-production: Complete Scene API, CLI, QA, benchmarks, and CI hardening.
@@ -499,7 +501,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | Can | Cannot |
 |-----|--------|
 | Shared Pyresample-style geometry foundations: `GeometryDefinition`, `CoordinateDefinition`, and `GridDefinition` for shape/size/dimensionality and finite lon/lat-backed coordinate arrays | Full Pyresample equality/hash/cartesian-coordinate behavior |
-| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation, shared geometry/projection trait implementations, and allocation-free projection-coordinate iterators | Stacked/dynamic areas, spherical polygon math, overlap utilities |
+| `AreaDefinition`: id, projection, shape, extent, pixel-size helpers, guarded YAML loading, projection-unit resolution derivation, shared geometry/projection trait implementations, allocation-free projection-coordinate iterators, same-projection area slices, and crop-source-area helpers | Stacked/dynamic areas, spherical polygon math, cross-projection/swath slicers, overlap utilities |
 | `SwathDefinition`: dimension-only or lon/lat coordinate-backed swaths, WGS84 CRS convention, guarded YAML loading, and shared geometry trait implementation | Real geocentric resolution, aggregation, boundary extraction |
 | `ProjCrs`: WGS84/PROJ/EPSG parsing, normalization (numeric canonicalization, `latlong`→`longlat`, `+init=EPSG:`→`epsg`), identity-only transforms | Real cross-CRS transforms; backend is `MetadataOnly` |
 | `Coordinate2D` finite-validated coordinate + transform API (identity for geographic/same-CRS) | Projected or cross-CRS forward/inverse transforms (returns `Unsupported`) |
@@ -511,7 +513,7 @@ Early tests should focus on construction and API shape. Later tests should compa
 | `BucketResampler` / `BucketFractionResampler`: lon/lat swath-to-geographic-area bucket average, sum, count, and explicit/auto-category fraction for 2D f64 grids; fractions return `categories,y,x` arrays; skipna/fill behavior, owned resampling, destination x/y coordinates, metadata preservation, Satpy-like count attrs, and typed pipeline preparation through `SourceGeometry::Swath` | Projected target backends, multidimensional/band-aware buckets, chunked/lazy bucket execution, and Scene-level preparation integration |
 | `EwaResampler`: dependency-free lon/lat swath-to-geographic-area EWA-style weighted accumulation for 2D f64 grids, configurable radius/weight/fill/masked-missing policy, source-mask skipping, destination x/y coordinates, metadata preservation, owned resampling, and typed pipeline preparation through `SourceGeometry::Swath` | Full Pyresample Fornav/LLS2 parity, scan-aware `rows_per_scan`, maximum-weight mode, chunked execution, multi-band sampling, geocentric/cross-projection distances, and production EWA performance |
 | `NativeResampler`: Satpy-style native repeat for integer upscaling, nanmean aggregation for integer downscaling, equal-shape pass-through, mixed-axis rejection, mask propagation, destination x/y coordinates, metadata preservation, higher-dimensional arrays by resampling named `y,x` axes, runtime-typed identity/repeat that preserves `f32`/`f64`/`u8`/`u16`/`i16`, and aggregate means promoted to `f64` | Lazy/chunked native execution and full Satpy area-choice integration |
-| `prepare_resampler`, `prepare_resampler_for_geometry`, `ResamplerCache`, `resample_dataset`, `resample_dataset_owned`, `SourceGeometry`, and `data_reduce`: typed Satpy-style pipeline helpers for selecting current area-based nearest/bilinear/native resamplers and swath-based bucket/EWA resamplers, including explicit-category bucket fractions, explicit prepared-resampler caching, Pyresample-style lon/lat validity filtering for coarse swath data reduction, and borrowed/consuming dataset paths | Automatic source-area/swath lookup from dataset attrs, dataset slicing around data reduction, slicers, crop helpers, or CRS cross-projection resampling |
+| `prepare_resampler`, `prepare_resampler_for_geometry`, `ResamplerCache`, `resample_dataset`, `resample_dataset_owned`, `SourceGeometry`, `data_reduce`, and `slicer`: typed Satpy-style pipeline helpers for selecting current area-based nearest/bilinear/native resamplers and swath-based bucket/EWA resamplers, including explicit-category bucket fractions, explicit prepared-resampler caching, Pyresample-style lon/lat validity filtering, same-projection area crop helpers, and borrowed/consuming dataset paths | Automatic source-area/swath lookup from dataset attrs, dataset slicing around data reduction, swath/cross-projection slicers, or CRS cross-projection resampling |
 
 ### rusty_sat_composites
 

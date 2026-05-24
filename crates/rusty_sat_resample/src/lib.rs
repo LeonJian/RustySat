@@ -12,6 +12,7 @@ pub mod nearest;
 pub mod neighbour;
 pub mod pipeline;
 pub mod scene;
+pub mod slicer;
 pub mod spatial_index;
 pub mod swath;
 
@@ -61,6 +62,10 @@ pub use pipeline::{
     ResamplerCache, ResamplerMethod, SourceGeometry,
 };
 pub use scene::SceneResampleExt;
+pub use slicer::{
+    crop_source_area, get_area_slices, get_area_slices_with_divisibility, slice_area, AreaCrop,
+    AreaSlice,
+};
 pub use spatial_index::{KdPointIndex2D, NearestPoint, Point2D};
 pub use swath::{load_swath_from_str, load_swaths_from_str, SwathDefinition};
 
