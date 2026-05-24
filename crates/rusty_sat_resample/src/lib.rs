@@ -4,6 +4,7 @@ pub mod area;
 pub mod bilinear;
 pub mod bucket;
 pub mod crs;
+pub mod data_reduce;
 pub mod ewa;
 pub mod geometry;
 pub mod native;
@@ -27,6 +28,10 @@ pub use bucket::{
     BucketStatistic,
 };
 pub use crs::{Coordinate2D, CrsSource, ProjCrs, ProjectionBackendStrategy, TransformDirection};
+pub use data_reduce::{
+    get_valid_index_from_lonlat_boundaries, get_valid_index_from_lonlat_grid,
+    lonlat_grid_boundaries, LonLatBoundaries,
+};
 pub use ewa::{resample_swath_ewa, resample_swath_ewa_owned, EwaOptions, EwaResampler};
 pub use geometry::{
     CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
