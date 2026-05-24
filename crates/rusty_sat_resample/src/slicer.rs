@@ -12,7 +12,7 @@
 //! projection transform backend yet.
 
 use crate::AreaDefinition;
-use rusty_sat_core::{Result, RustySatError};
+use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::ops::Range;
 
 const ROUND_HALF_EVEN_EPSILON: f64 = 1.0e-10;
@@ -156,6 +156,29 @@ pub fn crop_source_area(source: &AreaDefinition, target: &AreaDefinition) -> Res
     })
 }
 
+pub fn slice_dataset_yx(dataset: &Dataset, slices: &AreaSlice) -> Result<Dataset> {
+    let array = dataset.array().ok_or_else(|| {
+        RustySatError::invalid_input(format!(
+            "dataset '{}' has no array to slice",
+            dataset.id().name()
+        ))
+    })?;
+    let mut sliced = dataset.clone();
+    sliced.set_array(array.slice_yx(slices.y(), slices.x())?);
+    Ok(sliced)
+}
+
+pub fn slice_dataset_yx_owned(mut dataset: Dataset, slices: &AreaSlice) -> Result<Dataset> {
+    let array = dataset.take_array().ok_or_else(|| {
+        RustySatError::invalid_input(format!(
+            "dataset '{}' has no array to slice",
+            dataset.id().name()
+        ))
+    })?;
+    dataset.set_array(array.slice_yx_owned(slices.y(), slices.x())?);
+    Ok(dataset)
+}
+
 fn ensure_same_projection(source: &AreaDefinition, target: &AreaDefinition) -> Result<()> {
     let source_crs = source.crs()?;
     let target_crs = target.crs()?;
@@ -255,6 +278,7 @@ fn make_range_divisible(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_sat_core::{AnyDataArray, DataArray, DataId};
     use std::collections::BTreeMap;
 
     fn lonlat_area(id: &str, height: usize, width: usize, extent: [f64; 4]) -> AreaDefinition {
@@ -361,5 +385,24 @@ mod tests {
         // x stop clamps to source width; y starts from the lower-left corner.
         assert_eq!(slices.x().end, 4);
         assert_eq!(slices.y().start, 0);
+    }
+
+    #[test]
+    fn slices_dataset_arrays_with_borrowed_and_owned_paths() {
+        let slices = AreaSlice::new(0..2, 1..3).unwrap();
+        let id = DataId::new("counts").unwrap();
+        let array = DataArray::<u16>::from_vec(vec![3, 4], (0..12).collect::<Vec<_>>()).unwrap();
+        let dataset = Dataset::new(id).with_array(array);
+
+        let borrowed = slice_dataset_yx(&dataset, &slices).unwrap();
+        let owned = slice_dataset_yx_owned(dataset, &slices).unwrap();
+
+        assert!(matches!(borrowed.array().unwrap(), AnyDataArray::U16(_)));
+        assert_eq!(borrowed.array().unwrap().shape(), &[2, 2]);
+        assert_eq!(
+            borrowed.array().unwrap().values_as_f64(),
+            vec![4.0, 5.0, 8.0, 9.0]
+        );
+        assert_eq!(borrowed, owned);
     }
 }

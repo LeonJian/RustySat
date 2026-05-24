@@ -15,6 +15,7 @@
 
 use crate::{Result, RustySatError};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Numeric element types supported by the first Rusty Sat data-array layer.
@@ -495,6 +496,17 @@ impl<T: NumericElement> DataArray<T> {
         self.values.get(offset).copied()
     }
 
+    pub fn slice_yx(&self, y: Range<usize>, x: Range<usize>) -> Result<Self> {
+        slice_array_yx(self, y, x)
+    }
+
+    pub fn slice_yx_owned(self, y: Range<usize>, x: Range<usize>) -> Result<Self> {
+        if is_full_yx_slice(&self, &y, &x)? {
+            return Ok(self);
+        }
+        slice_array_yx(&self, y, x)
+    }
+
     pub fn into_values(self) -> Vec<T> {
         self.values
     }
@@ -650,6 +662,26 @@ impl AnyDataArray {
         }
     }
 
+    pub fn slice_yx(&self, y: Range<usize>, x: Range<usize>) -> Result<Self> {
+        Ok(match self {
+            Self::F32(array) => array.slice_yx(y, x)?.into(),
+            Self::F64(array) => array.slice_yx(y, x)?.into(),
+            Self::U8(array) => array.slice_yx(y, x)?.into(),
+            Self::U16(array) => array.slice_yx(y, x)?.into(),
+            Self::I16(array) => array.slice_yx(y, x)?.into(),
+        })
+    }
+
+    pub fn slice_yx_owned(self, y: Range<usize>, x: Range<usize>) -> Result<Self> {
+        Ok(match self {
+            Self::F32(array) => array.slice_yx_owned(y, x)?.into(),
+            Self::F64(array) => array.slice_yx_owned(y, x)?.into(),
+            Self::U8(array) => array.slice_yx_owned(y, x)?.into(),
+            Self::U16(array) => array.slice_yx_owned(y, x)?.into(),
+            Self::I16(array) => array.slice_yx_owned(y, x)?.into(),
+        })
+    }
+
     pub fn require_dims_exact(&self, expected: &[&str]) -> Result<()> {
         match self {
             Self::F32(array) => array.require_dims_exact(expected),
@@ -752,6 +784,169 @@ fn into_numeric_f64_values_and_mask<T: NumericElement>(
 ) -> (Vec<f64>, Option<ValidityMask>) {
     let (values, _, mask) = array.into_parts();
     (numeric_values_into_f64(values), mask)
+}
+
+fn slice_array_yx<T: NumericElement>(
+    array: &DataArray<T>,
+    y: Range<usize>,
+    x: Range<usize>,
+) -> Result<DataArray<T>> {
+    validate_range(&y, array.size_of_dim("y"), "y")?;
+    validate_range(&x, array.size_of_dim("x"), "x")?;
+
+    let ranges = ranges_for_yx(array, y, x)?;
+    let output_shape = ranges
+        .iter()
+        .map(|range| range.end - range.start)
+        .collect::<Vec<_>>();
+    let output_len = output_shape.iter().product();
+    let mut values = Vec::with_capacity(output_len);
+    let mut mask_flags = array.mask.as_ref().map(|_| Vec::with_capacity(output_len));
+
+    for output_offset in 0..output_len {
+        let output_indexes = unravel_offset(&output_shape, output_offset)?;
+        let source_indexes = output_indexes
+            .iter()
+            .zip(&ranges)
+            .map(|(idx, range)| range.start + idx)
+            .collect::<Vec<_>>();
+        let source_offset = row_major_offset(&array.shape, &source_indexes).ok_or_else(|| {
+            RustySatError::invalid_input("computed source slice index outside array shape")
+        })?;
+        values.push(array.values[source_offset]);
+        if let Some(flags) = mask_flags.as_mut() {
+            flags.push(
+                array
+                    .mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(source_offset))
+                    .unwrap_or(false),
+            );
+        }
+    }
+
+    let mut sliced = DataArray::from_vec_named(output_shape, array.dims.clone(), values)?;
+    for (name, coord) in &array.coords {
+        sliced.set_coordinate(
+            name.clone(),
+            slice_coordinate(coord, &array.shape, &array.dims, &ranges)?,
+        )?;
+    }
+    if let Some(flags) = mask_flags {
+        sliced.set_mask(ValidityMask::from_masked_flags(flags))?;
+    }
+    Ok(sliced)
+}
+
+fn is_full_yx_slice<T: NumericElement>(
+    array: &DataArray<T>,
+    y: &Range<usize>,
+    x: &Range<usize>,
+) -> Result<bool> {
+    validate_range(y, array.size_of_dim("y"), "y")?;
+    validate_range(x, array.size_of_dim("x"), "x")?;
+    let y_dim = array.size_of_dim("y").unwrap();
+    let x_dim = array.size_of_dim("x").unwrap();
+    Ok(y.start == 0 && y.end == y_dim && x.start == 0 && x.end == x_dim)
+}
+
+fn ranges_for_yx<T: NumericElement>(
+    array: &DataArray<T>,
+    y: Range<usize>,
+    x: Range<usize>,
+) -> Result<Vec<Range<usize>>> {
+    let y_dim = array.dim_index("y").ok_or_else(|| {
+        RustySatError::invalid_input("data array requires a 'y' dimension for slicing")
+    })?;
+    let x_dim = array.dim_index("x").ok_or_else(|| {
+        RustySatError::invalid_input("data array requires an 'x' dimension for slicing")
+    })?;
+    let mut ranges = array.shape.iter().map(|dim| 0..*dim).collect::<Vec<_>>();
+    ranges[y_dim] = y;
+    ranges[x_dim] = x;
+    Ok(ranges)
+}
+
+fn validate_range(range: &Range<usize>, dim_len: Option<usize>, dim_name: &str) -> Result<()> {
+    let dim_len = dim_len.ok_or_else(|| {
+        RustySatError::invalid_input(format!("data array requires a '{dim_name}' dimension"))
+    })?;
+    if range.start >= range.end || range.end > dim_len {
+        return Err(RustySatError::invalid_input(format!(
+            "{dim_name} slice {:?} is outside dimension length {dim_len}",
+            range
+        )));
+    }
+    Ok(())
+}
+
+fn slice_coordinate(
+    coord: &Coordinate,
+    array_shape: &[usize],
+    array_dims: &[String],
+    array_ranges: &[Range<usize>],
+) -> Result<Coordinate> {
+    if coord.dims().is_empty() {
+        return Ok(coord.clone());
+    }
+    if !coord.dims().iter().any(|dim| dim == "y" || dim == "x") {
+        return Ok(coord.clone());
+    }
+
+    let mut coord_shape = Vec::with_capacity(coord.dims().len());
+    let mut coord_ranges = Vec::with_capacity(coord.dims().len());
+    for dim in coord.dims() {
+        let dim_index = array_dims
+            .iter()
+            .position(|candidate| candidate == dim)
+            .ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "coordinate dimension '{dim}' is not a data dimension"
+                ))
+            })?;
+        coord_shape.push(array_shape[dim_index]);
+        coord_ranges.push(array_ranges[dim_index].clone());
+    }
+
+    let output_shape = coord_ranges
+        .iter()
+        .map(|range| range.end - range.start)
+        .collect::<Vec<_>>();
+    let output_len = output_shape.iter().product();
+    let mut values = Vec::with_capacity(output_len);
+    for output_offset in 0..output_len {
+        let output_indexes = unravel_offset(&output_shape, output_offset)?;
+        let source_indexes = output_indexes
+            .iter()
+            .zip(&coord_ranges)
+            .map(|(idx, range)| range.start + idx)
+            .collect::<Vec<_>>();
+        let source_offset = row_major_offset(&coord_shape, &source_indexes).ok_or_else(|| {
+            RustySatError::invalid_input("computed source coordinate slice outside shape")
+        })?;
+        values.push(coord.values()[source_offset]);
+    }
+    Coordinate::new(coord.dims().to_vec(), values)
+}
+
+fn unravel_offset(shape: &[usize], mut offset: usize) -> Result<Vec<usize>> {
+    if shape.is_empty() {
+        return Err(RustySatError::invalid_input(
+            "cannot unravel offset for empty shape",
+        ));
+    }
+    let mut indexes = vec![0; shape.len()];
+    for dim in (0..shape.len()).rev() {
+        let dim_len = shape[dim];
+        if dim_len == 0 {
+            return Err(RustySatError::invalid_input(
+                "cannot unravel offset for zero-sized dimension",
+            ));
+        }
+        indexes[dim] = offset % dim_len;
+        offset /= dim_len;
+    }
+    Ok(indexes)
 }
 
 impl From<DataArray<f32>> for AnyDataArray {
@@ -1108,6 +1303,87 @@ mod tests {
         assert_eq!(array.len(), 3);
         assert!(array.as_f64().is_none());
         assert_eq!(array.values_as_f64(), vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn slices_yx_dimensions_and_preserves_dtype_mask_and_coords() {
+        let array = DataArray::<u16>::from_vec_named(
+            vec![2, 3, 4],
+            ["bands", "y", "x"],
+            (0..24).collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags(
+            (0..24).map(|idx| idx == 6 || idx == 21),
+        ))
+        .unwrap()
+        .with_coordinate("y", Coordinate::axis("y", vec![10.0, 20.0, 30.0]).unwrap())
+        .unwrap()
+        .with_coordinate(
+            "longitude",
+            Coordinate::new(
+                ["y", "x"],
+                vec![
+                    0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .with_coordinate("acq_time", Coordinate::scalar(42.0))
+        .unwrap();
+
+        let sliced = array.slice_yx(1..3, 1..4).unwrap();
+
+        assert_eq!(sliced.dtype(), DataType::U16);
+        assert_eq!(sliced.shape_nd(), &[2, 2, 3]);
+        assert_eq!(sliced.dims(), &["bands", "y", "x"]);
+        assert_eq!(
+            sliced.values(),
+            &[5, 6, 7, 9, 10, 11, 17, 18, 19, 21, 22, 23]
+        );
+        assert_eq!(sliced.mask().unwrap().masked_count(), 2);
+        assert_eq!(sliced.is_masked(1), Some(true));
+        assert_eq!(sliced.is_masked(9), Some(true));
+        assert_eq!(sliced.coord("y").unwrap().values(), &[20.0, 30.0]);
+        assert_eq!(
+            sliced.coord("longitude").unwrap().values(),
+            &[11.0, 12.0, 13.0, 21.0, 22.0, 23.0]
+        );
+        assert_eq!(sliced.coord("acq_time").unwrap().values(), &[42.0]);
+        assert!(sliced.chunks().is_none());
+    }
+
+    #[test]
+    fn runtime_typed_owned_slice_preserves_dtype_and_full_slice_can_keep_chunks() {
+        let array = DataArray::<u8>::from_vec(vec![2, 3], vec![1, 2, 3, 4, 5, 6])
+            .unwrap()
+            .with_chunks(ChunkShape::new(vec![1, 3]).unwrap())
+            .unwrap();
+
+        let full = AnyDataArray::from(array.clone())
+            .slice_yx_owned(0..2, 0..3)
+            .unwrap();
+        let cropped = AnyDataArray::from(array)
+            .slice_yx_owned(1..2, 1..3)
+            .unwrap();
+
+        assert_eq!(full.dtype(), DataType::U8);
+        assert_eq!(full.chunks().unwrap().as_slice(), &[1, 3]);
+        assert_eq!(cropped.dtype(), DataType::U8);
+        assert_eq!(cropped.shape(), &[1, 2]);
+        assert_eq!(cropped.values_as_f64(), vec![5.0, 6.0]);
+        assert!(cropped.chunks().is_none());
+    }
+
+    #[test]
+    fn yx_slice_rejects_missing_or_out_of_bounds_dimensions() {
+        let vector = DataArray::<u8>::from_vec_named(vec![3], ["x"], vec![1, 2, 3]).unwrap();
+        let array = DataArray::<u8>::from_vec(vec![2, 2], vec![1, 2, 3, 4]).unwrap();
+
+        assert!(vector.slice_yx(0..1, 0..1).is_err());
+        assert!(array.slice_yx(0..3, 0..1).is_err());
+        assert!(array.slice_yx(1..1, 0..1).is_err());
     }
 
     #[test]

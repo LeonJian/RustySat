@@ -884,6 +884,10 @@ impl Dataset {
         self.data
     }
 
+    pub fn take_array(&mut self) -> Option<AnyDataArray> {
+        self.data.take()
+    }
+
     pub fn set_data(&mut self, data: DataGrid) {
         self.data = Some(data.into());
     }
