@@ -226,4 +226,23 @@ mod tests {
         };
         assert_eq!(swath.shape(), (2, 2));
     }
+
+    #[test]
+    fn resample_nearest_convenience_matches_explicit() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let destination = area("destination", 1, 1, [0.0, 1.0, 1.0, 2.0]);
+        let container = ImageContainer::from_area(dataset(2, 2), source).unwrap();
+
+        let explicit = container
+            .resample(
+                &destination,
+                ResampleOptions::nearest_area().with_fill_value(-999.0),
+            )
+            .unwrap();
+        let convenience = container
+            .resample_nearest(&destination, None, -999.0)
+            .unwrap();
+
+        assert_eq!(explicit, convenience);
+    }
 }
