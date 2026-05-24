@@ -5,10 +5,12 @@
 //! - `deps/pyresample/pyresample/image.py::ImageContainer.get_array_from_linesample`
 //!
 //! This is the first Rust-native foundation for Pyresample's line/sample path.
-//! It deliberately starts with 2D `f64` grids because current Rusty Sat area
-//! resamplers still use `DataGrid` internally for the common sampling paths.
+//! It supports both the early `DataGrid` API and runtime-typed arrays so callers
+//! can keep integer/HDR buffers out of unnecessary `f64` promotion.
 
-use rusty_sat_core::{DataGrid, Result, RustySatError, ValidityMask};
+use rusty_sat_core::{
+    AnyDataArray, DataArray, DataGrid, NumericElement, Result, RustySatError, ValidityMask,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineSampleGrid {
@@ -16,6 +18,72 @@ pub struct LineSampleGrid {
     width: usize,
     rows: Vec<isize>,
     cols: Vec<isize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineSampleFillValue {
+    F32(f32),
+    F64(f64),
+    U8(u8),
+    U16(u16),
+    I16(i16),
+}
+
+impl LineSampleFillValue {
+    pub fn f32(value: f32) -> Self {
+        Self::F32(value)
+    }
+
+    pub fn f64(value: f64) -> Self {
+        Self::F64(value)
+    }
+
+    pub fn u8(value: u8) -> Self {
+        Self::U8(value)
+    }
+
+    pub fn u16(value: u16) -> Self {
+        Self::U16(value)
+    }
+
+    pub fn i16(value: i16) -> Self {
+        Self::I16(value)
+    }
+
+    fn as_f32(self) -> Result<f32> {
+        match self {
+            Self::F32(value) => Ok(value),
+            _ => Err(fill_type_error("f32")),
+        }
+    }
+
+    fn as_f64(self) -> Result<f64> {
+        match self {
+            Self::F64(value) => Ok(value),
+            _ => Err(fill_type_error("f64")),
+        }
+    }
+
+    fn as_u8(self) -> Result<u8> {
+        match self {
+            Self::U8(value) => Ok(value),
+            _ => Err(fill_type_error("u8")),
+        }
+    }
+
+    fn as_u16(self) -> Result<u16> {
+        match self {
+            Self::U16(value) => Ok(value),
+            _ => Err(fill_type_error("u16")),
+        }
+    }
+
+    fn as_i16(self) -> Result<i16> {
+        match self {
+            Self::I16(value) => Ok(value),
+            _ => Err(fill_type_error("i16")),
+        }
+    }
 }
 
 impl LineSampleGrid {
@@ -108,7 +176,46 @@ pub fn sample_grid_from_linesample(
     fill_value: f64,
     mask_missing: bool,
 ) -> Result<DataGrid> {
-    let (source_height, source_width) = source.shape();
+    sample_array_from_linesample(source, linesample, fill_value, mask_missing)
+}
+
+pub fn sample_any_from_linesample(
+    source: &AnyDataArray,
+    linesample: &LineSampleGrid,
+    fill_value: LineSampleFillValue,
+    mask_missing: bool,
+) -> Result<AnyDataArray> {
+    Ok(match source {
+        AnyDataArray::F32(array) => {
+            sample_array_from_linesample(array, linesample, fill_value.as_f32()?, mask_missing)?
+                .into()
+        }
+        AnyDataArray::F64(array) => {
+            sample_array_from_linesample(array, linesample, fill_value.as_f64()?, mask_missing)?
+                .into()
+        }
+        AnyDataArray::U8(array) => {
+            sample_array_from_linesample(array, linesample, fill_value.as_u8()?, mask_missing)?
+                .into()
+        }
+        AnyDataArray::U16(array) => {
+            sample_array_from_linesample(array, linesample, fill_value.as_u16()?, mask_missing)?
+                .into()
+        }
+        AnyDataArray::I16(array) => {
+            sample_array_from_linesample(array, linesample, fill_value.as_i16()?, mask_missing)?
+                .into()
+        }
+    })
+}
+
+pub fn sample_array_from_linesample<T: NumericElement>(
+    source: &DataArray<T>,
+    linesample: &LineSampleGrid,
+    fill_value: T,
+    mask_missing: bool,
+) -> Result<DataArray<T>> {
+    let (source_height, source_width) = source.shape_yx()?;
     let source_values = source.values();
     let source_mask = source.mask();
     let mut output = Vec::with_capacity(linesample.len());
@@ -138,11 +245,15 @@ pub fn sample_grid_from_linesample(
         }
     }
 
-    let mut grid = DataGrid::new(linesample.height(), linesample.width(), output)?;
+    let mut array = DataArray::from_vec_named(
+        vec![linesample.height(), linesample.width()],
+        ["y", "x"],
+        output,
+    )?;
     if let Some(flags) = mask_flags {
-        grid.set_mask(ValidityMask::from_masked_flags(flags))?;
+        array.set_mask(ValidityMask::from_masked_flags(flags))?;
     }
-    Ok(grid)
+    Ok(array)
 }
 
 fn valid_source_index(
@@ -159,9 +270,16 @@ fn valid_source_index(
     Some(row * source_width + col)
 }
 
+fn fill_type_error(expected: &str) -> RustySatError {
+    RustySatError::invalid_input(format!(
+        "line/sample fill value must match source dtype {expected}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_sat_core::DataType;
 
     fn source_grid() -> DataGrid {
         DataGrid::new(3, 3, (0..9).map(f64::from).collect()).unwrap()
@@ -220,5 +338,54 @@ mod tests {
 
         assert_eq!(output.values(), &[-1.0]);
         assert!(output.mask().is_none());
+    }
+
+    #[test]
+    fn samples_runtime_typed_arrays_without_dtype_promotion() {
+        let source = AnyDataArray::from(
+            DataArray::<u16>::from_vec_named(vec![2, 2], ["y", "x"], vec![10, 20, 30, 40]).unwrap(),
+        );
+        let lines = LineSampleGrid::new(2, 2, [0, 1, -1, 0], [0, 1, 0, 4]).unwrap();
+
+        let output =
+            sample_any_from_linesample(&source, &lines, LineSampleFillValue::u16(999), false)
+                .unwrap();
+
+        assert_eq!(output.dtype(), DataType::U16);
+        assert_eq!(output.values_as_f64(), vec![10.0, 40.0, 999.0, 999.0]);
+        assert!(output.mask().is_none());
+    }
+
+    #[test]
+    fn runtime_typed_masked_missing_preserves_dtype_and_masks() {
+        let source = AnyDataArray::from(
+            DataArray::<i16>::from_vec_named(vec![2, 2], ["y", "x"], vec![1, 2, 3, 4])
+                .unwrap()
+                .with_mask(ValidityMask::from_masked_flags([false, true, false, false]))
+                .unwrap(),
+        );
+        let lines = LineSampleGrid::new(2, 2, [0, 0, 1, -1], [0, 1, 1, 0]).unwrap();
+
+        let output =
+            sample_any_from_linesample(&source, &lines, LineSampleFillValue::i16(-999), true)
+                .unwrap();
+
+        assert_eq!(output.dtype(), DataType::I16);
+        assert_eq!(output.values_as_f64(), vec![1.0, -999.0, 4.0, -999.0]);
+        assert_eq!(output.mask().unwrap().masked_count(), 2);
+    }
+
+    #[test]
+    fn runtime_typed_sampling_rejects_mismatched_fill_dtype() {
+        let source = AnyDataArray::from(
+            DataArray::<u8>::from_vec_named(vec![1, 1], ["y", "x"], vec![5]).unwrap(),
+        );
+        let lines = LineSampleGrid::new(1, 1, [0], [0]).unwrap();
+
+        let err =
+            sample_any_from_linesample(&source, &lines, LineSampleFillValue::f64(-1.0), false)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("must match source dtype u8"));
     }
 }

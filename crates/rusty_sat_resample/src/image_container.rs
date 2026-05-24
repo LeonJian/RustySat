@@ -14,9 +14,11 @@ use crate::pipeline::{
     SourceGeometry,
 };
 use crate::source_geometry::{source_geometry_from_dataset, with_area_attr};
-use crate::{sample_grid_from_linesample, LineSampleGrid};
+use crate::{
+    sample_any_from_linesample, sample_grid_from_linesample, LineSampleFillValue, LineSampleGrid,
+};
 use crate::{AreaDefinition, SwathDefinition};
-use rusty_sat_core::{DataGrid, Dataset, Result, RustySatError};
+use rusty_sat_core::{AnyDataArray, DataGrid, Dataset, Result, RustySatError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageContainer {
@@ -94,6 +96,44 @@ impl ImageContainer {
             ))
         })?;
         sample_grid_from_linesample(source, linesample, f64::NAN, true)
+    }
+
+    pub fn get_any_array_from_linesample(
+        &self,
+        linesample: &LineSampleGrid,
+        fill_value: LineSampleFillValue,
+    ) -> Result<AnyDataArray> {
+        let SourceGeometry::Area(_) = self.source else {
+            return Err(RustySatError::unsupported(
+                "line/sample indexing from non-area image container geometry",
+            ));
+        };
+        let source = self.dataset.array().ok_or_else(|| {
+            RustySatError::invalid_input(format!(
+                "image container dataset '{}' has no array data",
+                self.dataset.id().name()
+            ))
+        })?;
+        sample_any_from_linesample(source, linesample, fill_value, false)
+    }
+
+    pub fn get_any_array_from_linesample_masked_missing(
+        &self,
+        linesample: &LineSampleGrid,
+        fill_value: LineSampleFillValue,
+    ) -> Result<AnyDataArray> {
+        let SourceGeometry::Area(_) = self.source else {
+            return Err(RustySatError::unsupported(
+                "line/sample indexing from non-area image container geometry",
+            ));
+        };
+        let source = self.dataset.array().ok_or_else(|| {
+            RustySatError::invalid_input(format!(
+                "image container dataset '{}' has no array data",
+                self.dataset.id().name()
+            ))
+        })?;
+        sample_any_from_linesample(source, linesample, fill_value, true)
     }
 
     pub fn resample(&self, destination: &AreaDefinition, options: ResampleOptions) -> Result<Self> {
@@ -295,5 +335,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.values(), &[0.0, 3.0, -999.0, -999.0]);
+    }
+
+    #[test]
+    fn image_container_samples_runtime_typed_linesample() {
+        let source = area("source", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let dataset = Dataset::new(DataId::new("image").unwrap()).with_array(
+            rusty_sat_core::DataArray::<u16>::from_vec_named(
+                vec![2, 2],
+                ["y", "x"],
+                vec![10, 20, 30, 40],
+            )
+            .unwrap(),
+        );
+        let linesample = LineSampleGrid::new(1, 2, [0, -1], [1, 0]).unwrap();
+        let container = ImageContainer::from_area(dataset, source).unwrap();
+
+        let output = container
+            .get_any_array_from_linesample(&linesample, LineSampleFillValue::u16(999))
+            .unwrap();
+
+        assert_eq!(output.values_as_f64(), vec![20.0, 999.0]);
     }
 }

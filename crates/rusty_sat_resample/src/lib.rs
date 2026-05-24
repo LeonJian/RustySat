@@ -43,7 +43,8 @@ pub use geometry::{
 pub use image_container::ImageContainer;
 pub use linesample::{
     get_image_from_linesample, get_image_from_linesample_masked_missing,
-    sample_grid_from_linesample, LineSampleGrid,
+    sample_any_from_linesample, sample_array_from_linesample, sample_grid_from_linesample,
+    LineSampleFillValue, LineSampleGrid,
 };
 pub use native::{
     native_aggregate_mean_2d, native_aggregate_mean_2d_owned, native_aggregate_mean_yx,
