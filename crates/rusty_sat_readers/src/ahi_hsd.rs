@@ -6,20 +6,22 @@
 //!   blocks 1-5 and reads them in sequence before dataset loading.
 //!
 //! This module is intentionally limited to fixed-size initial header parsing,
-//! uncompressed raw-count loading, and first-pass calibration. Satpy's display
-//! calibration path uses float32-like arithmetic for memory-efficient imagery;
-//! Rusty Sat also exposes f64 calibration helpers for future scientific/HDR
-//! output paths where precision preservation matters more than display memory.
+//! bounded bzip2/uncompressed raw-count loading, segment assembly, geostationary
+//! area metadata, and first-pass calibration. Satpy's display calibration path
+//! uses float32-like arithmetic for memory-efficient imagery; Rusty Sat also
+//! exposes f64 calibration helpers for future scientific/HDR output paths where
+//! precision preservation matters more than display memory.
 
 use crate::filename_pattern::PatternValue;
 use crate::yaml_reader::FileMatch;
 use crate::Reader;
 use bzip2::bufread::MultiBzDecoder;
 use rusty_sat_core::{
-    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, NumericElement, ReaderInventory,
-    Result, RustySatError, ValidityMask, WavelengthRange,
+    AnyDataArray, Coordinate, DataArray, DataId, Dataset, MetadataValue, NumericElement,
+    ReaderInventory, Result, RustySatError, ValidityMask, WavelengthRange,
 };
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -268,6 +270,7 @@ impl AhiHsdFileHandler {
     pub fn dataset_stub(&self) -> Result<Dataset> {
         let mut dataset = Dataset::new(self.dataset_id()?);
         self.attach_common_attrs(&mut dataset)?;
+        self.attach_area_attr(&mut dataset)?;
         Ok(dataset)
     }
 
@@ -277,18 +280,20 @@ impl AhiHsdFileHandler {
             *value == self.header.calibration.error_pixel_count_value
                 || *value == self.header.calibration.outside_scan_pixel_count_value
         }));
-        let array = DataArray::<u16>::from_vec_named(
-            vec![
-                usize::from(self.header.data.lines),
-                usize::from(self.header.data.columns),
-            ],
-            ["y", "x"],
-            values,
-        )?
-        .with_mask(mask)?;
+        let array = self
+            .attach_projection_coordinates(DataArray::<u16>::from_vec_named(
+                vec![
+                    usize::from(self.header.data.lines),
+                    usize::from(self.header.data.columns),
+                ],
+                ["y", "x"],
+                values,
+            )?)?
+            .with_mask(mask)?;
 
         let mut dataset = Dataset::new(self.dataset_id()?);
         self.attach_common_attrs(&mut dataset)?;
+        self.attach_area_attr(&mut dataset)?;
         dataset.insert_attr("calibration", "counts")?;
         dataset.set_array(array);
         Ok(dataset)
@@ -308,18 +313,20 @@ impl AhiHsdFileHandler {
                 || *value == self.header.calibration.outside_scan_pixel_count_value
         }));
         let calibrated_values = self.calibrate_counts_to_f32(&values, calibration)?;
-        let array = DataArray::<f32>::from_vec_named(
-            vec![
-                usize::from(self.header.data.lines),
-                usize::from(self.header.data.columns),
-            ],
-            ["y", "x"],
-            calibrated_values,
-        )?
-        .with_mask(mask)?;
+        let array = self
+            .attach_projection_coordinates(DataArray::<f32>::from_vec_named(
+                vec![
+                    usize::from(self.header.data.lines),
+                    usize::from(self.header.data.columns),
+                ],
+                ["y", "x"],
+                calibrated_values,
+            )?)?
+            .with_mask(mask)?;
 
         let mut dataset = Dataset::new(self.dataset_id_for_calibration(calibration)?);
         self.attach_common_attrs(&mut dataset)?;
+        self.attach_area_attr(&mut dataset)?;
         dataset.insert_attr("calibration", calibration.name())?;
         dataset.set_array(array);
         Ok(dataset)
@@ -339,18 +346,20 @@ impl AhiHsdFileHandler {
                 || *value == self.header.calibration.outside_scan_pixel_count_value
         }));
         let calibrated_values = self.calibrate_counts_to_f64(&values, calibration)?;
-        let array = DataArray::<f64>::from_vec_named(
-            vec![
-                usize::from(self.header.data.lines),
-                usize::from(self.header.data.columns),
-            ],
-            ["y", "x"],
-            calibrated_values,
-        )?
-        .with_mask(mask)?;
+        let array = self
+            .attach_projection_coordinates(DataArray::<f64>::from_vec_named(
+                vec![
+                    usize::from(self.header.data.lines),
+                    usize::from(self.header.data.columns),
+                ],
+                ["y", "x"],
+                calibrated_values,
+            )?)?
+            .with_mask(mask)?;
 
         let mut dataset = Dataset::new(self.dataset_id_for_calibration(calibration)?);
         self.attach_common_attrs(&mut dataset)?;
+        self.attach_area_attr(&mut dataset)?;
         dataset.insert_attr("calibration", calibration.name())?;
         dataset.insert_attr("precision", "f64")?;
         dataset.set_array(array);
@@ -578,6 +587,89 @@ impl AhiHsdFileHandler {
             MetadataValue::float(self.header.calibration.central_wavelength)?,
         )?;
         Ok(())
+    }
+
+    pub fn area_metadata_value(&self) -> Result<MetadataValue> {
+        ahi_area_metadata_value(
+            self.area_id(),
+            self.area_description(),
+            self.proj_id(),
+            self.geos_projection(),
+            usize::from(self.header.data.lines),
+            usize::from(self.header.data.columns),
+            self.area_extent_for_segment(),
+        )
+    }
+
+    fn attach_area_attr(&self, dataset: &mut Dataset) -> Result<()> {
+        dataset.insert_attr("area", self.area_metadata_value()?)
+    }
+
+    fn attach_projection_coordinates<T: NumericElement>(
+        &self,
+        array: DataArray<T>,
+    ) -> Result<DataArray<T>> {
+        attach_projection_coordinates_to_array(array, self.area_extent_for_segment())
+    }
+
+    fn geos_projection(&self) -> BTreeMap<String, String> {
+        let a = self.header.projection.earth_equatorial_radius * 1000.0;
+        let b = self.header.projection.earth_polar_radius * 1000.0;
+        let h = self.header.projection.distance_from_earth_center * 1000.0 - a;
+        BTreeMap::from([
+            ("a".to_string(), a.to_string()),
+            ("b".to_string(), b.to_string()),
+            ("h".to_string(), h.to_string()),
+            (
+                "lon_0".to_string(),
+                self.header.projection.sub_lon.to_string(),
+            ),
+            ("proj".to_string(), "geos".to_string()),
+            ("units".to_string(), "m".to_string()),
+        ])
+    }
+
+    fn area_id(&self) -> String {
+        self.header.basic.observation_area.clone()
+    }
+
+    fn area_description(&self) -> String {
+        format!("AHI {} area", self.header.basic.observation_area)
+    }
+
+    fn proj_id(&self) -> String {
+        let suffix = self
+            .header
+            .basic
+            .satellite
+            .chars()
+            .rev()
+            .find(|ch| ch.is_ascii_digit())
+            .unwrap_or('x');
+        format!("geosh{suffix}")
+    }
+
+    fn area_extent_for_segment(&self) -> [f64; 4] {
+        let lines = usize::from(self.header.data.lines);
+        let segment_offset = usize::from(self.segment.segment_number);
+        self.area_extent_for(lines, segment_offset)
+    }
+
+    fn area_extent_for(&self, lines: usize, segment_offset: usize) -> [f64; 4] {
+        let h = self.header.projection.distance_from_earth_center * 1000.0
+            - self.header.projection.earth_equatorial_radius * 1000.0;
+        let loff = -f64::from(self.header.projection.loff)
+            + 1.0
+            + segment_offset as f64 * f64::from(self.header.data.lines);
+        geos_area_extent(
+            lines,
+            usize::from(self.header.data.columns),
+            self.header.projection.cfac,
+            self.header.projection.lfac,
+            f64::from(self.header.projection.coff),
+            loff,
+            h,
+        )
     }
 }
 
@@ -812,8 +904,23 @@ fn assemble_segment_datasets(
             RustySatError::invalid_input("AHI HSD segment dataset is missing array data")
         })?);
     }
-    let array = concatenate_yx_any_arrays(arrays)?;
+    let array = attach_projection_coordinates_to_any_array(
+        concatenate_yx_any_arrays(arrays)?,
+        handlers[0].area_extent_for(array_height_from_handlers(handlers)?, 0),
+    )?;
     handlers[0].attach_common_attrs(&mut output)?;
+    output.insert_attr(
+        "area",
+        ahi_area_metadata_value(
+            handlers[0].area_id(),
+            handlers[0].area_description(),
+            handlers[0].proj_id(),
+            handlers[0].geos_projection(),
+            array.shape()[0],
+            array.shape()[1],
+            handlers[0].area_extent_for(array.shape()[0], 0),
+        )?,
+    )?;
     output.insert_attr("calibration", calibration.name())?;
     output.insert_attr(
         "lines",
@@ -832,6 +939,143 @@ fn assemble_segment_datasets(
     )?;
     output.set_array(array);
     Ok(output)
+}
+
+fn array_height_from_handlers(handlers: &[&AhiHsdFileHandler]) -> Result<usize> {
+    handlers.iter().try_fold(0_usize, |height, handler| {
+        height
+            .checked_add(usize::from(handler.header.data.lines))
+            .ok_or_else(|| RustySatError::invalid_input("AHI HSD assembled height overflow"))
+    })
+}
+
+fn ahi_area_metadata_value(
+    id: String,
+    description: String,
+    proj_id: String,
+    projection: BTreeMap<String, String>,
+    height: usize,
+    width: usize,
+    area_extent: [f64; 4],
+) -> Result<MetadataValue> {
+    Ok(MetadataValue::map([
+        ("type", MetadataValue::string("area")),
+        ("id", MetadataValue::string(id)),
+        ("description", MetadataValue::string(description)),
+        ("proj_id", MetadataValue::string(proj_id)),
+        (
+            "projection",
+            MetadataValue::Map(
+                projection
+                    .into_iter()
+                    .map(|(key, value)| (key, MetadataValue::string(value)))
+                    .collect(),
+            ),
+        ),
+        ("height", MetadataValue::Integer(usize_to_i64(height)?)),
+        ("width", MetadataValue::Integer(usize_to_i64(width)?)),
+        (
+            "area_extent",
+            MetadataValue::List(
+                area_extent
+                    .into_iter()
+                    .map(MetadataValue::float)
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+        ),
+    ]))
+}
+
+fn usize_to_i64(value: usize) -> Result<i64> {
+    i64::try_from(value).map_err(|_| RustySatError::invalid_input("value does not fit in i64"))
+}
+
+fn geos_area_extent(
+    lines: usize,
+    columns: usize,
+    cfac: u32,
+    lfac: u32,
+    coff: f64,
+    loff: f64,
+    h: f64,
+) -> [f64; 4] {
+    let ll = geos_xy_from_line_col(0.5, 0.5, loff, coff, lfac, cfac);
+    let ur = geos_xy_from_line_col(
+        lines as f64 + 0.5,
+        columns as f64 + 0.5,
+        loff,
+        coff,
+        lfac,
+        cfac,
+    );
+    [
+        ll.0.to_radians() * h,
+        ll.1.to_radians() * h,
+        ur.0.to_radians() * h,
+        ur.1.to_radians() * h,
+    ]
+}
+
+fn geos_xy_from_line_col(
+    line: f64,
+    col: f64,
+    loff: f64,
+    coff: f64,
+    lfac: u32,
+    cfac: u32,
+) -> (f64, f64) {
+    let x = (col - coff) / (f64::from(cfac) / 2_f64.powi(16));
+    let y = (line - loff) / (f64::from(lfac) / 2_f64.powi(16));
+    (x, y)
+}
+
+fn attach_projection_coordinates_to_any_array(
+    array: AnyDataArray,
+    area_extent: [f64; 4],
+) -> Result<AnyDataArray> {
+    Ok(match array {
+        AnyDataArray::F32(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::F64(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::U8(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::U16(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::I16(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+    })
+}
+
+fn attach_projection_coordinates_to_array<T: NumericElement>(
+    array: DataArray<T>,
+    area_extent: [f64; 4],
+) -> Result<DataArray<T>> {
+    let (height, width) = array.shape_yx()?;
+    let x_coords = projection_x_coords(width, area_extent);
+    let y_coords = projection_y_coords(height, area_extent);
+    array
+        .with_coordinate("x", Coordinate::axis("x", x_coords)?)?
+        .with_coordinate("y", Coordinate::axis("y", y_coords)?)
+}
+
+fn projection_x_coords(width: usize, area_extent: [f64; 4]) -> Vec<f64> {
+    let pixel_size = (area_extent[2] - area_extent[0]) / width as f64;
+    (0..width)
+        .map(|x| area_extent[0] + (x as f64 + 0.5) * pixel_size)
+        .collect()
+}
+
+fn projection_y_coords(height: usize, area_extent: [f64; 4]) -> Vec<f64> {
+    let pixel_size = (area_extent[3] - area_extent[1]) / height as f64;
+    (0..height)
+        .map(|y| area_extent[3] - (y as f64 + 0.5) * pixel_size)
+        .collect()
 }
 
 fn concatenate_yx_any_arrays(arrays: Vec<AnyDataArray>) -> Result<AnyDataArray> {
@@ -1504,6 +1748,10 @@ mod tests {
     use bzip2::write::BzEncoder;
     use bzip2::Compression;
     use rusty_sat_core::{DataQuery, DataValue, MetadataValue, Scene};
+    use rusty_sat_resample::{
+        area_from_metadata_value, resample_dataset_from_attrs, source_geometry_from_dataset,
+        ResampleOptions, SourceGeometry,
+    };
     use rusty_sat_writers::SimpleImageWriter;
     use std::fs;
     use std::io::Write;
@@ -1768,6 +2016,12 @@ file_types:
         assert_eq!(array.mask().unwrap().masked_count(), 2);
         assert_eq!(array.is_masked(2), Some(true));
         assert_eq!(array.is_masked(10), Some(true));
+        assert_eq!(array.coord("x").unwrap().values().len(), 3);
+        assert_eq!(array.coord("y").unwrap().values().len(), 4);
+        let SourceGeometry::Area(area) = source_geometry_from_dataset(&dataset).unwrap() else {
+            panic!("expected assembled area source geometry");
+        };
+        assert_eq!(area.shape(), (4, 3));
         assert_eq!(dataset.attr("lines"), Some(&MetadataValue::Integer(4)));
         assert_eq!(
             dataset.attr("assembled_segments"),
@@ -1872,6 +2126,112 @@ file_types:
 
         assert!(err.to_string().contains("block-7 segment sequence"));
         fs::remove_file(seg2_path).ok();
+    }
+
+    #[test]
+    fn area_metadata_matches_satpy_region_navigation_case() {
+        let mut bytes = synthetic_header();
+        let data = BASIC_INFO_LEN;
+        write_u16(&mut bytes, data + 5, 1000);
+        write_u16(&mut bytes, data + 7, 1000);
+        let proj = BASIC_INFO_LEN + DATA_INFO_LEN;
+        write_f32(&mut bytes, proj + 19, -591.5);
+        write_f32(&mut bytes, proj + 23, 5132.5);
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0101.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 1).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let area = area_from_metadata_value(&handler.area_metadata_value().unwrap()).unwrap();
+
+        assert_eq!(area.id(), "FLDK");
+        assert_eq!(area.proj_id(), "geosh8");
+        assert_eq!(area.shape(), (1000, 1000));
+        assert_eq!(
+            area.projection().get("proj").map(String::as_str),
+            Some("geos")
+        );
+        assert_eq!(
+            area.projection().get("lon_0").map(String::as_str),
+            Some("140.7")
+        );
+        assert_close(
+            area.area_extent(),
+            [
+                592000.0038256242,
+                4132000.0267018233,
+                1592000.0102878273,
+                5132000.033164027,
+            ],
+            1.0e-6,
+        );
+    }
+
+    #[test]
+    fn area_metadata_matches_satpy_segment_navigation_case() {
+        let mut bytes = synthetic_header();
+        let data = BASIC_INFO_LEN;
+        write_u16(&mut bytes, data + 5, 11000);
+        write_u16(&mut bytes, data + 7, 1100);
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0810.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(8, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let area = area_from_metadata_value(&handler.area_metadata_value().unwrap()).unwrap();
+
+        assert_eq!(area.shape(), (1100, 11000));
+        assert_close(
+            area.area_extent(),
+            [
+                -5500000.035542117,
+                -3300000.021325271,
+                5500000.035542117,
+                -2200000.0142168473,
+            ],
+            1.0e-6,
+        );
+    }
+
+    #[test]
+    fn hsd_dataset_area_attr_and_xy_coords_drive_resampling_pipeline() {
+        let bytes = synthetic_full_hsd_file();
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        let dataset = handler
+            .calibrated_dataset_from_bytes_f64(&bytes, AhiCalibration::Radiance)
+            .unwrap();
+
+        let SourceGeometry::Area(area) = source_geometry_from_dataset(&dataset).unwrap() else {
+            panic!("expected area source geometry");
+        };
+        let array = dataset.array().unwrap();
+        assert_eq!(array.coord("x").unwrap().values().len(), 3);
+        assert_eq!(array.coord("y").unwrap().values().len(), 2);
+        assert_eq!(area.shape(), (2, 3));
+
+        let resampled =
+            resample_dataset_from_attrs(&dataset, &area, ResampleOptions::default()).unwrap();
+
+        let rusty_sat_core::AnyDataArray::F64(output) = resampled.array().unwrap() else {
+            panic!("expected f64 output");
+        };
+        assert_eq!(
+            output.values(),
+            &[-0.99, 654.35, -0.98, 654.34, -0.97, -0.96]
+        );
+        assert_eq!(output.mask().unwrap().masked_count(), 2);
     }
 
     #[test]
@@ -2277,6 +2637,15 @@ datasets:
         let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn assert_close(actual: [f64; 4], expected: [f64; 4], tolerance: f64) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "expected {actual} to be within {tolerance} of {expected}"
+            );
+        }
     }
 
     fn temp_path(name: &str, extension: &str) -> std::path::PathBuf {

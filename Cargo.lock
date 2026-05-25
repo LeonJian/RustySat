@@ -306,6 +306,7 @@ dependencies = [
  "bzip2",
  "regex",
  "rusty_sat_core",
+ "rusty_sat_resample",
  "rusty_sat_writers",
  "serde_norway",
 ]
