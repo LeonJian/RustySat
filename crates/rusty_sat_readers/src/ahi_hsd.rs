@@ -16,8 +16,8 @@ use crate::yaml_reader::FileMatch;
 use crate::Reader;
 use bzip2::bufread::MultiBzDecoder;
 use rusty_sat_core::{
-    DataArray, DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError,
-    ValidityMask, WavelengthRange,
+    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, NumericElement, ReaderInventory,
+    Result, RustySatError, ValidityMask, WavelengthRange,
 };
 use std::borrow::Cow;
 use std::fs::File;
@@ -644,23 +644,323 @@ impl Reader for AhiHsdReader {
     }
 
     fn available_dataset_ids(&self) -> Vec<DataId> {
-        self.handlers
-            .iter()
-            .filter_map(|handler| handler.dataset_id_for_calibration(self.calibration).ok())
-            .collect()
+        let mut ids = Vec::new();
+        for handler in &self.handlers {
+            let Ok(id) = handler.dataset_id_for_calibration(self.calibration) else {
+                continue;
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
     }
 
     fn load(&self, id: &DataId) -> Result<Dataset> {
+        let mut matching_handlers = Vec::new();
         for handler in &self.handlers {
             if handler.dataset_id_for_calibration(self.calibration)? == *id {
-                return handler.load_calibrated_dataset(self.calibration);
+                matching_handlers.push(handler);
             }
         }
-        Err(RustySatError::not_found(format!(
-            "AHI HSD dataset '{}'",
-            id.name()
-        )))
+        match matching_handlers.as_slice() {
+            [] => Err(RustySatError::not_found(format!(
+                "AHI HSD dataset '{}'",
+                id.name()
+            ))),
+            [handler] => handler.load_calibrated_dataset(self.calibration),
+            _ => self.load_assembled_dataset(matching_handlers),
+        }
     }
+}
+
+impl AhiHsdReader {
+    fn load_assembled_dataset(&self, handlers: Vec<&AhiHsdFileHandler>) -> Result<Dataset> {
+        let sorted_handlers = sorted_complete_segment_handlers(handlers)?;
+        let mut datasets = Vec::with_capacity(sorted_handlers.len());
+        for handler in &sorted_handlers {
+            datasets.push(handler.load_calibrated_dataset(self.calibration)?);
+        }
+        assemble_segment_datasets(datasets, &sorted_handlers, self.calibration)
+    }
+}
+
+fn sorted_complete_segment_handlers(
+    handlers: Vec<&AhiHsdFileHandler>,
+) -> Result<Vec<&AhiHsdFileHandler>> {
+    let Some(first) = handlers.first() else {
+        return Err(RustySatError::invalid_input(
+            "AHI HSD segment assembly requires at least one segment",
+        ));
+    };
+    let expected_total = usize::from(first.segment.total_segments);
+    let mut slots = vec![None; expected_total];
+    for handler in handlers.iter().copied() {
+        validate_segment_header_matches_filename(handler)?;
+        if handler.segment.total_segments != first.segment.total_segments {
+            return Err(RustySatError::invalid_input(format!(
+                "AHI HSD segment total mismatch: expected {}, got {} for '{}'",
+                first.segment.total_segments,
+                handler.segment.total_segments,
+                handler.filename().display()
+            )));
+        }
+        validate_assembly_compatible(first, handler)?;
+        let idx = usize::from(handler.segment.segment_number - 1);
+        if slots[idx].is_some() {
+            return Err(RustySatError::invalid_input(format!(
+                "duplicate AHI HSD segment {} for dataset '{}'",
+                handler.segment.segment_number,
+                handler.band_name()
+            )));
+        }
+        slots[idx] = Some(handler);
+    }
+    let missing = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, handler)| handler.is_none().then_some(idx + 1))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(RustySatError::invalid_input(format!(
+            "missing AHI HSD segment(s) {:?} for complete {}-segment assembly",
+            missing, expected_total
+        )));
+    }
+    Ok(slots.into_iter().map(Option::unwrap).collect())
+}
+
+fn validate_segment_header_matches_filename(handler: &AhiHsdFileHandler) -> Result<()> {
+    let Some(segment) = &handler.header.segment else {
+        return Ok(());
+    };
+    if segment.total_segments != handler.segment.total_segments {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD block-7 total segments {} does not match filename total {} for '{}'",
+            segment.total_segments,
+            handler.segment.total_segments,
+            handler.filename().display()
+        )));
+    }
+    if segment.segment_sequence_number != handler.segment.segment_number {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD block-7 segment sequence {} does not match filename segment {} for '{}'",
+            segment.segment_sequence_number,
+            handler.segment.segment_number,
+            handler.filename().display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_assembly_compatible(
+    first: &AhiHsdFileHandler,
+    handler: &AhiHsdFileHandler,
+) -> Result<()> {
+    if first.file_type != handler.file_type {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD segment file type mismatch: '{}' vs '{}'",
+            first.file_type, handler.file_type
+        )));
+    }
+    if first.header.calibration.band_number != handler.header.calibration.band_number {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD segment band mismatch: {} vs {}",
+            first.header.calibration.band_number, handler.header.calibration.band_number
+        )));
+    }
+    if first.header.data.columns != handler.header.data.columns {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD segment column mismatch: {} vs {}",
+            first.header.data.columns, handler.header.data.columns
+        )));
+    }
+    if first.header.data.bits_per_pixel != handler.header.data.bits_per_pixel {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD segment bits-per-pixel mismatch: {} vs {}",
+            first.header.data.bits_per_pixel, handler.header.data.bits_per_pixel
+        )));
+    }
+    if first.header.calibration.central_wavelength != handler.header.calibration.central_wavelength
+    {
+        return Err(RustySatError::invalid_input(
+            "AHI HSD segment wavelength mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn assemble_segment_datasets(
+    mut datasets: Vec<Dataset>,
+    handlers: &[&AhiHsdFileHandler],
+    calibration: AhiCalibration,
+) -> Result<Dataset> {
+    let Some(mut output) = datasets
+        .first_mut()
+        .map(|dataset| Dataset::new(dataset.id().clone()))
+    else {
+        return Err(RustySatError::invalid_input(
+            "AHI HSD segment assembly requires at least one dataset",
+        ));
+    };
+    let first_dataset = datasets.remove(0);
+    let mut arrays = vec![first_dataset.into_array().ok_or_else(|| {
+        RustySatError::invalid_input("AHI HSD segment dataset is missing array data")
+    })?];
+    for dataset in datasets {
+        arrays.push(dataset.into_array().ok_or_else(|| {
+            RustySatError::invalid_input("AHI HSD segment dataset is missing array data")
+        })?);
+    }
+    let array = concatenate_yx_any_arrays(arrays)?;
+    handlers[0].attach_common_attrs(&mut output)?;
+    output.insert_attr("calibration", calibration.name())?;
+    output.insert_attr(
+        "lines",
+        i64::try_from(array.shape()[0]).map_err(|_| {
+            RustySatError::invalid_input("assembled AHI HSD line count does not fit in i64")
+        })?,
+    )?;
+    output.insert_attr(
+        "assembled_segments",
+        MetadataValue::List(
+            handlers
+                .iter()
+                .map(|handler| MetadataValue::Integer(i64::from(handler.segment.segment_number)))
+                .collect(),
+        ),
+    )?;
+    output.set_array(array);
+    Ok(output)
+}
+
+fn concatenate_yx_any_arrays(arrays: Vec<AnyDataArray>) -> Result<AnyDataArray> {
+    let Some(first) = arrays.first() else {
+        return Err(RustySatError::invalid_input(
+            "AHI HSD segment assembly requires at least one array",
+        ));
+    };
+    match first {
+        AnyDataArray::F32(_) => concatenate_yx_typed_arrays(
+            arrays
+                .into_iter()
+                .map(|array| match array {
+                    AnyDataArray::F32(array) => Ok(array),
+                    other => Err(RustySatError::invalid_input(format!(
+                        "AHI HSD segment dtype mismatch: expected f32, got {}",
+                        other.dtype().name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map(Into::into),
+        AnyDataArray::F64(_) => concatenate_yx_typed_arrays(
+            arrays
+                .into_iter()
+                .map(|array| match array {
+                    AnyDataArray::F64(array) => Ok(array),
+                    other => Err(RustySatError::invalid_input(format!(
+                        "AHI HSD segment dtype mismatch: expected f64, got {}",
+                        other.dtype().name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map(Into::into),
+        AnyDataArray::U8(_) => concatenate_yx_typed_arrays(
+            arrays
+                .into_iter()
+                .map(|array| match array {
+                    AnyDataArray::U8(array) => Ok(array),
+                    other => Err(RustySatError::invalid_input(format!(
+                        "AHI HSD segment dtype mismatch: expected u8, got {}",
+                        other.dtype().name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map(Into::into),
+        AnyDataArray::U16(_) => concatenate_yx_typed_arrays(
+            arrays
+                .into_iter()
+                .map(|array| match array {
+                    AnyDataArray::U16(array) => Ok(array),
+                    other => Err(RustySatError::invalid_input(format!(
+                        "AHI HSD segment dtype mismatch: expected u16, got {}",
+                        other.dtype().name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map(Into::into),
+        AnyDataArray::I16(_) => concatenate_yx_typed_arrays(
+            arrays
+                .into_iter()
+                .map(|array| match array {
+                    AnyDataArray::I16(array) => Ok(array),
+                    other => Err(RustySatError::invalid_input(format!(
+                        "AHI HSD segment dtype mismatch: expected i16, got {}",
+                        other.dtype().name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map(Into::into),
+    }
+}
+
+fn concatenate_yx_typed_arrays<T: NumericElement>(
+    arrays: Vec<DataArray<T>>,
+) -> Result<DataArray<T>> {
+    let Some(first) = arrays.first() else {
+        return Err(RustySatError::invalid_input(
+            "AHI HSD segment assembly requires at least one typed array",
+        ));
+    };
+    first.require_dims_exact(&["y", "x"])?;
+    let width = first.shape_yx()?.1;
+    let mut total_height = 0_usize;
+    let mut total_len = 0_usize;
+    for array in &arrays {
+        array.require_dims_exact(&["y", "x"])?;
+        let (height, array_width) = array.shape_yx()?;
+        if array_width != width {
+            return Err(RustySatError::invalid_input(format!(
+                "AHI HSD segment width mismatch: expected {width}, got {array_width}"
+            )));
+        }
+        total_height = total_height
+            .checked_add(height)
+            .ok_or_else(|| RustySatError::invalid_input("AHI HSD assembled height overflow"))?;
+        total_len = total_len
+            .checked_add(array.len())
+            .ok_or_else(|| RustySatError::invalid_input("AHI HSD assembled length overflow"))?;
+    }
+
+    let mut values = Vec::with_capacity(total_len);
+    let mut mask_flags: Option<Vec<bool>> = None;
+    for array in arrays {
+        let previous_len = values.len();
+        let (segment_values, _, segment_mask) = array.into_parts();
+        if let Some(flags) = &mut mask_flags {
+            extend_mask_flags(flags, segment_mask.as_ref(), segment_values.len());
+        } else if let Some(mask) = segment_mask.as_ref() {
+            let mut flags = vec![false; previous_len];
+            extend_mask_flags(&mut flags, Some(mask), segment_values.len());
+            mask_flags = Some(flags);
+        }
+        values.extend(segment_values);
+    }
+
+    let mut array = DataArray::<T>::from_vec_named([total_height, width], ["y", "x"], values)?;
+    if let Some(flags) = mask_flags {
+        array.set_mask(ValidityMask::from_masked_flags(flags))?;
+    }
+    Ok(array)
+}
+
+fn extend_mask_flags(flags: &mut Vec<bool>, mask: Option<&ValidityMask>, len: usize) {
+    flags.extend((0..len).map(|idx| mask.and_then(|mask| mask.is_masked(idx)).unwrap_or(false)));
 }
 
 pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
@@ -1432,6 +1732,149 @@ file_types:
     }
 
     #[test]
+    fn reader_assembles_complete_hsd_segments_in_line_order() {
+        let seg1_path = temp_path("ahi_hsd_segment_1", "DAT");
+        let seg2_path = temp_path("ahi_hsd_segment_2", "DAT");
+        fs::write(
+            &seg2_path,
+            synthetic_full_hsd_segment(2, 2, &[20, 21, 22, 23, 65534, 25]),
+        )
+        .unwrap();
+        fs::write(
+            &seg1_path,
+            synthetic_full_hsd_segment(1, 2, &[10, 11, 65535, 13, 14, 15]),
+        )
+        .unwrap();
+        let seg2 =
+            AhiHsdFileHandler::from_path(&seg2_path, "hsd_b03", AhiSegmentInfo::new(2, 2).unwrap())
+                .unwrap();
+        let seg1 =
+            AhiHsdFileHandler::from_path(&seg1_path, "hsd_b03", AhiSegmentInfo::new(1, 2).unwrap())
+                .unwrap();
+        let reader = AhiHsdReader::new([seg2, seg1]).unwrap();
+        let ids = reader.available_dataset_ids();
+
+        assert_eq!(ids.len(), 1);
+        let dataset = reader.load(&ids[0]).unwrap();
+
+        let rusty_sat_core::AnyDataArray::U16(array) = dataset.array().unwrap() else {
+            panic!("expected assembled u16 counts array");
+        };
+        assert_eq!(array.shape_nd(), &[4, 3]);
+        assert_eq!(
+            array.values(),
+            &[10, 11, 65535, 13, 14, 15, 20, 21, 22, 23, 65534, 25]
+        );
+        assert_eq!(array.mask().unwrap().masked_count(), 2);
+        assert_eq!(array.is_masked(2), Some(true));
+        assert_eq!(array.is_masked(10), Some(true));
+        assert_eq!(dataset.attr("lines"), Some(&MetadataValue::Integer(4)));
+        assert_eq!(
+            dataset.attr("assembled_segments"),
+            Some(&MetadataValue::List(vec![
+                MetadataValue::Integer(1),
+                MetadataValue::Integer(2)
+            ]))
+        );
+        fs::remove_file(seg1_path).ok();
+        fs::remove_file(seg2_path).ok();
+    }
+
+    #[test]
+    fn reader_rejects_missing_hsd_segment_for_assembly() {
+        let seg1_path = temp_path("ahi_hsd_missing_segment", "DAT");
+        let seg3_path = temp_path("ahi_hsd_missing_segment", "DAT");
+        fs::write(
+            &seg1_path,
+            synthetic_full_hsd_segment(1, 3, &[10, 11, 12, 13, 14, 15]),
+        )
+        .unwrap();
+        fs::write(
+            &seg3_path,
+            synthetic_full_hsd_segment(3, 3, &[30, 31, 32, 33, 34, 35]),
+        )
+        .unwrap();
+        let seg1 =
+            AhiHsdFileHandler::from_path(&seg1_path, "hsd_b03", AhiSegmentInfo::new(1, 3).unwrap())
+                .unwrap();
+        let seg3 =
+            AhiHsdFileHandler::from_path(&seg3_path, "hsd_b03", AhiSegmentInfo::new(3, 3).unwrap())
+                .unwrap();
+        let reader = AhiHsdReader::new([seg1, seg3]).unwrap();
+        let id = reader.available_dataset_ids().pop().unwrap();
+
+        let err = reader.load(&id).unwrap_err();
+
+        assert!(err.to_string().contains("missing AHI HSD segment"));
+        assert!(err.to_string().contains("2"));
+        fs::remove_file(seg1_path).ok();
+        fs::remove_file(seg3_path).ok();
+    }
+
+    #[test]
+    fn reader_rejects_duplicate_hsd_segment_for_assembly() {
+        let seg1a_path = temp_path("ahi_hsd_duplicate_segment_a", "DAT");
+        let seg1b_path = temp_path("ahi_hsd_duplicate_segment_b", "DAT");
+        fs::write(
+            &seg1a_path,
+            synthetic_full_hsd_segment(1, 2, &[10, 11, 12, 13, 14, 15]),
+        )
+        .unwrap();
+        fs::write(
+            &seg1b_path,
+            synthetic_full_hsd_segment(1, 2, &[20, 21, 22, 23, 24, 25]),
+        )
+        .unwrap();
+        let seg1a = AhiHsdFileHandler::from_path(
+            &seg1a_path,
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 2).unwrap(),
+        )
+        .unwrap();
+        let seg1b = AhiHsdFileHandler::from_path(
+            &seg1b_path,
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 2).unwrap(),
+        )
+        .unwrap();
+        let reader = AhiHsdReader::new([seg1a, seg1b]).unwrap();
+        let id = reader.available_dataset_ids().pop().unwrap();
+
+        let err = reader.load(&id).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate AHI HSD segment 1"));
+        fs::remove_file(seg1a_path).ok();
+        fs::remove_file(seg1b_path).ok();
+    }
+
+    #[test]
+    fn reader_rejects_hsd_segment_header_filename_mismatch() {
+        let seg2_path = temp_path("ahi_hsd_segment_mismatch", "DAT");
+        fs::write(
+            &seg2_path,
+            synthetic_full_hsd_segment(1, 2, &[10, 11, 12, 13, 14, 15]),
+        )
+        .unwrap();
+        let handler =
+            AhiHsdFileHandler::from_path(&seg2_path, "hsd_b03", AhiSegmentInfo::new(2, 2).unwrap())
+                .unwrap();
+        let other = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0102.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 2).unwrap(),
+            &synthetic_full_hsd_segment(1, 2, &[1, 2, 3, 4, 5, 6]),
+        )
+        .unwrap();
+        let reader = AhiHsdReader::new([handler, other]).unwrap();
+        let id = reader.available_dataset_ids().pop().unwrap();
+
+        let err = reader.load(&id).unwrap_err();
+
+        assert!(err.to_string().contains("block-7 segment sequence"));
+        fs::remove_file(seg2_path).ok();
+    }
+
+    #[test]
     fn rejects_truncated_bzip2_data_block() {
         let mut bytes =
             synthetic_full_hsd_file_with_bzip2_data_block(&[1_u16, 65535, 2, 65534, 3, 4]);
@@ -1809,6 +2252,24 @@ datasets:
         let compressed = bzip2_compress(&raw);
         bytes.truncate(data_offset);
         bytes.extend(compressed);
+        bytes
+    }
+
+    fn synthetic_full_hsd_segment(segment: u8, total_segments: u8, values: &[u16]) -> Vec<u8> {
+        assert_eq!(values.len(), 6);
+        let mut bytes = synthetic_full_hsd_file();
+        let header = parse_initial_hsd_header(&bytes).unwrap();
+        let data_offset = header.basic.total_header_length as usize;
+        let block7_offset = data_offset - 47;
+        write_u8(&mut bytes, block7_offset + 3, total_segments);
+        write_u8(&mut bytes, block7_offset + 4, segment);
+        let first_line = 1 + (u16::from(segment) - 1) * u16::from(header.data.lines);
+        write_u16(&mut bytes, block7_offset + 5, first_line);
+        write_u32(&mut bytes, 74, (values.len() * 2) as u32);
+        bytes.truncate(data_offset);
+        for value in values {
+            bytes.extend(value.to_le_bytes());
+        }
         bytes
     }
 
