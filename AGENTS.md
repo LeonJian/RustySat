@@ -213,7 +213,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` R1: GEO readers, including ABI, AHI, AMI, SEVIRI, FCI, AGRI, HRIT, GOES Imager, GOCI-II, INSAT, and JMA HRIT.
   - `[~]` R1-AHI-HSD: Complete Himawari AHI HSD production reader before broad reader expansion.
     - `[x]` R1-AHI-HSD-foundation: Header parsing, YAML filename inventory, uncompressed synthetic/local counts, first calibration, Scene load, and basic PNG output.
-    - `[ ]` R1-AHI-HSD-bzip2: Add production bzip2/compressed HSD block handling with bounded memory and decompression error tests.
+    - `[x]` R1-AHI-HSD-bzip2: Add production bzip2/compressed HSD block handling with bounded memory and decompression error tests.
     - `[ ]` R1-AHI-HSD-segments: Add multi-segment grouping and assembly for full-disk/band products with missing/duplicate segment tests.
     - `[ ]` R1-AHI-HSD-navigation: Add AHI geostationary navigation, area/geolocation metadata, and coordinate/area attachment compatible with Satpy.
     - `[ ]` R1-AHI-HSD-calibration-full: Add full visible/IR calibration behavior, calibration update blocks, f32 display and f64 scientific output selection, and parity tests.
@@ -447,7 +447,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M6-resampling-full-z: Add line/sample coordinate remapping for axis, 2D, and non-spatial mixed coordinates. Roadmap: S7.
   - `[x]` M6-resampling-full-aa: Route area slicing through CRS transforms and support geographic CRS aliases without pretending projected cross-CRS math exists yet. Roadmap: S7/P0-2.
 - `[ ]` M7-AHI-production: Complete production-ready AHI HSD and AHI NetCDF workflows before broad reader expansion.
-  - `[ ]` M7-AHI-production-a: Complete AHI HSD compressed production file handling and safety limits. Roadmap: R1-AHI-HSD-bzip2.
+  - `[x]` M7-AHI-production-a: Complete AHI HSD compressed production file handling and safety limits. Roadmap: R1-AHI-HSD-bzip2.
   - `[ ]` M7-AHI-production-b: Complete AHI HSD multi-segment grouping/assembly. Roadmap: R1-AHI-HSD-segments/R0.9.
   - `[ ]` M7-AHI-production-c: Complete AHI HSD navigation, area/geolocation metadata, and resampling integration. Roadmap: R1-AHI-HSD-navigation/S1/S7/SC3.
   - `[ ]` M7-AHI-production-d: Complete AHI HSD calibration parity and f32/f64 output selection. Roadmap: R1-AHI-HSD-calibration-full/I1.
@@ -556,10 +556,10 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 | Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) with byte-size/depth guardrails | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
 | `FakeReader` in-memory inventory + dataset loading for Scene planning tests | Real satellite file I/O (NetCDF/HDF/GeoTIFF/etc.) |
 | `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture that caches the parsed fixture grid instead of rereading per chunk | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
-| AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Production AHI HSD segment assembly, navigation arrays, bzip2-compressed file handling, and full Satpy YAML instantiation |
-| AHI HSD handler can load uncompressed local/synthetic block-12 raw counts into a `u16` `DataArray` and mask Satpy error/outside-scan count values with a whole-file byte safety limit | Streaming/chunked HSD reads; current raw-count path materializes the requested file/byte buffer |
+| AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Production AHI HSD segment assembly, navigation arrays, gzip-compressed data blocks, and full Satpy YAML instantiation |
+| AHI HSD handler can load uncompressed local/synthetic block-12 raw counts and bzip2 whole-file or block-12-compressed HSD data into a `u16` `DataArray`, with Satpy error/outside-scan masks and bounded decompression/file-size checks | Streaming/chunked HSD reads; current raw-count path still materializes the requested file and compressed data blocks before array construction |
 | AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
-| `AhiHsdReader` can expose a configured calibration, load a local uncompressed HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
+| `AhiHsdReader` can expose a configured calibration, load a local uncompressed or whole-file bzip2 HSD file through `Scene` planning, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, multi-file/segment grouping, and production sample output |
 | Current reader inventory/load path still uses `f32` by default for memory-efficient display output | Final scientific/HDR HSD workflows need writer-preserving float/16-bit policies and public selection of the f64 calibrated path |
 | NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, load an FCI L1C measured-channel counts dataset, read YAML fixture-backed NetCDF trees/arrays from disk, and expose a fixture-backed FCI reader for Scene planning | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
 

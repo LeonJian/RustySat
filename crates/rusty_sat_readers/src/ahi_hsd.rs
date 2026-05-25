@@ -14,12 +14,14 @@
 use crate::filename_pattern::PatternValue;
 use crate::yaml_reader::FileMatch;
 use crate::Reader;
+use bzip2::bufread::MultiBzDecoder;
 use rusty_sat_core::{
     DataArray, DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError,
     ValidityMask, WavelengthRange,
 };
+use std::borrow::Cow;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 const BASIC_INFO_LEN: usize = 282;
@@ -32,6 +34,7 @@ const VISIBLE_CALIBRATION_INFO_LEN: usize = CALIBRATION_INFO_LEN + BAND_CALIBRAT
 const INFRARED_CALIBRATION_INFO_LEN: usize = CALIBRATION_INFO_LEN + BAND_CALIBRATION_EXTENSION_LEN;
 const INITIAL_HEADER_PREFIX_LEN: u64 = 4096;
 const MAX_HSD_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const BZIP2_MAGIC: [u8; 3] = *b"BZh";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AhiHsdHeader {
@@ -228,22 +231,7 @@ impl AhiHsdFileHandler {
         segment: AhiSegmentInfo,
     ) -> Result<Self> {
         let filename = filename.into();
-        let mut bytes = Vec::new();
-        File::open(&filename)
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "failed to open AHI HSD file '{}': {err}",
-                    filename.display()
-                ))
-            })?
-            .take(INITIAL_HEADER_PREFIX_LEN)
-            .read_to_end(&mut bytes)
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "failed to read AHI HSD header from '{}': {err}",
-                    filename.display()
-                ))
-            })?;
+        let bytes = read_initial_hsd_header_prefix(&filename)?;
         Self::from_header_bytes(filename, file_type, segment, &bytes)
     }
 
@@ -408,12 +396,6 @@ impl AhiHsdFileHandler {
                 self.header.data.bits_per_pixel
             )));
         }
-        if self.header.data.compression_flag != 0 {
-            return Err(RustySatError::unsupported(format!(
-                "AHI HSD data compression flag {}",
-                self.header.data.compression_flag
-            )));
-        }
         let rows = usize::from(self.header.data.lines);
         let cols = usize::from(self.header.data.columns);
         let pixel_count = rows
@@ -425,14 +407,12 @@ impl AhiHsdFileHandler {
         let byte_count = pixel_count
             .checked_mul(2)
             .ok_or_else(|| RustySatError::invalid_input("AHI HSD data byte count overflow"))?;
-        let data_end = data_offset
-            .checked_add(byte_count)
-            .ok_or_else(|| RustySatError::invalid_input("AHI HSD data range overflow"))?;
-        let data = bytes.get(data_offset..data_end).ok_or_else(|| {
-            RustySatError::invalid_input(format!(
-                "AHI HSD data block is truncated: need {byte_count} bytes at offset {data_offset}"
-            ))
-        })?;
+        let data = data_block_bytes(
+            bytes,
+            data_offset,
+            byte_count,
+            self.header.data.compression_flag,
+        )?;
         Ok(data
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
@@ -455,41 +435,7 @@ impl AhiHsdFileHandler {
     }
 
     fn read_file_bytes(&self) -> Result<Vec<u8>> {
-        let mut file = File::open(&self.filename).map_err(|err| {
-            RustySatError::invalid_input(format!(
-                "failed to open AHI HSD file '{}': {err}",
-                self.filename.display()
-            ))
-        })?;
-        let file_len = file
-            .metadata()
-            .map(|metadata| metadata.len())
-            .map_err(|err| {
-                RustySatError::invalid_input(format!(
-                    "failed to inspect AHI HSD file '{}': {err}",
-                    self.filename.display()
-                ))
-            })?;
-        if file_len > MAX_HSD_FILE_BYTES {
-            return Err(RustySatError::invalid_input(format!(
-                "AHI HSD file '{}' is {file_len} bytes, exceeding the current safety limit of {MAX_HSD_FILE_BYTES} bytes",
-                self.filename.display()
-            )));
-        }
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(file_len as usize).map_err(|err| {
-            RustySatError::invalid_input(format!(
-                "failed to reserve memory for AHI HSD file '{}': {err}",
-                self.filename.display()
-            ))
-        })?;
-        file.read_to_end(&mut bytes).map_err(|err| {
-            RustySatError::invalid_input(format!(
-                "failed to read AHI HSD file '{}': {err}",
-                self.filename.display()
-            ))
-        })?;
-        Ok(bytes)
+        read_hsd_file_bytes_bounded(&self.filename)
     }
 
     pub fn dataset_id_for_calibration(&self, calibration: AhiCalibration) -> Result<DataId> {
@@ -1051,13 +997,216 @@ fn required_filename_u8(file_match: &FileMatch, key: &str) -> Result<u8> {
     }
 }
 
+fn read_initial_hsd_header_prefix(path: &Path) -> Result<Vec<u8>> {
+    if file_has_bzip2_magic(path)? {
+        return read_bzip2_prefix(path, INITIAL_HEADER_PREFIX_LEN as usize);
+    }
+    let file = File::open(path).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to open AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    read_plain_prefix(file, path, INITIAL_HEADER_PREFIX_LEN)
+}
+
+fn read_hsd_file_bytes_bounded(path: &Path) -> Result<Vec<u8>> {
+    if file_has_bzip2_magic(path)? {
+        return read_bzip2_file_bounded(path, MAX_HSD_FILE_BYTES as usize);
+    }
+
+    let mut file = File::open(path).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to open AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    let file_len = file
+        .metadata()
+        .map(|metadata| metadata.len())
+        .map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to inspect AHI HSD file '{}': {err}",
+                path.display()
+            ))
+        })?;
+    if file_len > MAX_HSD_FILE_BYTES {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD file '{}' is {file_len} bytes, exceeding the current safety limit of {MAX_HSD_FILE_BYTES} bytes",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(file_len as usize).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to reserve memory for AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    file.read_to_end(&mut bytes).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to read AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    Ok(bytes)
+}
+
+fn read_plain_prefix(file: File, path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to read AHI HSD header from '{}': {err}",
+                path.display()
+            ))
+        })?;
+    Ok(bytes)
+}
+
+fn file_has_bzip2_magic(path: &Path) -> Result<bool> {
+    let mut file = File::open(path).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to open AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    let mut magic = [0_u8; 3];
+    let read = file.read(&mut magic).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to inspect AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    Ok(read == BZIP2_MAGIC.len() && magic == BZIP2_MAGIC)
+}
+
+fn read_bzip2_prefix(path: &Path, max_decompressed_bytes: usize) -> Result<Vec<u8>> {
+    let file = File::open(path).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to open compressed AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    let mut decoder = MultiBzDecoder::new(BufReader::new(file));
+    let mut bytes = Vec::new();
+    decoder
+        .by_ref()
+        .take(max_decompressed_bytes as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to decompress AHI HSD header from '{}': {err}",
+                path.display()
+            ))
+        })?;
+    Ok(bytes)
+}
+
+fn read_bzip2_file_bounded(path: &Path, max_decompressed_bytes: usize) -> Result<Vec<u8>> {
+    let file_len = File::open(path)
+        .and_then(|file| file.metadata())
+        .map(|metadata| metadata.len())
+        .map_err(|err| {
+            RustySatError::invalid_input(format!(
+                "failed to inspect compressed AHI HSD file '{}': {err}",
+                path.display()
+            ))
+        })?;
+    if file_len > MAX_HSD_FILE_BYTES {
+        return Err(RustySatError::invalid_input(format!(
+            "compressed AHI HSD file '{}' is {file_len} bytes, exceeding the current safety limit of {MAX_HSD_FILE_BYTES} bytes",
+            path.display()
+        )));
+    }
+    let file = File::open(path).map_err(|err| {
+        RustySatError::invalid_input(format!(
+            "failed to open compressed AHI HSD file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    read_bzip2_reader_bounded(BufReader::new(file), max_decompressed_bytes, "AHI HSD file")
+}
+
+fn data_block_bytes(
+    bytes: &[u8],
+    data_offset: usize,
+    byte_count: usize,
+    compression_flag: u8,
+) -> Result<Cow<'_, [u8]>> {
+    match compression_flag {
+        0 => {
+            let data_end = data_offset
+                .checked_add(byte_count)
+                .ok_or_else(|| RustySatError::invalid_input("AHI HSD data range overflow"))?;
+            let data = bytes.get(data_offset..data_end).ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "AHI HSD data block is truncated: need {byte_count} bytes at offset {data_offset}"
+                ))
+            })?;
+            Ok(Cow::Borrowed(data))
+        }
+        1 => Err(RustySatError::unsupported(
+            "AHI HSD gzip-compressed data blocks",
+        )),
+        2 => {
+            let data = bytes.get(data_offset..).ok_or_else(|| {
+                RustySatError::invalid_input(format!(
+                    "AHI HSD compressed data block is truncated at offset {data_offset}"
+                ))
+            })?;
+            let decompressed =
+                read_bzip2_reader_bounded(BufReader::new(data), byte_count, "AHI HSD data block")?;
+            if decompressed.len() != byte_count {
+                return Err(RustySatError::invalid_input(format!(
+                    "AHI HSD bzip2 data block decompressed to {} bytes, expected {byte_count}",
+                    decompressed.len()
+                )));
+            }
+            Ok(Cow::Owned(decompressed))
+        }
+        other => Err(RustySatError::unsupported(format!(
+            "AHI HSD data compression flag {other}"
+        ))),
+    }
+}
+
+fn read_bzip2_reader_bounded<R: std::io::BufRead>(
+    reader: R,
+    max_decompressed_bytes: usize,
+    context: &str,
+) -> Result<Vec<u8>> {
+    let mut decoder = MultiBzDecoder::new(reader);
+    let mut bytes = Vec::new();
+    let limit = max_decompressed_bytes
+        .checked_add(1)
+        .ok_or_else(|| RustySatError::invalid_input("AHI HSD decompression limit overflow"))?;
+    decoder
+        .by_ref()
+        .take(limit as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            RustySatError::invalid_input(format!("failed to decompress {context}: {err}"))
+        })?;
+    if bytes.len() > max_decompressed_bytes {
+        return Err(RustySatError::invalid_input(format!(
+            "{context} decompressed data exceeds the current safety limit of {max_decompressed_bytes} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::yaml_reader::YamlMetadataReader;
+    use bzip2::write::BzEncoder;
+    use bzip2::Compression;
     use rusty_sat_core::{DataQuery, DataValue, MetadataValue, Scene};
     use rusty_sat_writers::SimpleImageWriter;
     use std::fs;
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1241,6 +1390,98 @@ file_types:
             dataset.attr("first_line_number"),
             Some(&MetadataValue::Integer(1))
         );
+    }
+
+    #[test]
+    fn loads_whole_file_bzip2_hsd_from_path() {
+        let hsd_path = temp_path("ahi_hsd_whole_file", "DAT.bz2");
+        let compressed = bzip2_compress(&synthetic_full_hsd_file());
+        fs::write(&hsd_path, compressed).unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let dataset = handler.load_counts_dataset().unwrap();
+
+        let rusty_sat_core::AnyDataArray::U16(array) = dataset.array().unwrap() else {
+            panic!("expected u16 raw count array");
+        };
+        assert_eq!(array.values(), &[1, 65535, 2, 65534, 3, 4]);
+        assert_eq!(array.is_masked(1), Some(true));
+        fs::remove_file(hsd_path).ok();
+    }
+
+    #[test]
+    fn loads_bzip2_compressed_hsd_data_block() {
+        let bytes = synthetic_full_hsd_file_with_bzip2_data_block(&[1_u16, 65535, 2, 65534, 3, 4]);
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let dataset = handler.counts_dataset_from_bytes(&bytes).unwrap();
+
+        let rusty_sat_core::AnyDataArray::U16(array) = dataset.array().unwrap() else {
+            panic!("expected u16 raw count array");
+        };
+        assert_eq!(array.values(), &[1, 65535, 2, 65534, 3, 4]);
+        assert_eq!(array.is_masked(3), Some(true));
+    }
+
+    #[test]
+    fn rejects_truncated_bzip2_data_block() {
+        let mut bytes =
+            synthetic_full_hsd_file_with_bzip2_data_block(&[1_u16, 65535, 2, 65534, 3, 4]);
+        bytes.pop();
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let err = handler.counts_dataset_from_bytes(&bytes).unwrap_err();
+
+        assert!(err.to_string().contains("decompress"));
+    }
+
+    #[test]
+    fn rejects_bzip2_data_block_that_expands_past_expected_size() {
+        let bytes =
+            synthetic_full_hsd_file_with_bzip2_data_block(&[1_u16, 65535, 2, 65534, 3, 4, 5]);
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let err = handler.counts_dataset_from_bytes(&bytes).unwrap_err();
+
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn rejects_gzip_hsd_data_block_until_supported() {
+        let mut bytes = synthetic_full_hsd_file();
+        write_u8(&mut bytes, BASIC_INFO_LEN + 9, 1);
+        let handler = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        let err = handler.counts_dataset_from_bytes(&bytes).unwrap_err();
+
+        assert!(matches!(err, RustySatError::Unsupported { .. }));
+        assert!(err.to_string().contains("gzip"));
     }
 
     #[test]
@@ -1554,6 +1795,27 @@ datasets:
             bytes.extend(value.to_le_bytes());
         }
         bytes
+    }
+
+    fn synthetic_full_hsd_file_with_bzip2_data_block(values: &[u16]) -> Vec<u8> {
+        let mut bytes = synthetic_full_hsd_file();
+        write_u8(&mut bytes, BASIC_INFO_LEN + 9, 2);
+        let header = parse_initial_hsd_header(&bytes).unwrap();
+        let data_offset = header.basic.total_header_length as usize;
+        let raw = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let compressed = bzip2_compress(&raw);
+        bytes.truncate(data_offset);
+        bytes.extend(compressed);
+        bytes
+    }
+
+    fn bzip2_compress(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
     }
 
     fn temp_path(name: &str, extension: &str) -> std::path::PathBuf {
