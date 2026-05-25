@@ -216,7 +216,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` R1-AHI-HSD-bzip2: Add production bzip2/compressed HSD block handling with bounded memory and decompression error tests.
     - `[x]` R1-AHI-HSD-segments: Add multi-segment grouping and assembly for full-disk/band products with missing/duplicate segment tests.
     - `[x]` R1-AHI-HSD-navigation: Add AHI geostationary navigation, area/geolocation metadata, and coordinate/area attachment compatible with Satpy.
-    - `[ ]` R1-AHI-HSD-calibration-full: Add full visible/IR calibration behavior, calibration update blocks, f32 display and f64 scientific output selection, and parity tests.
+    - `[x]` R1-AHI-HSD-calibration-full: Add full visible/IR calibration behavior, calibration update blocks, f32 display and f64 scientific output selection, and parity tests.
     - `[ ]` R1-AHI-HSD-scene-output: Add end-to-end real/sample HSD load -> calibrated dataset -> optional resample/enhance -> PNG/GeoTIFF-style output path.
   - `[ ]` R1-AHI-NC: Complete AHI NetCDF reader before broad reader expansion.
     - `[ ]` R1-AHI-NC-metadata: Inspect Satpy AHI NetCDF reader behavior and map AHI NetCDF groups/variables/attrs into the shared NetCDF metadata model.
@@ -450,7 +450,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M7-AHI-production-a: Complete AHI HSD compressed production file handling and safety limits. Roadmap: R1-AHI-HSD-bzip2.
   - `[x]` M7-AHI-production-b: Complete AHI HSD multi-segment grouping/assembly. Roadmap: R1-AHI-HSD-segments/R0.9.
   - `[x]` M7-AHI-production-c: Complete AHI HSD navigation, area/geolocation metadata, and resampling integration. Roadmap: R1-AHI-HSD-navigation/S1/S7/SC3.
-  - `[ ]` M7-AHI-production-d: Complete AHI HSD calibration parity and f32/f64 output selection. Roadmap: R1-AHI-HSD-calibration-full/I1.
+  - `[x]` M7-AHI-production-d: Complete AHI HSD calibration parity and f32/f64 output selection. Roadmap: R1-AHI-HSD-calibration-full/I1.
   - `[ ]` M7-AHI-production-e: Complete AHI NetCDF metadata/data/geometry loading. Roadmap: R1-AHI-NC/R0.2.
   - `[ ]` M7-AHI-production-f: Add AHI end-to-end tests from representative HSD and NetCDF inputs to corrected/resampled image output. Roadmap: T/SC1/SC3/SC4/W2/W3.
 - `[ ]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
@@ -558,9 +558,9 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 | `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture that caches the parsed fixture grid instead of rereading per chunk | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |
 | AHI HSD initial header parser plus file-handler/reader skeleton can expose band/counts dataset IDs and segment metadata from YAML filename matches | Full lon/lat navigation arrays, geostationary earth-disk masking, gzip-compressed data blocks, and full Satpy YAML instantiation |
 | AHI HSD handler can load uncompressed local/synthetic block-12 raw counts and bzip2 whole-file or block-12-compressed HSD data into a `u16` `DataArray`, with Satpy error/outside-scan masks and bounded decompression/file-size checks | Streaming/chunked HSD reads; current raw-count path still materializes the requested file and compressed data blocks before array construction |
-| AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested | User calibration overrides, updated visible calibration fallback modes, GSICS correction, and production fixture parity tests |
+| AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested; visible calibration supports Satpy-style `UPDATE`/`NOMINAL` mode selection, updated-coefficient fallback, user DN replacement, and user RAD correction | Full GSICS inter-calibration block handling beyond user-supplied RAD coefficients and production fixture parity tests |
 | `AhiHsdReader` can expose a configured calibration, deduplicate segment dataset IDs, validate complete segment sets, assemble matching HSD segments in line order along `y` while preserving dtype and masks, attach Satpy-style geostationary `area` attrs plus x/y projection coordinates, load local uncompressed or whole-file bzip2 HSD through `Scene` planning, resample f64 calibrated HSD datasets from attrs, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, advanced multi-time/file grouping, and production sample output |
-| Current reader inventory/load path still uses `f32` by default for memory-efficient display output | Final scientific/HDR HSD workflows need writer-preserving float/16-bit policies and public selection of the f64 calibrated path |
+| Current reader inventory/load path uses `f32` by default for memory-efficient display output and can opt into `f64` scientific calibrated output through `AhiCalibrationOutput::ScientificF64` | Final scientific/HDR HSD workflows still need writer-preserving float/16-bit policies beyond reader output selection |
 | NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, load an FCI L1C measured-channel counts dataset, read YAML fixture-backed NetCDF trees/arrays from disk, and expose a fixture-backed FCI reader for Scene planning | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
 
 ### rusty_sat_resample

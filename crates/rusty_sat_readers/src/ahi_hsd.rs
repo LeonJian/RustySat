@@ -148,6 +148,95 @@ pub enum AhiCalibration {
     BrightnessTemperature,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AhiCalibrationMode {
+    Nominal,
+    Update,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AhiCalibrationOutput {
+    DisplayF32,
+    ScientificF64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AhiUserCalibrationType {
+    RadianceCorrection,
+    DigitalNumber,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AhiUserCalibrationCoefficients {
+    pub slope: f64,
+    pub offset: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AhiUserCalibration {
+    correction_type: AhiUserCalibrationType,
+    coefficients: BTreeMap<String, AhiUserCalibrationCoefficients>,
+}
+
+impl AhiUserCalibration {
+    pub fn radiance_correction(
+        coefficients: impl IntoIterator<Item = (impl Into<String>, AhiUserCalibrationCoefficients)>,
+    ) -> Result<Self> {
+        Self::new(AhiUserCalibrationType::RadianceCorrection, coefficients)
+    }
+
+    pub fn digital_number(
+        coefficients: impl IntoIterator<Item = (impl Into<String>, AhiUserCalibrationCoefficients)>,
+    ) -> Result<Self> {
+        Self::new(AhiUserCalibrationType::DigitalNumber, coefficients)
+    }
+
+    fn new(
+        correction_type: AhiUserCalibrationType,
+        coefficients: impl IntoIterator<Item = (impl Into<String>, AhiUserCalibrationCoefficients)>,
+    ) -> Result<Self> {
+        let mut values = BTreeMap::new();
+        for (band, coeffs) in coefficients {
+            let band = band.into();
+            if band.trim().is_empty() {
+                return Err(RustySatError::invalid_input(
+                    "AHI user calibration band name cannot be empty",
+                ));
+            }
+            if !coeffs.slope.is_finite() || !coeffs.offset.is_finite() {
+                return Err(RustySatError::invalid_input(
+                    "AHI user calibration coefficients must be finite",
+                ));
+            }
+            if correction_type == AhiUserCalibrationType::RadianceCorrection && coeffs.slope == 0.0
+            {
+                return Err(RustySatError::invalid_input(
+                    "AHI radiance correction slope cannot be zero",
+                ));
+            }
+            values.insert(band, coeffs);
+        }
+        Ok(Self {
+            correction_type,
+            coefficients: values,
+        })
+    }
+
+    fn coefficients_for(&self, band_name: &str) -> AhiUserCalibrationCoefficients {
+        self.coefficients
+            .get(band_name)
+            .copied()
+            .unwrap_or(AhiUserCalibrationCoefficients {
+                slope: 1.0,
+                offset: 0.0,
+            })
+    }
+
+    fn correction_type(&self) -> AhiUserCalibrationType {
+        self.correction_type
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AhiSegmentBlockInfo {
     pub header_block_number: u8,
@@ -193,6 +282,8 @@ pub struct AhiHsdFileHandler {
     file_type: String,
     header: AhiHsdHeader,
     segment: AhiSegmentInfo,
+    calibration_mode: AhiCalibrationMode,
+    user_calibration: Option<AhiUserCalibration>,
 }
 
 impl AhiHsdFileHandler {
@@ -213,6 +304,8 @@ impl AhiHsdFileHandler {
             file_type,
             header: parse_initial_hsd_header(bytes)?,
             segment,
+            calibration_mode: AhiCalibrationMode::Update,
+            user_calibration: None,
         })
     }
 
@@ -251,6 +344,20 @@ impl AhiHsdFileHandler {
 
     pub fn segment(&self) -> AhiSegmentInfo {
         self.segment
+    }
+
+    pub fn calibration_mode(&self) -> AhiCalibrationMode {
+        self.calibration_mode
+    }
+
+    pub fn with_calibration_mode(mut self, mode: AhiCalibrationMode) -> Self {
+        self.calibration_mode = mode;
+        self
+    }
+
+    pub fn with_user_calibration(mut self, user_calibration: AhiUserCalibration) -> Self {
+        self.user_calibration = Some(user_calibration);
+        self
     }
 
     pub fn band_name(&self) -> String {
@@ -295,6 +402,7 @@ impl AhiHsdFileHandler {
         self.attach_common_attrs(&mut dataset)?;
         self.attach_area_attr(&mut dataset)?;
         dataset.insert_attr("calibration", "counts")?;
+        dataset.insert_attr("precision", "native")?;
         dataset.set_array(array);
         Ok(dataset)
     }
@@ -328,6 +436,8 @@ impl AhiHsdFileHandler {
         self.attach_common_attrs(&mut dataset)?;
         self.attach_area_attr(&mut dataset)?;
         dataset.insert_attr("calibration", calibration.name())?;
+        dataset.insert_attr("precision", "f32")?;
+        dataset.insert_attr("calibration_mode", self.calibration_mode.name())?;
         dataset.set_array(array);
         Ok(dataset)
     }
@@ -362,6 +472,7 @@ impl AhiHsdFileHandler {
         self.attach_area_attr(&mut dataset)?;
         dataset.insert_attr("calibration", calibration.name())?;
         dataset.insert_attr("precision", "f64")?;
+        dataset.insert_attr("calibration_mode", self.calibration_mode.name())?;
         dataset.set_array(array);
         Ok(dataset)
     }
@@ -458,21 +569,69 @@ impl AhiHsdFileHandler {
     }
 
     fn counts_to_radiance_f32(&self, counts: &[u16]) -> Vec<f32> {
-        let gain = self.header.calibration.gain_count_to_radiance as f32;
-        let offset = self.header.calibration.offset_count_to_radiance as f32;
-        counts
+        let (gain, offset) = self.radiance_gain_offset();
+        let mut radiance = counts
             .iter()
-            .map(|value| f32::from(*value) * gain + offset)
-            .collect()
+            .map(|value| f32::from(*value) * gain as f32 + offset as f32)
+            .collect::<Vec<_>>();
+        if let Some(user) = &self.user_calibration {
+            if user.correction_type() == AhiUserCalibrationType::RadianceCorrection {
+                let coeffs = user.coefficients_for(&self.band_name());
+                for value in &mut radiance {
+                    *value = (*value - coeffs.offset as f32) / coeffs.slope as f32;
+                }
+            }
+        }
+        radiance
     }
 
     fn counts_to_radiance_f64(&self, counts: &[u16]) -> Vec<f64> {
-        let gain = self.header.calibration.gain_count_to_radiance;
-        let offset = self.header.calibration.offset_count_to_radiance;
-        counts
+        let (gain, offset) = self.radiance_gain_offset();
+        let mut radiance = counts
             .iter()
             .map(|value| f64::from(*value) * gain + offset)
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(user) = &self.user_calibration {
+            if user.correction_type() == AhiUserCalibrationType::RadianceCorrection {
+                let coeffs = user.coefficients_for(&self.band_name());
+                for value in &mut radiance {
+                    *value = (*value - coeffs.offset) / coeffs.slope;
+                }
+            }
+        }
+        radiance
+    }
+
+    fn radiance_gain_offset(&self) -> (f64, f64) {
+        if let Some(user) = &self.user_calibration {
+            if user.correction_type() == AhiUserCalibrationType::DigitalNumber {
+                let coeffs = user.coefficients_for(&self.band_name());
+                return (coeffs.slope, coeffs.offset);
+            }
+        }
+        if self.calibration_mode == AhiCalibrationMode::Update
+            && self.header.calibration.band_number < 7
+        {
+            if let Some(AhiBandCalibration::Visible {
+                calibrated_gain_count_to_radiance,
+                calibrated_offset_count_to_radiance,
+                ..
+            }) = &self.header.calibration.band_calibration
+            {
+                if *calibrated_gain_count_to_radiance != 0.0
+                    || *calibrated_offset_count_to_radiance != 0.0
+                {
+                    return (
+                        *calibrated_gain_count_to_radiance,
+                        *calibrated_offset_count_to_radiance,
+                    );
+                }
+            }
+        }
+        (
+            self.header.calibration.gain_count_to_radiance,
+            self.header.calibration.offset_count_to_radiance,
+        )
     }
 
     fn radiance_to_reflectance_f32(&self, radiance: Vec<f32>) -> Result<Vec<f32>> {
@@ -678,6 +837,7 @@ pub struct AhiHsdReader {
     name: String,
     handlers: Vec<AhiHsdFileHandler>,
     calibration: AhiCalibration,
+    output: AhiCalibrationOutput,
 }
 
 impl AhiHsdReader {
@@ -714,6 +874,7 @@ impl AhiHsdReader {
             name,
             handlers: handlers.into_iter().collect(),
             calibration,
+            output: AhiCalibrationOutput::DisplayF32,
         })
     }
 
@@ -723,6 +884,15 @@ impl AhiHsdReader {
 
     pub fn calibration(&self) -> AhiCalibration {
         self.calibration
+    }
+
+    pub fn output(&self) -> AhiCalibrationOutput {
+        self.output
+    }
+
+    pub fn with_output(mut self, output: AhiCalibrationOutput) -> Self {
+        self.output = output;
+        self
     }
 
     pub fn inventory(&self) -> Result<ReaderInventory> {
@@ -760,18 +930,27 @@ impl Reader for AhiHsdReader {
                 "AHI HSD dataset '{}'",
                 id.name()
             ))),
-            [handler] => handler.load_calibrated_dataset(self.calibration),
+            [handler] => self.load_handler_dataset(handler),
             _ => self.load_assembled_dataset(matching_handlers),
         }
     }
 }
 
 impl AhiHsdReader {
+    fn load_handler_dataset(&self, handler: &AhiHsdFileHandler) -> Result<Dataset> {
+        match self.output {
+            AhiCalibrationOutput::DisplayF32 => handler.load_calibrated_dataset(self.calibration),
+            AhiCalibrationOutput::ScientificF64 => {
+                handler.load_calibrated_dataset_f64(self.calibration)
+            }
+        }
+    }
+
     fn load_assembled_dataset(&self, handlers: Vec<&AhiHsdFileHandler>) -> Result<Dataset> {
         let sorted_handlers = sorted_complete_segment_handlers(handlers)?;
         let mut datasets = Vec::with_capacity(sorted_handlers.len());
         for handler in &sorted_handlers {
-            datasets.push(handler.load_calibrated_dataset(self.calibration)?);
+            datasets.push(self.load_handler_dataset(handler)?);
         }
         assemble_segment_datasets(datasets, &sorted_handlers, self.calibration)
     }
@@ -1375,6 +1554,24 @@ impl AhiCalibration {
             Self::Radiance => "radiance",
             Self::Reflectance => "reflectance",
             Self::BrightnessTemperature => "brightness_temperature",
+        }
+    }
+}
+
+impl AhiCalibrationMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::Update => "update",
+        }
+    }
+}
+
+impl AhiCalibrationOutput {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DisplayF32 => "f32",
+            Self::ScientificF64 => "f64",
         }
     }
 }
@@ -2338,9 +2535,9 @@ file_types:
             panic!("expected f32 reflectance array");
         };
         assert_eq!(radiance.values()[0], 0.0);
-        assert_eq!(radiance.values()[2], 1.0);
+        assert_eq!(radiance.values()[2], 2.0);
         assert_eq!(reflectance.values()[0], 0.0);
-        assert_eq!(reflectance.values()[2], 50.0);
+        assert_eq!(reflectance.values()[2], 100.0);
         assert_eq!(reflectance.is_masked(1), Some(true));
     }
 
@@ -2368,8 +2565,136 @@ file_types:
         let rusty_sat_core::AnyDataArray::F64(reflectance) = reflectance.array().unwrap() else {
             panic!("expected f64 reflectance array");
         };
-        assert_eq!(reflectance.values()[2], 50.0);
+        assert_eq!(reflectance.values()[2], 100.0);
         assert_eq!(reflectance.is_masked(1), Some(true));
+    }
+
+    #[test]
+    fn visible_calibration_can_use_nominal_or_update_with_fallback() {
+        let bytes = synthetic_full_hsd_file_with_visible_calibration();
+        let nominal = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap()
+        .with_calibration_mode(AhiCalibrationMode::Nominal);
+        let update = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+
+        assert_eq!(
+            nominal
+                .calibrate_counts_to_f32(&[0, 100, 200], AhiCalibration::Radiance)
+                .unwrap(),
+            vec![-1.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            update
+                .calibrate_counts_to_f32(&[0, 100, 200], AhiCalibration::Radiance)
+                .unwrap(),
+            vec![-2.0, 0.0, 2.0]
+        );
+
+        let mut fallback_bytes = bytes.clone();
+        let cal = BASIC_INFO_LEN + DATA_INFO_LEN + PROJECTION_INFO_LEN + NAVIGATION_INFO_LEN;
+        write_f64(&mut fallback_bytes, cal + 51, 0.0);
+        write_f64(&mut fallback_bytes, cal + 59, 0.0);
+        let fallback = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B03_S0110.DAT",
+            "hsd_b03",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &fallback_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fallback
+                .calibrate_counts_to_f32(&[0, 100, 200], AhiCalibration::Radiance)
+                .unwrap(),
+            vec![-1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn user_calibration_matches_satpy_rad_and_dn_modes() {
+        let mut bytes = synthetic_full_hsd_file_with_infrared_calibration();
+        let cal = BASIC_INFO_LEN + DATA_INFO_LEN + PROJECTION_INFO_LEN + NAVIGATION_INFO_LEN;
+        write_f64(&mut bytes, cal + 19, -0.0037);
+        write_f64(&mut bytes, cal + 27, 15.20);
+        let base = AhiHsdFileHandler::from_header_bytes(
+            "HS_H08_FLDK_B13_S0110.DAT",
+            "hsd_b13",
+            AhiSegmentInfo::new(1, 10).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        let rad = base.clone().with_user_calibration(
+            AhiUserCalibration::radiance_correction([(
+                "B13",
+                AhiUserCalibrationCoefficients {
+                    slope: 0.95,
+                    offset: -0.1,
+                },
+            )])
+            .unwrap(),
+        );
+        let dn = base.with_user_calibration(
+            AhiUserCalibration::digital_number([(
+                "B13",
+                AhiUserCalibrationCoefficients {
+                    slope: -0.0032,
+                    offset: 15.20,
+                },
+            )])
+            .unwrap(),
+        );
+        let counts = [0_u16, 1000, 2000, 5000];
+
+        let rad_values = rad
+            .calibrate_counts_to_f32(&counts, AhiCalibration::Radiance)
+            .unwrap();
+        let dn_values = dn
+            .calibrate_counts_to_f32(&counts, AhiCalibration::Radiance)
+            .unwrap();
+
+        assert_close_vec(
+            &rad_values,
+            &[16.105263, 12.210526, 8.315789, -3.368421],
+            1.0e-5,
+        );
+        assert_close_vec(&dn_values, &[15.2, 12.0, 8.8, -0.8], 1.0e-6);
+    }
+
+    #[test]
+    fn ahi_hsd_reader_can_select_scientific_f64_output() {
+        let bytes = synthetic_full_hsd_file_with_visible_calibration();
+        let hsd_path = temp_path("ahi_hsd_reader_f64", "DAT");
+        fs::write(&hsd_path, bytes).unwrap();
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let reader = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler])
+            .unwrap()
+            .with_output(AhiCalibrationOutput::ScientificF64);
+        let id = reader.available_dataset_ids().pop().unwrap();
+
+        let dataset = reader.load(&id).unwrap();
+
+        assert_eq!(
+            dataset.attr("precision").and_then(MetadataValue::as_str),
+            Some("f64")
+        );
+        let rusty_sat_core::AnyDataArray::F64(array) = dataset.array().unwrap() else {
+            panic!("expected f64 array");
+        };
+        assert_eq!(array.values()[2], 100.0);
+        fs::remove_file(hsd_path).ok();
     }
 
     #[test]
@@ -2643,6 +2968,16 @@ datasets:
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!(
                 (actual - expected).abs() <= tolerance,
+                "expected {actual} to be within {tolerance} of {expected}"
+            );
+        }
+    }
+
+    fn assert_close_vec(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (*actual - *expected).abs() <= tolerance,
                 "expected {actual} to be within {tolerance} of {expected}"
             );
         }
