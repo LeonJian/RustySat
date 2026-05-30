@@ -334,7 +334,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[~]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
   - `[x]` W3-m7f2b1: Add baseline uncompressed float32 TIFF writer foundation for calibrated/scientific dataset output; CRS/GeoTIFF tags remain future work.
   - `[x]` W3-m7f2b2a: Add dependency-free GeoTIFF tag foundation for float TIFF outputs: model pixel scale, model tiepoint, GeoKey directory, and projection citation derived from dataset `area` attrs or x/y coordinate axes.
-  - `[ ]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
+  - `[x]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
+    - `[x]` W3-hdr-a: Add explicit TIFF sample policy for float32, float64, and scaled u16 outputs with mask/fill handling, scale validation, and autoscale tests.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
 - `[ ]` W5: CF NetCDF writer: dataset saving, CF dimensions/variables/global attrs, geolocation coordinates, `da2cf`, encoding, compression, and chunks.
 
@@ -465,7 +466,8 @@ Before starting or closing a milestone, check this table and update both the mil
       - `[x]` M7-AHI-production-f2a: Add 16-bit PNG dataset output policy and Scene writer tests as the first HDR output assertion path. Roadmap: W2.
       - `[x]` M7-AHI-production-f2b1: Add baseline float32 TIFF scientific output writer and AHI HSD Scene output assertion. Roadmap: W3/SC4.
       - `[x]` M7-AHI-production-f2b2a: Add GeoTIFF tag assertions for area-backed float TIFF output. Roadmap: W3/SC4.
-      - `[ ]` M7-AHI-production-f2b2b: Add representative real/sample parity fixtures and fuller GeoTIFF CRS/COG assertions when sample data and broader W3 support are available. Roadmap: T/W3.
+      - `[x]` M7-AHI-production-f2b2b: Add explicit TIFF HDR/scientific output policy for float64 and scaled u16 outputs while real/sample parity fixtures and fuller GeoTIFF CRS/COG assertions remain dependent on sample data and broader W3 support. Roadmap: W3.
+      - `[ ]` M7-AHI-production-f2b2c: Add representative real/sample parity fixtures and fuller GeoTIFF CRS/COG assertions when sample data and broader W3 support are available. Roadmap: T/W3.
 - `[ ]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
 - `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
 - `[ ]` M10-full-satpy-parity-deferred: Resume full Satpy reader/modifier/orbit/writer/composite parity after AHI HSD and AHI NetCDF are complete.
@@ -618,7 +620,7 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
 | `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers, write u16 PNG from finalized `Image16` buffers, save 2D datasets through current luma finalization, opt into 16-bit dataset-to-PNG output through `Scene::save_dataset`, and preserve more display depth for calibrated AHI outputs | PNG metadata parity, alpha/fill polish beyond existing image buffers, GeoTIFF/scientific float output |
-| `FloatTiffWriter` writes baseline uncompressed single-band float32 TIFF from 2D y/x datasets through `Scene::save_dataset`, preserving calibrated values and configurable fill values for masks; when dataset `area` attrs or x/y coordinate axes are present it writes GeoTIFF model pixel scale, model tiepoint, GeoKey directory, and projection citation tags | Full CRS GeoTIFF key parity, COG layout, compression, tiling, multiband TIFF, BigTIFF, and full Satpy GeoTIFF parity |
+| `FloatTiffWriter` writes baseline uncompressed single-band TIFF from 2D y/x datasets through `Scene::save_dataset`; explicit sample policies support float32, float64, and scaled u16 output with mask/fill handling, and area/x-y metadata writes GeoTIFF model pixel scale, model tiepoint, GeoKey directory, and projection citation tags | Full CRS GeoTIFF key parity, COG layout, compression, tiling, multiband TIFF, BigTIFF, and full Satpy GeoTIFF parity |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
 ### rusty_sat_cli
@@ -647,3 +649,4 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 - `write_png_image` accepts only `&Image` and copies pixel data into the PNG encoder's internal buffers via `save_buffer_with_format`. A consuming `write_png_image_owned(image: Image, …)` that hands `image.into_pixels()` directly to the PNG encoder would avoid the internal copy when the caller no longer needs the `Image`. Add during W2-next writer polish.
 - `write_png16_image` converts u16 samples to PNG-required big-endian bytes before encoding. This preserves 16-bit values, but duplicates the image byte size during encode. Future writer work should stream rows into the PNG encoder if the crate API permits it.
 - PNG compression level is not exposed to callers — `save_buffer_with_format` uses the `image`/`png` crate defaults. Expose a compression preset (Fast/Default/Best) on `SimpleImageWriter` when PNG metadata parity is addressed in W2-next.
+- `FloatTiffWriter` currently materializes a full encoded byte buffer before writing pixels. This keeps the first HDR/scientific TIFF policy simple and testable, but large AHI products should eventually use row/strip streaming and consuming array access to reduce peak memory.

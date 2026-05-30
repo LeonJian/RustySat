@@ -6,7 +6,10 @@ pub mod float_tiff;
 pub mod pgm;
 pub mod simple_image;
 
-pub use float_tiff::{write_float_tiff_dataset, FloatTiffWriter};
+pub use float_tiff::{
+    write_float64_tiff_dataset, write_float_tiff_dataset, write_u16_scaled_tiff_dataset,
+    FloatTiffWriter, TiffSamplePolicy,
+};
 pub use pgm::{
     encode_pgm, encode_pgm_array, encode_pgm_from_f64, write_pgm, write_pgm_array, LinearScale,
     PgmWriter,
