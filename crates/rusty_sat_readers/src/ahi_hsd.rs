@@ -1949,7 +1949,7 @@ mod tests {
         area_from_metadata_value, resample_dataset_from_attrs, source_geometry_from_dataset,
         ResampleOptions, SourceGeometry,
     };
-    use rusty_sat_writers::SimpleImageWriter;
+    use rusty_sat_writers::{FloatTiffWriter, SimpleImageWriter};
     use std::fs;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2045,9 +2045,10 @@ mod tests {
     }
 
     #[test]
-    fn ahi_hsd_reader_drives_scene_load_resample_and_png_output() {
+    fn ahi_hsd_reader_drives_scene_load_resample_and_output_writers() {
         let hsd_path = temp_path("ahi_hsd_scene", "DAT");
         let png_path = temp_path("ahi_hsd_scene", "png");
+        let tiff_path = temp_path("ahi_hsd_scene", "tif");
         fs::write(
             &hsd_path,
             synthetic_full_hsd_file_with_visible_calibration(),
@@ -2089,8 +2090,13 @@ mod tests {
             .unwrap();
 
         assert_png_luma_dimensions_and_bit_depth(&png_path, 3, 2, 16);
+        scene
+            .save_dataset(&id, &FloatTiffWriter::default(), &tiff_path)
+            .unwrap();
+        assert_float_tiff_dimensions_and_first_pixel(&tiff_path, 3, 2);
         fs::remove_file(hsd_path).ok();
         fs::remove_file(png_path).ok();
+        fs::remove_file(tiff_path).ok();
     }
 
     #[test]
@@ -3020,6 +3026,64 @@ datasets:
         );
         assert_eq!(bytes[24], expected_bit_depth);
         assert_eq!(bytes[25], 0);
+    }
+
+    fn assert_float_tiff_dimensions_and_first_pixel(
+        path: &std::path::Path,
+        expected_width: u32,
+        expected_height: u32,
+    ) {
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(&bytes[..2], b"II");
+        assert_eq!(read_le_u16(&bytes, 2), 42);
+        assert_eq!(read_tiff_tag_u32(&bytes, 256), expected_width);
+        assert_eq!(read_tiff_tag_u32(&bytes, 257), expected_height);
+        assert_eq!(read_tiff_tag_u16(&bytes, 258), 32);
+        assert_eq!(read_tiff_tag_u16(&bytes, 339), 3);
+        let offset = read_tiff_tag_u32(&bytes, 273) as usize;
+        assert!(read_le_f32(&bytes, offset).is_finite());
+    }
+
+    fn read_tiff_tag_u16(bytes: &[u8], tag: u16) -> u16 {
+        read_le_u16(bytes, find_tiff_ifd_entry(bytes, tag) + 8)
+    }
+
+    fn read_tiff_tag_u32(bytes: &[u8], tag: u16) -> u32 {
+        read_le_u32(bytes, find_tiff_ifd_entry(bytes, tag) + 8)
+    }
+
+    fn find_tiff_ifd_entry(bytes: &[u8], tag: u16) -> usize {
+        let ifd_offset = read_le_u32(bytes, 4) as usize;
+        let count = read_le_u16(bytes, ifd_offset) as usize;
+        for index in 0..count {
+            let offset = ifd_offset + 2 + index * 12;
+            if read_le_u16(bytes, offset) == tag {
+                return offset;
+            }
+        }
+        panic!("missing TIFF tag {tag}");
+    }
+
+    fn read_le_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    fn read_le_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    fn read_le_f32(bytes: &[u8], offset: usize) -> f32 {
+        f32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
     }
 
     fn write_u8(bytes: &mut [u8], offset: usize, value: u8) {
