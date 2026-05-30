@@ -45,6 +45,7 @@ const GEO_KEY_REVISION: u16 = 1;
 const GEO_KEY_MINOR_REVISION: u16 = 0;
 
 const COMPRESSION_NONE: u16 = 1;
+const COMPRESSION_DEFLATE: u16 = 32946;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
 const SAMPLE_FORMAT_UNSIGNED_INTEGER: u16 = 1;
 const SAMPLE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -53,6 +54,7 @@ const SAMPLE_FORMAT_IEEE_FLOAT: u16 = 3;
 pub struct FloatTiffWriter {
     name: String,
     sample_policy: TiffSamplePolicy,
+    compression: TiffCompression,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +72,12 @@ pub enum TiffSamplePolicy {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TiffCompression {
+    None,
+    Deflate,
+}
+
 impl FloatTiffWriter {
     pub fn new(name: impl Into<String>) -> Result<Self> {
         let name = name.into();
@@ -83,6 +91,7 @@ impl FloatTiffWriter {
             sample_policy: TiffSamplePolicy::Float32 {
                 fill_value: f32::NAN,
             },
+            compression: TiffCompression::None,
         })
     }
 
@@ -115,8 +124,13 @@ impl FloatTiffWriter {
         self.sample_policy.validate().map(|()| self)
     }
 
+    pub fn with_compression(mut self, compression: TiffCompression) -> Self {
+        self.compression = compression;
+        self
+    }
+
     pub fn save_dataset(&self, dataset: &Dataset, path: impl AsRef<Path>) -> Result<()> {
-        write_tiff_dataset_with_policy(dataset, path, &self.sample_policy)
+        write_tiff_dataset_with_policy(dataset, path, &self.sample_policy, self.compression)
     }
 }
 
@@ -127,6 +141,7 @@ impl Default for FloatTiffWriter {
             sample_policy: TiffSamplePolicy::Float32 {
                 fill_value: f32::NAN,
             },
+            compression: TiffCompression::None,
         }
     }
 }
@@ -152,7 +167,12 @@ pub fn write_float_tiff_dataset(
     path: impl AsRef<Path>,
     fill_value: f32,
 ) -> Result<()> {
-    write_tiff_dataset_with_policy(dataset, path, &TiffSamplePolicy::Float32 { fill_value })
+    write_tiff_dataset_with_policy(
+        dataset,
+        path,
+        &TiffSamplePolicy::Float32 { fill_value },
+        TiffCompression::None,
+    )
 }
 
 pub fn write_float64_tiff_dataset(
@@ -160,7 +180,12 @@ pub fn write_float64_tiff_dataset(
     path: impl AsRef<Path>,
     fill_value: f64,
 ) -> Result<()> {
-    write_tiff_dataset_with_policy(dataset, path, &TiffSamplePolicy::Float64 { fill_value })
+    write_tiff_dataset_with_policy(
+        dataset,
+        path,
+        &TiffSamplePolicy::Float64 { fill_value },
+        TiffCompression::None,
+    )
 }
 
 pub fn write_u16_scaled_tiff_dataset(
@@ -178,6 +203,7 @@ pub fn write_u16_scaled_tiff_dataset(
             max: Some(max),
             fill_value,
         },
+        TiffCompression::None,
     )
 }
 
@@ -185,6 +211,7 @@ fn write_tiff_dataset_with_policy(
     dataset: &Dataset,
     path: impl AsRef<Path>,
     sample_policy: &TiffSamplePolicy,
+    compression: TiffCompression,
 ) -> Result<()> {
     sample_policy.validate()?;
     let path = path.as_ref();
@@ -214,6 +241,7 @@ fn write_tiff_dataset_with_policy(
         &sample_data,
         geo_info_from_dataset(dataset)?,
         geo_key_defs,
+        compression,
     )
 }
 
@@ -293,6 +321,7 @@ fn write_tiff_pixels(
     sample_data: &TiffSampleData,
     geo_info: Option<GeoTiffInfo>,
     geo_key_defs: Option<Vec<GeoKeyDef>>,
+    compression: TiffCompression,
 ) -> Result<()> {
     if width == 0 || height == 0 {
         return Err(RustySatError::invalid_input(
@@ -361,7 +390,19 @@ fn write_tiff_pixels(
         TAG_BITS_PER_SAMPLE,
         sample_data.bits_per_sample,
     )?;
-    write_ifd_short(&mut writer, TAG_COMPRESSION, COMPRESSION_NONE)?;
+    let compression_code = match compression {
+        TiffCompression::None => COMPRESSION_NONE,
+        TiffCompression::Deflate => COMPRESSION_DEFLATE,
+    };
+    let (pixel_bytes, strip_byte_count) = if compression == TiffCompression::Deflate {
+        let compressed = compress_deflate(&sample_data.bytes)?;
+        let count = u32::try_from(compressed.len())
+            .map_err(|_| RustySatError::invalid_input("compressed TIFF byte count overflow"))?;
+        (compressed, count)
+    } else {
+        (sample_data.bytes.clone(), byte_count)
+    };
+    write_ifd_short(&mut writer, TAG_COMPRESSION, compression_code)?;
     write_ifd_short(
         &mut writer,
         TAG_PHOTOMETRIC_INTERPRETATION,
@@ -370,7 +411,7 @@ fn write_tiff_pixels(
     write_ifd_long(&mut writer, TAG_STRIP_OFFSETS, pixel_offset)?;
     write_ifd_short(&mut writer, TAG_SAMPLES_PER_PIXEL, 1)?;
     write_ifd_long(&mut writer, TAG_ROWS_PER_STRIP, height_u32)?;
-    write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, byte_count)?;
+    write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, strip_byte_count)?;
     write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
     if let Some(geotiff_data) = geotiff_data.as_ref() {
         geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
@@ -379,7 +420,7 @@ fn write_tiff_pixels(
     if let Some(geotiff_data) = geotiff_data.as_ref() {
         geotiff_data.write_data(&mut writer)?;
     }
-    writer.write_all(&sample_data.bytes).map_err(write_error)?;
+    writer.write_all(&pixel_bytes).map_err(write_error)?;
     Ok(())
 }
 
@@ -795,6 +836,19 @@ fn coord_spacing(values: &[f64]) -> Option<f64> {
     spacing.is_finite().then_some(spacing)
 }
 
+fn compress_deflate(data: &[u8]) -> Result<Vec<u8>> {
+    use flate2::write::DeflateEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).map_err(|err| {
+        RustySatError::invalid_input(format!("DEFLATE compression failed: {err}"))
+    })?;
+    encoder.finish().map_err(|err| {
+        RustySatError::invalid_input(format!("DEFLATE compression failed: {err}"))
+    })
+}
+
 fn f64_values_to_bytes(values: &[f64]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 8);
     for value in values {
@@ -1029,6 +1083,41 @@ mod tests {
         let offset = read_tag_u32(&bytes, TAG_STRIP_OFFSETS) as usize;
         assert_eq!(read_f32(&bytes, offset), 10.0);
         assert_eq!(read_f32(&bytes, offset + 4), 20.0);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_deflate_compressed_tiff() -> Result<()> {
+        use flate2::read::DeflateDecoder;
+        use std::io::Read;
+        let path = temp_tiff_path("writes_deflate_compressed_tiff");
+        let dataset = Dataset::new(DataId::new("B03")?).with_array(
+            DataArray::<f64>::from_vec_named([2, 3], ["y", "x"], vec![1.0f64; 6])?,
+        );
+        let writer = FloatTiffWriter::new("deflate")?.with_compression(TiffCompression::Deflate);
+        writer.save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        assert_eq!(read_tag_u32(&bytes, TAG_IMAGE_WIDTH), 3);
+        assert_eq!(read_tag_u32(&bytes, TAG_IMAGE_LENGTH), 2);
+        assert_eq!(read_tag_u16(&bytes, TAG_COMPRESSION), COMPRESSION_DEFLATE);
+        // compressed data should be smaller than raw (6 × 4 = 24 bytes)
+        let strip_byte_count = read_tag_u32(&bytes, TAG_STRIP_BYTE_COUNTS) as usize;
+        assert!(strip_byte_count < 24, "DEFLATE should reduce 24 bytes to < 24");
+        // decompress and verify pixel data
+        let strip_offset = read_tag_u32(&bytes, TAG_STRIP_OFFSETS) as usize;
+        let compressed = &bytes[strip_offset..strip_offset + strip_byte_count];
+        let mut decoder = DeflateDecoder::new(compressed);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).map_err(|err| {
+            RustySatError::invalid_input(format!("DEFLATE decompression failed: {err}"))
+        })?;
+        assert_eq!(decompressed.len(), 24);
+        // verify first pixel = 1.0f32 (LE bytes)
+        let pixel: f32 = f32::from_le_bytes(decompressed[0..4].try_into().unwrap());
+        assert!((pixel - 1.0).abs() < 1e-10);
         fs::remove_file(path).ok();
         Ok(())
     }

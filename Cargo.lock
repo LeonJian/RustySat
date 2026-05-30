@@ -326,6 +326,7 @@ dependencies = [
 name = "rusty_sat_writers"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "image",
  "png",
  "rusty_sat_core",
