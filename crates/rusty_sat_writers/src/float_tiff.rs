@@ -46,6 +46,11 @@ const GEO_KEY_MINOR_REVISION: u16 = 0;
 
 const COMPRESSION_NONE: u16 = 1;
 const COMPRESSION_DEFLATE: u16 = 32946;
+
+const TAG_TILE_WIDTH: u16 = 322;
+const TAG_TILE_LENGTH: u16 = 323;
+const TAG_TILE_OFFSETS: u16 = 324;
+const TAG_TILE_BYTE_COUNTS: u16 = 325;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
 const SAMPLE_FORMAT_UNSIGNED_INTEGER: u16 = 1;
 const SAMPLE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -55,6 +60,7 @@ pub struct FloatTiffWriter {
     name: String,
     sample_policy: TiffSamplePolicy,
     compression: TiffCompression,
+    tile_options: Option<TiffTileOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +84,21 @@ pub enum TiffCompression {
     Deflate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TiffTileOptions {
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Default for TiffTileOptions {
+    fn default() -> Self {
+        Self {
+            width: 256,
+            height: 256,
+        }
+    }
+}
+
 impl FloatTiffWriter {
     pub fn new(name: impl Into<String>) -> Result<Self> {
         let name = name.into();
@@ -92,6 +113,7 @@ impl FloatTiffWriter {
                 fill_value: f32::NAN,
             },
             compression: TiffCompression::None,
+            tile_options: None,
         })
     }
 
@@ -129,8 +151,19 @@ impl FloatTiffWriter {
         self
     }
 
+    pub fn with_tiles(mut self, options: TiffTileOptions) -> Self {
+        self.tile_options = Some(options);
+        self
+    }
+
     pub fn save_dataset(&self, dataset: &Dataset, path: impl AsRef<Path>) -> Result<()> {
-        write_tiff_dataset_with_policy(dataset, path, &self.sample_policy, self.compression)
+        write_tiff_dataset_with_policy(
+            dataset,
+            path,
+            &self.sample_policy,
+            self.compression,
+            self.tile_options,
+        )
     }
 }
 
@@ -142,6 +175,7 @@ impl Default for FloatTiffWriter {
                 fill_value: f32::NAN,
             },
             compression: TiffCompression::None,
+            tile_options: None,
         }
     }
 }
@@ -172,6 +206,7 @@ pub fn write_float_tiff_dataset(
         path,
         &TiffSamplePolicy::Float32 { fill_value },
         TiffCompression::None,
+        None,
     )
 }
 
@@ -185,6 +220,7 @@ pub fn write_float64_tiff_dataset(
         path,
         &TiffSamplePolicy::Float64 { fill_value },
         TiffCompression::None,
+        None,
     )
 }
 
@@ -204,6 +240,7 @@ pub fn write_u16_scaled_tiff_dataset(
             fill_value,
         },
         TiffCompression::None,
+        None,
     )
 }
 
@@ -212,6 +249,7 @@ fn write_tiff_dataset_with_policy(
     path: impl AsRef<Path>,
     sample_policy: &TiffSamplePolicy,
     compression: TiffCompression,
+    tile_options: Option<TiffTileOptions>,
 ) -> Result<()> {
     sample_policy.validate()?;
     let path = path.as_ref();
@@ -242,6 +280,7 @@ fn write_tiff_dataset_with_policy(
         geo_info_from_dataset(dataset)?,
         geo_key_defs,
         compression,
+        tile_options,
     )
 }
 
@@ -322,6 +361,7 @@ fn write_tiff_pixels(
     geo_info: Option<GeoTiffInfo>,
     geo_key_defs: Option<Vec<GeoKeyDef>>,
     compression: TiffCompression,
+    tile_options: Option<TiffTileOptions>,
 ) -> Result<()> {
     if width == 0 || height == 0 {
         return Err(RustySatError::invalid_input(
@@ -350,14 +390,16 @@ fn write_tiff_pixels(
         .map_err(|_| RustySatError::invalid_input("float TIFF width does not fit u32"))?;
     let height_u32 = u32::try_from(height)
         .map_err(|_| RustySatError::invalid_input("float TIFF height does not fit u32"))?;
-    let byte_count = u32::try_from(sample_data.bytes.len())
+    let _byte_count = u32::try_from(sample_data.bytes.len())
         .map_err(|_| RustySatError::invalid_input("float TIFF byte count overflow"))?;
 
     let geotiff_data = geo_info
         .as_ref()
         .map(|info| GeoTiffExtraData::from_info(info, geo_key_defs.as_deref()))
         .transpose()?;
-    let entry_count = 10_u16
+    let is_tiled = tile_options.is_some();
+    let base_entry_count: u16 = if is_tiled { 11 } else { 10 };
+    let entry_count = base_entry_count
         + geotiff_data
             .as_ref()
             .map(GeoTiffExtraData::geotiff_tag_count)
@@ -375,6 +417,48 @@ fn write_tiff_pixels(
         .checked_add(ifd_bytes)
         .ok_or_else(|| RustySatError::invalid_input("float TIFF GeoTIFF offset overflow"))?;
 
+    let compression_code = match compression {
+        TiffCompression::None => COMPRESSION_NONE,
+        TiffCompression::Deflate => COMPRESSION_DEFLATE,
+    };
+
+    // Pre-compute pixel blocks (strips or tiles)
+    let bytes_per_pixel = usize::from(sample_data.bits_per_sample / 8);
+    let blocks: Vec<Vec<u8>> = if let Some(tiles) = tile_options {
+        build_tile_blocks(
+            &sample_data.bytes,
+            width,
+            height,
+            tiles.width,
+            tiles.height,
+            bytes_per_pixel,
+        )
+    } else {
+        vec![sample_data.bytes.clone()]
+    };
+
+    // Compress blocks if requested
+    let compressed_blocks: Vec<Vec<u8>> = if compression == TiffCompression::Deflate {
+        blocks
+            .iter()
+            .map(|b| compress_deflate(b))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        blocks
+    };
+
+    // Compute block offsets
+    let mut block_offsets = Vec::with_capacity(compressed_blocks.len());
+    let mut current_offset = pixel_offset;
+    for block in &compressed_blocks {
+        block_offsets.push(current_offset);
+        current_offset = current_offset
+            .checked_add(u32::try_from(block.len()).map_err(|_| {
+                RustySatError::invalid_input("TIFF block byte count overflow")
+            })?)
+            .ok_or_else(|| RustySatError::invalid_input("float TIFF block offset overflow"))?;
+    }
+
     let file = File::create(path).map_err(|err| {
         RustySatError::invalid_input(format!("failed to create float TIFF file: {err}"))
     })?;
@@ -390,37 +474,93 @@ fn write_tiff_pixels(
         TAG_BITS_PER_SAMPLE,
         sample_data.bits_per_sample,
     )?;
-    let compression_code = match compression {
-        TiffCompression::None => COMPRESSION_NONE,
-        TiffCompression::Deflate => COMPRESSION_DEFLATE,
-    };
-    let (pixel_bytes, strip_byte_count) = if compression == TiffCompression::Deflate {
-        let compressed = compress_deflate(&sample_data.bytes)?;
-        let count = u32::try_from(compressed.len())
-            .map_err(|_| RustySatError::invalid_input("compressed TIFF byte count overflow"))?;
-        (compressed, count)
-    } else {
-        (sample_data.bytes.clone(), byte_count)
-    };
     write_ifd_short(&mut writer, TAG_COMPRESSION, compression_code)?;
     write_ifd_short(
         &mut writer,
         TAG_PHOTOMETRIC_INTERPRETATION,
         PHOTOMETRIC_BLACK_IS_ZERO,
     )?;
-    write_ifd_long(&mut writer, TAG_STRIP_OFFSETS, pixel_offset)?;
-    write_ifd_short(&mut writer, TAG_SAMPLES_PER_PIXEL, 1)?;
-    write_ifd_long(&mut writer, TAG_ROWS_PER_STRIP, height_u32)?;
-    write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, strip_byte_count)?;
-    write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
-    if let Some(geotiff_data) = geotiff_data.as_ref() {
-        geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
+    if is_tiled {
+        let tiles = tile_options.unwrap();
+        write_ifd_long(&mut writer, TAG_TILE_WIDTH, tiles.width as u32)?;
+        write_ifd_long(&mut writer, TAG_TILE_LENGTH, tiles.height as u32)?;
+        // Write tile offsets as a LONG array
+        let offsets_bytes: Vec<u8> = block_offsets
+            .iter()
+            .flat_map(|o| o.to_le_bytes())
+            .collect();
+        let offsets_data_offset = current_offset;
+        current_offset = current_offset
+            .checked_add(u32::try_from(offsets_bytes.len()).map_err(|_| {
+                RustySatError::invalid_input("TIFF tile offsets overflow")
+            })?)
+            .ok_or_else(|| RustySatError::invalid_input("float TIFF tile offsets overflow"))?;
+        write_ifd_offset(
+            &mut writer,
+            TAG_TILE_OFFSETS,
+            TYPE_LONG,
+            u32::try_from(block_offsets.len()).map_err(|_| {
+                RustySatError::invalid_input("TIFF tile count overflow")
+            })?,
+            offsets_data_offset,
+        )?;
+        // Write tile byte counts
+        let counts_bytes: Vec<u8> = compressed_blocks
+            .iter()
+            .map(|b| u32::try_from(b.len()).unwrap_or(0).to_le_bytes())
+            .flatten()
+            .collect();
+        let counts_data_offset = current_offset;
+        current_offset = current_offset
+            .checked_add(u32::try_from(counts_bytes.len()).map_err(|_| {
+                RustySatError::invalid_input("TIFF tile byte counts overflow")
+            })?)
+            .ok_or_else(|| RustySatError::invalid_input("float TIFF tile byte counts overflow"))?;
+        let _ = current_offset; // offsets/counts are written last, after tile data
+        write_ifd_offset(
+            &mut writer,
+            TAG_TILE_BYTE_COUNTS,
+            TYPE_LONG,
+            u32::try_from(compressed_blocks.len()).map_err(|_| {
+                RustySatError::invalid_input("TIFF tile count overflow")
+            })?,
+            counts_data_offset,
+        )?;
+        write_ifd_short(&mut writer, TAG_SAMPLES_PER_PIXEL, 1)?;
+        write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
+        if let Some(geotiff_data) = geotiff_data.as_ref() {
+            geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
+        }
+        write_u32(&mut writer, 0)?;
+        if let Some(geotiff_data) = geotiff_data.as_ref() {
+            geotiff_data.write_data(&mut writer)?;
+        }
+        // Write tile data
+        for block in &compressed_blocks {
+            writer.write_all(block).map_err(write_error)?;
+        }
+        // Write offsets and counts arrays
+        writer.write_all(&offsets_bytes).map_err(write_error)?;
+        writer.write_all(&counts_bytes).map_err(write_error)?;
+    } else {
+        write_ifd_long(&mut writer, TAG_STRIP_OFFSETS, pixel_offset)?;
+        write_ifd_short(&mut writer, TAG_SAMPLES_PER_PIXEL, 1)?;
+        write_ifd_long(&mut writer, TAG_ROWS_PER_STRIP, height_u32)?;
+        let strip_byte_count = u32::try_from(compressed_blocks[0].len())
+            .map_err(|_| RustySatError::invalid_input("compressed TIFF byte count overflow"))?;
+        write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, strip_byte_count)?;
+        write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
+        if let Some(geotiff_data) = geotiff_data.as_ref() {
+            geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
+        }
+        write_u32(&mut writer, 0)?;
+        if let Some(geotiff_data) = geotiff_data.as_ref() {
+            geotiff_data.write_data(&mut writer)?;
+        }
+        writer
+            .write_all(&compressed_blocks[0])
+            .map_err(write_error)?;
     }
-    write_u32(&mut writer, 0)?;
-    if let Some(geotiff_data) = geotiff_data.as_ref() {
-        geotiff_data.write_data(&mut writer)?;
-    }
-    writer.write_all(&pixel_bytes).map_err(write_error)?;
     Ok(())
 }
 
@@ -836,6 +976,49 @@ fn coord_spacing(values: &[f64]) -> Option<f64> {
     spacing.is_finite().then_some(spacing)
 }
 
+fn build_tile_blocks(
+    pixel_bytes: &[u8],
+    img_width: usize,
+    img_height: usize,
+    tile_width: usize,
+    tile_height: usize,
+    bytes_per_pixel: usize,
+) -> Vec<Vec<u8>> {
+    if tile_width == 0 || tile_height == 0 {
+        return vec![pixel_bytes.to_vec()];
+    }
+    let tiles_x = img_width.div_ceil(tile_width);
+    let tiles_y = img_height.div_ceil(tile_height);
+    let tile_byte_size = tile_width * tile_height * bytes_per_pixel;
+    let mut blocks = Vec::with_capacity(tiles_x * tiles_y);
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let mut tile = vec![0u8; tile_byte_size];
+            let x_start = tx * tile_width;
+            let y_start = ty * tile_height;
+            for (local_y, img_y) in (y_start..(y_start + tile_height).min(img_height)).enumerate() {
+                let src_row_begin = img_y * img_width * bytes_per_pixel;
+                let _src_row_end = src_row_begin + (img_width * bytes_per_pixel).min(pixel_bytes.len());
+                let src_col_start = x_start * bytes_per_pixel;
+                let col_bytes = ((x_start + tile_width).min(img_width) - x_start) * bytes_per_pixel;
+                let dst_row_begin = local_y * tile_width * bytes_per_pixel;
+                if src_row_begin < pixel_bytes.len() && src_col_start < pixel_bytes.len() {
+                    let src_begin = (src_row_begin + src_col_start).min(pixel_bytes.len());
+                    let src_end = (src_begin + col_bytes).min(pixel_bytes.len());
+                    let bytes_to_copy = src_end.saturating_sub(src_begin);
+                    let dst_begin = dst_row_begin.min(tile.len());
+                    let dst_end = (dst_begin + bytes_to_copy).min(tile.len());
+                    if bytes_to_copy > 0 && dst_begin < tile.len() {
+                        tile[dst_begin..dst_end].copy_from_slice(&pixel_bytes[src_begin..src_end]);
+                    }
+                }
+            }
+            blocks.push(tile);
+        }
+    }
+    blocks
+}
+
 fn compress_deflate(data: &[u8]) -> Result<Vec<u8>> {
     use flate2::write::DeflateEncoder;
     use flate2::Compression;
@@ -1083,6 +1266,41 @@ mod tests {
         let offset = read_tag_u32(&bytes, TAG_STRIP_OFFSETS) as usize;
         assert_eq!(read_f32(&bytes, offset), 10.0);
         assert_eq!(read_f32(&bytes, offset + 4), 20.0);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_tiled_tiff() -> Result<()> {
+        let path = temp_tiff_path("writes_tiled_tiff");
+        let dataset = Dataset::new(DataId::new("B03")?).with_array(
+            DataArray::<f64>::from_vec_named([5, 7], ["y", "x"], (0..35).map(|i| i as f64).collect::<Vec<_>>())?,
+        );
+        let tiles = TiffTileOptions {
+            width: 3,
+            height: 2,
+        };
+        FloatTiffWriter::new("tiled")?.with_tiles(tiles).save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        assert_eq!(read_tag_u32(&bytes, TAG_IMAGE_WIDTH), 7);
+        assert_eq!(read_tag_u32(&bytes, TAG_IMAGE_LENGTH), 5);
+        assert_eq!(read_tag_u32(&bytes, TAG_TILE_WIDTH), 3);
+        assert_eq!(read_tag_u32(&bytes, TAG_TILE_LENGTH), 2);
+        // 7×5 with 3×2 tiles = 3 tiles_x × 3 tiles_y = 9 tiles
+        let _ = find_ifd_entry(&bytes, TAG_TILE_OFFSETS); // verify tag exists
+        let tile_offsets_data = read_tag_u32(&bytes, TAG_TILE_OFFSETS) as usize;
+        // Read all 9 tile offsets
+        let mut offsets = Vec::new();
+        for i in 0..9 {
+            offsets.push(read_u32(&bytes, tile_offsets_data + i * 4));
+        }
+        assert_eq!(offsets.len(), 9);
+        // offsets must be strictly increasing
+        for w in offsets.windows(2) {
+            assert!(w[0] < w[1], "tile offsets must be strictly increasing");
+        }
         fs::remove_file(path).ok();
         Ok(())
     }
