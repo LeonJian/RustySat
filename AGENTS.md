@@ -218,11 +218,11 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` R1-AHI-HSD-navigation: Add AHI geostationary navigation, area/geolocation metadata, and coordinate/area attachment compatible with Satpy.
     - `[x]` R1-AHI-HSD-calibration-full: Add full visible/IR calibration behavior, calibration update blocks, f32 display and f64 scientific output selection, and parity tests.
     - `[ ]` R1-AHI-HSD-scene-output: Add end-to-end real/sample HSD load -> calibrated dataset -> optional resample/enhance -> PNG/GeoTIFF-style output path.
-  - `[~]` R1-AHI-NC: Complete AHI NetCDF reader before broad reader expansion.
+  - `[x]` R1-AHI-NC: Complete AHI NetCDF reader before broad reader expansion.
     - `[x]` R1-AHI-NC-metadata: Inspect Satpy AHI NetCDF reader behavior and map AHI NetCDF groups/variables/attrs into the shared NetCDF metadata model.
     - `[x]` R1-AHI-NC-data: Load AHI NetCDF counts/radiance/reflectance/BT datasets with valid-range/fill/mask/scale handling.
     - `[x]` R1-AHI-NC-geometry: Attach area/geolocation coordinates and projection metadata for resampling.
-    - `[ ]` R1-AHI-NC-scene-output: Add Scene load and output tests matching representative Satpy AHI NetCDF behavior.
+    - `[x]` R1-AHI-NC-scene-output: Add Scene load and output tests matching representative Satpy AHI NetCDF behavior.
   - `[x]` R1-m4d3: Add first FCI L1C fixture-backed reader integration that exposes counts dataset IDs, loads measured-channel counts through the NetCDF handler, and participates in Scene load planning.
 - `[ ]` R-full-deferred: Resume broad Satpy reader parity only after AHI HSD and AHI NetCDF are complete. Keep the full reader roadmap below as the long-term compatibility target.
 - `[ ]` R2: LEO L1B readers, including VIIRS, MODIS, AVHRR, EPS, AAPP, OLCI, SLSTR, FY-3, ATMS, MetOp-SG, EarthCARE, PACE, MAIA, SCMI, and Satpy CF re-read.
@@ -451,10 +451,11 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M7-AHI-production-b: Complete AHI HSD multi-segment grouping/assembly. Roadmap: R1-AHI-HSD-segments/R0.9.
   - `[x]` M7-AHI-production-c: Complete AHI HSD navigation, area/geolocation metadata, and resampling integration. Roadmap: R1-AHI-HSD-navigation/S1/S7/SC3.
   - `[x]` M7-AHI-production-d: Complete AHI HSD calibration parity and f32/f64 output selection. Roadmap: R1-AHI-HSD-calibration-full/I1.
-  - `[~]` M7-AHI-production-e: Complete AHI NetCDF metadata/data/geometry loading. Roadmap: R1-AHI-NC/R0.2.
+  - `[x]` M7-AHI-production-e: Complete AHI NetCDF metadata/data/geometry loading. Roadmap: R1-AHI-NC/R0.2.
     - `[x]` M7-AHI-production-e1: Add AHI L2 NetCDF metadata/inventory foundation from Satpy `ahi_l2_nc` behavior. Roadmap: R1-AHI-NC-metadata/R0.2.
     - `[x]` M7-AHI-production-e2: Add AHI L2 NetCDF variable data loading with Satpy-style Rows/Columns -> y/x handling. Roadmap: R1-AHI-NC-data/R0.2.
     - `[x]` M7-AHI-production-e3: Attach AHI L2 NetCDF area metadata and x/y coordinates to loaded datasets for resampling. Roadmap: R1-AHI-NC-geometry/S7.
+    - `[x]` M7-AHI-production-e4: Add Scene load -> resample-from-attrs -> PNG output test for AHI L2 NetCDF fixture data. Roadmap: R1-AHI-NC-scene-output/SC1/SC3/SC4/W2.
   - `[ ]` M7-AHI-production-f: Add AHI end-to-end tests from representative HSD and NetCDF inputs to corrected/resampled image output. Roadmap: T/SC1/SC3/SC4/W2/W3.
 - `[ ]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
 - `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
@@ -564,7 +565,7 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 | AHI HSD handler can parse visible/IR block-5 calibration extensions and produce `f32` radiance/reflectance/brightness-temperature datasets for Satpy-like display paths and `f64` calibrated datasets when precision is requested; visible calibration supports Satpy-style `UPDATE`/`NOMINAL` mode selection, updated-coefficient fallback, user DN replacement, and user RAD correction | Full GSICS inter-calibration block handling beyond user-supplied RAD coefficients and production fixture parity tests |
 | `AhiHsdReader` can expose a configured calibration, deduplicate segment dataset IDs, validate complete segment sets, assemble matching HSD segments in line order along `y` while preserving dtype and masks, attach Satpy-style geostationary `area` attrs plus x/y projection coordinates, load local uncompressed or whole-file bzip2 HSD through `Scene` planning, resample f64 calibrated HSD datasets from attrs, and write a basic PNG through `SimpleImageWriter` in tests | Real Satpy YAML reader instantiation, advanced multi-time/file grouping, and production sample output |
 | Current reader inventory/load path uses `f32` by default for memory-efficient display output and can opt into `f64` scientific calibrated output through `AhiCalibrationOutput::ScientificF64` | Final scientific/HDR HSD workflows still need writer-preserving float/16-bit policies beyond reader output selection |
-| AHI L2 NetCDF fixture reader/handler can validate Satpy `ahi_l2_nc` full-disk global attrs, capture sensor/platform/start/end metadata, expose YAML-mapped dataset IDs by AHI L2 file type, load 2D variables while renaming `Rows`/`Columns` to `y`/`x`, preserve runtime dtype, apply `_FillValue`/`valid_range` masks, copy variable attrs, attach x/y projection coordinates, and attach the hardcoded Himawari full-disk area metadata used by Satpy so S7 source-geometry inference and resampling work | Native NetCDF backend IO, scale/offset execution beyond Satpy `mask_and_scale=False` AHI L2 behavior, real sample parity tests, and broader AHI NetCDF products beyond Satpy `ahi_l2_nc` |
+| AHI L2 NetCDF fixture reader/handler can validate Satpy `ahi_l2_nc` full-disk global attrs, capture sensor/platform/start/end metadata, expose YAML-mapped dataset IDs by AHI L2 file type, load 2D variables while renaming `Rows`/`Columns` to `y`/`x`, preserve runtime dtype, apply `_FillValue`/`valid_range` masks, copy variable attrs, attach x/y projection coordinates, attach the hardcoded Himawari full-disk area metadata used by Satpy, participate in Scene load planning, resample from attrs, and write PNG output through `Scene::save_dataset` | Native NetCDF backend IO, scale/offset execution beyond Satpy `mask_and_scale=False` AHI L2 behavior, real sample parity tests, and broader AHI NetCDF products beyond Satpy `ahi_l2_nc` |
 | NetCDF metadata/file-handler foundation can build Satpy-style `file_content` keys, validate loaded variable arrays against metadata, load an FCI L1C measured-channel counts dataset, read YAML fixture-backed NetCDF trees/arrays from disk, and expose a fixture-backed FCI reader for Scene planning | Native NetCDF/HDF backend opening, real auto mask/scale application, chunked variable data access, and calibrated FCI dataset loading |
 
 ### rusty_sat_resample
