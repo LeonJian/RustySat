@@ -14,7 +14,10 @@ use crate::{
     NetCdfContent, NetCdfDataSource, NetCdfFileHandler, NetCdfFileTypeInfo, NetCdfFixtureSource,
     Reader,
 };
-use rusty_sat_core::{DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError};
+use rusty_sat_core::{
+    AnyDataArray, DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError,
+    ValidityMask,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -209,6 +212,54 @@ impl AhiL2NcFileHandler {
             ),
         ]))
     }
+
+    pub fn load_dataset(
+        &self,
+        dataset_name: &str,
+        source: &impl NetCdfDataSource,
+    ) -> Result<Dataset> {
+        let def = self.dataset_def(dataset_name).ok_or_else(|| {
+            RustySatError::not_found(format!("AHI L2 NetCDF dataset '{dataset_name}'"))
+        })?;
+        let array = self
+            .file_handler
+            .load_variable_array(def.file_key(), source)?;
+        let array = mask_ahi_l2_array(array, |key| {
+            self.file_handler
+                .attr(&format!("{}/attr/{key}", def.file_key()))
+        })?
+        .with_renamed_dims([("Rows", "y"), ("Columns", "x")])?;
+        array.require_dims_exact(&["y", "x"])?;
+
+        let mut dataset = Dataset::new(DataId::new(def.name())?).with_array(array);
+        self.attach_common_dataset_attrs(&mut dataset, def)?;
+        Ok(dataset)
+    }
+
+    fn attach_common_dataset_attrs(
+        &self,
+        dataset: &mut Dataset,
+        def: &AhiL2DatasetDef,
+    ) -> Result<()> {
+        dataset.insert_attr("reader", "ahi_l2_nc")?;
+        dataset.insert_attr("file_type", self.file_type.name())?;
+        dataset.insert_attr("filename", self.file_handler.filename().to_string())?;
+        dataset.insert_attr("variable", def.file_key())?;
+        dataset.insert_attr("sensor", self.sensor.clone())?;
+        dataset.insert_attr("platform_name", self.platform_name.clone())?;
+        dataset.insert_attr("platform_shortname", self.platform_shortname.clone())?;
+        dataset.insert_attr("start_time", self.start_time.clone())?;
+        dataset.insert_attr("end_time", self.end_time.clone())?;
+        let attr_prefix = format!("{}/attr/", def.file_key());
+        for (path, content) in self.file_handler.metadata().iter() {
+            if let Some(key) = path.strip_prefix(&attr_prefix) {
+                if let NetCdfContent::Attribute(value) = content {
+                    dataset.insert_attr(key, value.clone())?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,17 +321,13 @@ impl Reader for AhiL2NcFixtureReader {
     }
 
     fn load(&self, id: &DataId) -> Result<Dataset> {
-        let Some(def) = self.handler.dataset_def(id.name()) else {
+        if self.handler.dataset_def(id.name()).is_none() {
             return Err(RustySatError::not_found(format!(
                 "AHI L2 NetCDF dataset '{}'",
                 id.name()
             )));
-        };
-        Err(RustySatError::unsupported(format!(
-            "AHI L2 NetCDF data loading for '{}' ({})",
-            def.name(),
-            def.file_key()
-        )))
+        }
+        self.handler.load_dataset(id.name(), &self.source)
     }
 }
 
@@ -296,6 +343,80 @@ fn dimension_length(handler: &NetCdfFileHandler, name: &str) -> Result<usize> {
         .get(&format!("dimension/{name}"))
         .and_then(NetCdfContent::as_dimension_length)
         .ok_or_else(|| RustySatError::not_found(format!("AHI L2 NetCDF dimension '{name}'")))
+}
+
+fn mask_ahi_l2_array<'a>(
+    array: AnyDataArray,
+    attr: impl Fn(&str) -> Option<&'a MetadataValue>,
+) -> Result<AnyDataArray> {
+    let valid_range = optional_valid_range(attr("valid_range"))?;
+    let fill_value = attr("_FillValue").and_then(metadata_as_f64);
+    if valid_range.is_none() && fill_value.is_none() && array.mask().is_none() {
+        return Ok(array);
+    }
+
+    let mut mask = array
+        .mask()
+        .cloned()
+        .unwrap_or_else(|| ValidityMask::all_valid(array.len()));
+    let values = array.values_as_f64();
+    for (idx, value) in values.iter().copied().enumerate() {
+        if valid_range.is_some_and(|(min, max)| value < min || value > max)
+            || fill_value.is_some_and(|fill| nearly_equal(value, fill))
+        {
+            mask.set_masked(idx, true);
+        }
+    }
+
+    if mask.masked_count() == 0 && array.mask().is_none() {
+        return Ok(array);
+    }
+    attach_mask(array, mask)
+}
+
+fn attach_mask(array: AnyDataArray, mask: ValidityMask) -> Result<AnyDataArray> {
+    Ok(match array {
+        AnyDataArray::F32(array) => array.with_mask(mask)?.into(),
+        AnyDataArray::F64(array) => array.with_mask(mask)?.into(),
+        AnyDataArray::U8(array) => array.with_mask(mask)?.into(),
+        AnyDataArray::U16(array) => array.with_mask(mask)?.into(),
+        AnyDataArray::I16(array) => array.with_mask(mask)?.into(),
+    })
+}
+
+fn optional_valid_range(value: Option<&MetadataValue>) -> Result<Option<(f64, f64)>> {
+    let Some(MetadataValue::List(values)) = value else {
+        return Ok(None);
+    };
+    if values.len() != 2 {
+        return Err(RustySatError::invalid_input(
+            "AHI L2 NetCDF valid_range must contain exactly two values",
+        ));
+    }
+    let min = metadata_as_f64(&values[0]).ok_or_else(|| {
+        RustySatError::invalid_input("AHI L2 NetCDF valid_range minimum must be numeric")
+    })?;
+    let max = metadata_as_f64(&values[1]).ok_or_else(|| {
+        RustySatError::invalid_input("AHI L2 NetCDF valid_range maximum must be numeric")
+    })?;
+    if min > max {
+        return Err(RustySatError::invalid_input(
+            "AHI L2 NetCDF valid_range minimum cannot exceed maximum",
+        ));
+    }
+    Ok(Some((min, max)))
+}
+
+fn metadata_as_f64(value: &MetadataValue) -> Option<f64> {
+    match value {
+        MetadataValue::Integer(value) => Some(*value as f64),
+        MetadataValue::Float(value) => Some(value.get()),
+        _ => None,
+    }
+}
+
+fn nearly_equal(left: f64, right: f64) -> bool {
+    (left - right).abs() <= f64::EPSILON
 }
 
 fn ahi_l2_projection_metadata() -> BTreeMap<String, MetadataValue> {
@@ -508,6 +629,45 @@ variables:
     shape: [5500, 5500]
 "#;
 
+    const AHI_L2_SMALL_DATA_FIXTURE: &str = r#"
+attrs:
+  time_coverage_start: "2023-08-24T05:40:21Z"
+  time_coverage_end: "2023-08-24T05:49:40Z"
+  instrument_name: AHI
+  satellite_name: Himawari-9
+  cdm_data_type: Full Disk
+dimensions:
+  Rows: 2
+  Columns: 3
+variables:
+  CloudMask:
+    dtype: u16
+    dimensions: [Rows, Columns]
+    shape: [2, 3]
+    attrs:
+      units: "1"
+      _FillValue: 65535
+      valid_range: [0, 2]
+    values: [0, 1, 2, 3, 65535, 1]
+  CloudProbability:
+    dtype: f32
+    dimensions: [Rows, Columns]
+    shape: [2, 3]
+    attrs:
+      units: "1"
+    values: [0.0, 0.25, 0.5, 0.75, 1.0, 0.1]
+  Latitude:
+    dtype: f32
+    dimensions: [Rows, Columns]
+    shape: [2, 3]
+    values: [10.0, 10.1, 10.2, 9.9, 9.8, 9.7]
+  Longitude:
+    dtype: f32
+    dimensions: [Rows, Columns]
+    shape: [2, 3]
+    values: [140.0, 140.1, 140.2, 139.9, 139.8, 139.7]
+"#;
+
     fn filename_info() -> BTreeMap<String, MetadataValue> {
         BTreeMap::from([("platform".to_string(), MetadataValue::string("h09"))])
     }
@@ -655,5 +815,119 @@ variables:
             .unwrap();
 
         assert_eq!(plan.reader_datasets().get("ahi_l2_nc").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ahi_l2_loads_dataset_with_rows_columns_renamed_to_yx() {
+        let source = NetCdfFixtureSource::from_yaml_str(AHI_L2_SMALL_DATA_FIXTURE).unwrap();
+        let reader = AhiL2NcFixtureReader::from_source(
+            "fixture.yaml",
+            filename_info(),
+            AhiL2NcFileType::Mask,
+            source,
+        )
+        .unwrap();
+        let id = DataId::new("cloud_mask").unwrap();
+
+        let dataset = reader.load(&id).unwrap();
+
+        assert_eq!(
+            dataset.attr("reader").and_then(MetadataValue::as_str),
+            Some("ahi_l2_nc")
+        );
+        assert_eq!(
+            dataset.attr("variable").and_then(MetadataValue::as_str),
+            Some("CloudMask")
+        );
+        assert_eq!(
+            dataset.attr("sensor").and_then(MetadataValue::as_str),
+            Some("ahi")
+        );
+        assert_eq!(
+            dataset
+                .attr("platform_name")
+                .and_then(MetadataValue::as_str),
+            Some("Himawari-9")
+        );
+        assert_eq!(
+            dataset.attr("units").and_then(MetadataValue::as_str),
+            Some("1")
+        );
+        let rusty_sat_core::AnyDataArray::U16(array) = dataset.array().unwrap() else {
+            panic!("expected u16 cloud mask");
+        };
+        assert_eq!(array.shape_nd(), &[2, 3]);
+        assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
+        assert_eq!(array.values(), &[0, 1, 2, 3, 65535, 1]);
+        assert_eq!(array.is_masked(2), Some(false));
+        assert_eq!(array.is_masked(3), Some(true));
+        assert_eq!(array.is_masked(4), Some(true));
+    }
+
+    #[test]
+    fn ahi_l2_load_preserves_float_dtype_without_mask_when_no_mask_attrs_exist() {
+        let source = NetCdfFixtureSource::from_yaml_str(AHI_L2_SMALL_DATA_FIXTURE).unwrap();
+        let reader = AhiL2NcFixtureReader::from_source(
+            "fixture.yaml",
+            filename_info(),
+            AhiL2NcFileType::Mask,
+            source,
+        )
+        .unwrap();
+        let id = DataId::new("cloud_probability").unwrap();
+
+        let dataset = reader.load(&id).unwrap();
+
+        let rusty_sat_core::AnyDataArray::F32(array) = dataset.array().unwrap() else {
+            panic!("expected f32 cloud probability");
+        };
+        assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
+        assert_eq!(array.values()[3], 0.75);
+        assert!(array.mask().is_none());
+    }
+
+    #[test]
+    fn ahi_l2_load_rejects_multidimensional_product_like_satpy_reader_note() {
+        let fixture = r#"
+attrs:
+  time_coverage_start: "2023-08-24T05:40:21Z"
+  time_coverage_end: "2023-08-24T05:49:40Z"
+  instrument_name: AHI
+  satellite_name: Himawari-9
+  cdm_data_type: Full Disk
+dimensions:
+  Rows: 2
+  Columns: 3
+  Layer: 2
+variables:
+  CloudProbability:
+    dtype: f32
+    dimensions: [Rows, Columns, Layer]
+    shape: [2, 3, 2]
+    values: [0.0, 0.25, 0.5, 0.75, 1.0, 0.1, 0.0, 0.25, 0.5, 0.75, 1.0, 0.1]
+  Latitude:
+    dtype: f32
+    dimensions: [Rows, Columns]
+    shape: [2, 3]
+    values: [10.0, 10.1, 10.2, 9.9, 9.8, 9.7]
+  Longitude:
+    dtype: f32
+    dimensions: [Rows, Columns]
+    shape: [2, 3]
+    values: [140.0, 140.1, 140.2, 139.9, 139.8, 139.7]
+"#;
+        let source = NetCdfFixtureSource::from_yaml_str(&fixture).unwrap();
+        let reader = AhiL2NcFixtureReader::from_source(
+            "fixture.yaml",
+            filename_info(),
+            AhiL2NcFileType::Mask,
+            source,
+        )
+        .unwrap();
+        let id = DataId::new("cloud_probability").unwrap();
+
+        let err = reader.load(&id).unwrap_err();
+
+        assert!(err.to_string().contains("do not match expected"));
     }
 }

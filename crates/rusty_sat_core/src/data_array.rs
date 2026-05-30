@@ -347,6 +347,46 @@ impl<T: NumericElement> DataArray<T> {
         Ok(self)
     }
 
+    pub fn with_renamed_dims(
+        mut self,
+        replacements: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Result<Self> {
+        let replacements = replacements
+            .into_iter()
+            .map(|(from, to)| (from.into(), to.into()))
+            .collect::<BTreeMap<_, _>>();
+        if replacements.is_empty() {
+            return Ok(self);
+        }
+        for from in replacements.keys() {
+            if !self.dims.iter().any(|dim| dim == from) {
+                return Err(RustySatError::invalid_input(format!(
+                    "cannot rename missing dimension '{from}'"
+                )));
+            }
+        }
+        let renamed_dims = self
+            .dims
+            .iter()
+            .map(|dim| replacements.get(dim).unwrap_or(dim).clone())
+            .collect::<Vec<_>>();
+        validate_dims(&self.shape, &renamed_dims)?;
+        let mut renamed_coords = BTreeMap::new();
+        for (name, coord) in self.coords {
+            let renamed_coord = Coordinate::new(
+                coord
+                    .dims
+                    .into_iter()
+                    .map(|dim| replacements.get(&dim).unwrap_or(&dim).clone()),
+                coord.values,
+            )?;
+            renamed_coords.insert(name, renamed_coord);
+        }
+        self.dims = renamed_dims;
+        self.coords = renamed_coords;
+        Ok(self)
+    }
+
     pub fn dtype(&self) -> DataType {
         T::DTYPE
     }
@@ -690,6 +730,23 @@ impl AnyDataArray {
             Self::U16(array) => array.require_dims_exact(expected),
             Self::I16(array) => array.require_dims_exact(expected),
         }
+    }
+
+    pub fn with_renamed_dims(
+        self,
+        replacements: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Result<Self> {
+        let replacements = replacements
+            .into_iter()
+            .map(|(from, to)| (from.into(), to.into()))
+            .collect::<BTreeMap<_, _>>();
+        Ok(match self {
+            Self::F32(array) => array.with_renamed_dims(replacements.clone())?.into(),
+            Self::F64(array) => array.with_renamed_dims(replacements.clone())?.into(),
+            Self::U8(array) => array.with_renamed_dims(replacements.clone())?.into(),
+            Self::U16(array) => array.with_renamed_dims(replacements.clone())?.into(),
+            Self::I16(array) => array.with_renamed_dims(replacements)?.into(),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -1166,6 +1223,65 @@ mod tests {
         assert_eq!(array.coord("y").unwrap().dims(), &["y".to_string()]);
         assert_eq!(array.coord("y").unwrap().values(), &[10.0, 20.0]);
         assert_eq!(array.coord("x").unwrap().values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn renames_dimensions_without_copying_values_or_losing_mask() {
+        let array = DataArray::<u16>::from_vec_named(
+            vec![2, 3],
+            ["Rows", "Columns"],
+            vec![1, 2, 3, 4, 5, 6],
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags([
+            false, true, false, false, false, true,
+        ]))
+        .unwrap()
+        .with_coordinate(
+            "row_index",
+            Coordinate::axis("Rows", vec![10.0, 20.0]).unwrap(),
+        )
+        .unwrap()
+        .with_coordinate(
+            "scan",
+            Coordinate::new(["Rows", "Columns"], vec![0.0; 6]).unwrap(),
+        )
+        .unwrap();
+
+        let renamed = array
+            .with_renamed_dims([("Rows", "y"), ("Columns", "x")])
+            .unwrap();
+
+        assert_eq!(renamed.dims(), &["y".to_string(), "x".to_string()]);
+        assert_eq!(renamed.values(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(renamed.mask().unwrap().masked_count(), 2);
+        assert_eq!(
+            renamed.coord("row_index").unwrap().dims(),
+            &["y".to_string()]
+        );
+        assert_eq!(
+            renamed.coord("scan").unwrap().dims(),
+            &["y".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_typed_array_renames_dimensions_and_rejects_conflicts() {
+        let array = AnyDataArray::from(
+            DataArray::<u8>::from_vec_named(vec![2, 3], ["Rows", "Columns"], vec![0; 6]).unwrap(),
+        );
+
+        let renamed = array
+            .with_renamed_dims([("Rows", "y"), ("Columns", "x")])
+            .unwrap();
+
+        assert_eq!(renamed.dtype(), DataType::U8);
+        assert_eq!(renamed.dims(), &["y".to_string(), "x".to_string()]);
+        assert!(renamed
+            .with_renamed_dims([("missing", "y")])
+            .unwrap_err()
+            .to_string()
+            .contains("missing dimension"));
     }
 
     #[test]
