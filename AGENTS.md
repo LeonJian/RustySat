@@ -296,7 +296,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 - `[ ]` I4: Color-space conversion and utility ramps.
 - `[~]` I5: Satpy enhancer framework and YAML enhancement chains.
   - `[x]` I5-m5d1: Add inert YAML enhancement registry parsing for Satpy-style enhancement match entries and ordered operations, storing Python method tags as plain strings.
-  - `[ ]` I5-next: Execute supported enhancement operations against `FloatImage` and integrate default/sensor enhancement lookup.
+  - `[~]` I5-next: Execute supported enhancement operations against `FloatImage` and integrate default/sensor enhancement lookup.
+    - `[x]` I5-next-a: Add safe allow-listed enhancement execution for parsed `stretch`/`gamma`/`invert` operations against `FloatImage<f32/f64>`; unsupported Python-tag methods are rejected in strict mode.
 - `[ ]` I6: Instrument enhancements for ABI, AHI, VIIRS, MIMIC, and enhancement YAML data.
 - `[ ]` I7: Convolution filters and overlays.
 
@@ -473,6 +474,7 @@ Before starting or closing a milestone, check this table and update both the mil
 - `[~]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
   - `[x]` M8-writers-composites-focused-a: Add extension-based built-in writer selection for current output formats. Roadmap: W1/SC4.
   - `[x]` M8-writers-composites-focused-b: Add JPEG output support for simple u8 image/dataset workflows. Roadmap: W2.
+  - `[x]` M8-writers-composites-focused-c: Execute the first safe subset of YAML enhancement operations. Roadmap: I5.
 - `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
 - `[ ]` M10-full-satpy-parity-deferred: Resume full Satpy reader/modifier/orbit/writer/composite parity after AHI HSD and AHI NetCDF are complete.
 
@@ -609,7 +611,7 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 | Execute `RgbCompositor` for three matching 2D single-band runtime-typed datasets into a band-major `bands,y,x` f64 dataset with Satpy-like common-channel mask behavior; large callers should use the consuming `compose_rgb_owned` path | Full `CompositeBase`/`GenericCompositor` parity, metadata combination, optional prerequisites, YAML composite loading, or Scene dependency execution |
 | Execute `ArithmeticCompositor` for matching runtime-typed arrays with difference, ratio, sum, and normalized-difference operations; masks are OR-propagated and large callers can use `compose_owned` to reuse the consumed left-hand f64 buffer for output | Full arithmetic YAML integration, metadata combination parity, multi-input/channel-operation compositors, or Scene dependency execution |
 | Execute `SpectralBlender` weighted 2D channel blends and `BandReplacementCompositor` band-major channel replacement with mask propagation and owned variants for large buffers | NDVI hybrid green, natural enhancement, spectral YAML integration, metadata combination parity, or Scene dependency execution |
-| Parse Satpy-style composite/enhancement YAML sections into inert typed registry definitions, including `!!python/name:` tags as non-executable strings and inline composite dependencies | Instantiate compositors/enhancers from YAML, execute enhancement chains, merge sensor/default configs, or run composites through `Scene` |
+| Parse Satpy-style composite/enhancement YAML sections into inert typed registry definitions, including `!!python/name:` tags as non-executable strings and inline composite dependencies; execute allow-listed `stretch`/`gamma`/`invert` enhancement operations against `FloatImage<f32/f64>` | Instantiate compositors from YAML, execute unsupported enhancement operations such as colormaps/palettes/piecewise stretches, merge sensor/default configs, or run composites/enhancements through `Scene` |
 | Define `CompositeRecipe` and `ModifierRecipe` in `rusty_sat_core` | Execute registered composite/modifier recipes through `Scene` |
 
 ### rusty_sat_image
