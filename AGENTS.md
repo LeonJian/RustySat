@@ -340,8 +340,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
     - `[x]` W3-hdr-a: Add explicit TIFF sample policy for float32, float64, and scaled u16 outputs with mask/fill handling, scale validation, and autoscale tests.
   - `[ ]` W3-CRS-GeoKey: Add full CRS-to-GeoTIFF GeoKey mapping for all supported projection types.
-    - `[ ]` W3-CRS-GeoKey-a: Define GeoTIFF GeoKey constants, logical GeoKey types (`GeoKeyDef`, `GeoKeyValue`, `GeoTiffGeoKeyFinal`), and `finalize_geo_key_defs()` in a new `rusty_sat_resample::geo_keys` module.
-    - `[ ]` W3-CRS-GeoKey-b: Add `ProjCrs::to_geotiff_geo_key_defs()` with per-projection handlers for geos, longlat, stere, laea, and merc.
+    - `[x]` W3-CRS-GeoKey-a: Define GeoTIFF GeoKey constants, logical GeoKey types (`GeoKeyDef`, `GeoKeyValue`, `GeoTiffGeoKeyFinal`), and `finalize_geo_key_defs()` in a new `rusty_sat_resample::geo_keys` module.
+    - `[~]` W3-CRS-GeoKey-b: Add `ProjCrs::to_geotiff_geo_key_defs()` with per-projection handlers for geos, longlat, stere, laea, and merc.
     - `[ ]` W3-CRS-GeoKey-c: Add `rusty_sat_resample` dependency to `rusty_sat_writers`, add `proj_crs_from_dataset()` helper, and refactor `FloatTiffWriter` to consume ProjCrs-derived GeoKey defs with `TAG_GEO_DOUBLE_PARAMS` support.
     - `[ ]` W3-CRS-GeoKey-d: Add comprehensive GeoKey tests: 5 projection types, geographic CRS, binary output verification, and fallback for unknown projections.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
