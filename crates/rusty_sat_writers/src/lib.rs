@@ -15,7 +15,8 @@ pub use pgm::{
     PgmWriter,
 };
 pub use simple_image::{
-    write_png16_image, write_png_image, SimpleImageDatasetBitDepth, SimpleImageWriter,
+    write_image, write_jpeg_image, write_png16_image, write_png_image, SimpleImageDatasetBitDepth,
+    SimpleImageWriter,
 };
 
 use rusty_sat_core::{Dataset, DatasetWriter, Result, RustySatError};
@@ -181,7 +182,7 @@ impl BuiltinWriterFactory {
             .to_ascii_lowercase();
         match extension.as_str() {
             "pgm" => Ok(BuiltinWriter::Pgm(PgmWriter::default())),
-            "png" => Ok(BuiltinWriter::SimpleImage(
+            "png" | "jpg" | "jpeg" => Ok(BuiltinWriter::SimpleImage(
                 SimpleImageWriter::default().with_dataset_bit_depth(self.png_bit_depth),
             )),
             "tif" | "tiff" => Ok(BuiltinWriter::FloatTiff(float_tiff_writer_from_policy(
@@ -303,6 +304,10 @@ mod tests {
         assert_eq!(writer_for_extension("pgm")?.kind(), BuiltinWriterKind::Pgm);
         assert_eq!(
             writer_for_extension(".PNG")?.kind(),
+            BuiltinWriterKind::SimpleImage
+        );
+        assert_eq!(
+            writer_for_extension("jpeg")?.kind(),
             BuiltinWriterKind::SimpleImage
         );
         assert_eq!(

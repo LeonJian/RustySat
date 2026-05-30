@@ -7,9 +7,10 @@
 //!   output format from the filename extension when no explicit format is
 //!   provided.
 //!
-//! This slice intentionally implements PNG output for already-finalized u8 and
-//! u16 images. Dataset enhancement, compression controls, and metadata parity
-//! are separate roadmap items.
+//! This slice intentionally implements extension-detected PNG/JPEG output for
+//! already-finalized u8 images and PNG output for u16 images. Dataset
+//! enhancement, compression controls, and metadata parity are separate roadmap
+//! items.
 
 use crate::Writer;
 use image::{ColorType, ImageFormat};
@@ -75,7 +76,7 @@ impl Writer for SimpleImageWriter {
     }
 
     fn save_image(&self, image: &Image, path: &Path) -> Result<()> {
-        write_png_image(image, path)
+        write_image(image, path)
     }
 
     fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
@@ -118,6 +119,26 @@ pub fn write_png_image(image: &Image, path: impl AsRef<Path>) -> Result<()> {
     .map_err(|err| RustySatError::invalid_input(format!("failed to save PNG image: {err}")))
 }
 
+pub fn write_jpeg_image(image: &Image, path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    let format = image_format_from_path(path)?;
+    if format != ImageFormat::Jpeg {
+        return Err(RustySatError::unsupported(format!(
+            "simple image format '{}'",
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("<missing>")
+        )));
+    }
+    write_u8_image_with_format(image, path, format)
+}
+
+pub fn write_image(image: &Image, path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    let format = image_format_from_path(path)?;
+    write_u8_image_with_format(image, path, format)
+}
+
 pub fn write_png16_image(image: &Image16, path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     let format = image_format_from_path(path)?;
@@ -158,13 +179,33 @@ fn image_format_from_path(path: &Path) -> Result<ImageFormat> {
             "image filename must include an extension",
         ));
     };
-    if extension.eq_ignore_ascii_case("png") {
-        Ok(ImageFormat::Png)
-    } else {
-        Err(RustySatError::unsupported(format!(
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => Ok(ImageFormat::Png),
+        "jpg" | "jpeg" => Ok(ImageFormat::Jpeg),
+        _ => Err(RustySatError::unsupported(format!(
             "simple image format '{extension}'"
-        )))
+        ))),
     }
+}
+
+fn write_u8_image_with_format(image: &Image, path: &Path, format: ImageFormat) -> Result<()> {
+    if format == ImageFormat::Jpeg && image.mode() == ImageMode::Rgba {
+        return Err(RustySatError::unsupported(
+            "JPEG output from RGBA images; convert to Luma or RGB first",
+        ));
+    }
+    let (height, width) = image.shape();
+    image::save_buffer_with_format(
+        path,
+        image.pixels(),
+        u32::try_from(width)
+            .map_err(|_| RustySatError::invalid_input("image width does not fit u32"))?,
+        u32::try_from(height)
+            .map_err(|_| RustySatError::invalid_input("image height does not fit u32"))?,
+        color_type(image.mode()),
+        format,
+    )
+    .map_err(|err| RustySatError::invalid_input(format!("failed to save simple image file: {err}")))
 }
 
 fn color_type(mode: ImageMode) -> ColorType {
@@ -231,6 +272,36 @@ mod tests {
     }
 
     #[test]
+    fn writes_luma_jpeg_image() -> Result<()> {
+        let path = temp_path("writes_luma_jpeg_image", "jpg");
+        let image = Image::from_pixels(ImageMode::Luma, 2, 2, vec![0, 64, 128, 255])?;
+
+        write_jpeg_image(&image, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_luma8();
+        assert_eq!(decoded.dimensions(), (2, 2));
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_rgb_jpeg_image_with_extension_detection() -> Result<()> {
+        let path = temp_path("writes_rgb_jpeg_image_with_extension_detection", "jpeg");
+        let image = Image::from_pixels(ImageMode::Rgb, 1, 2, vec![255, 0, 0, 0, 255, 0])?;
+
+        SimpleImageWriter::default().save_image(&image, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_rgb8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
     fn writes_rgba_png_image() -> Result<()> {
         let path = temp_png_path("writes_rgba_png_image");
         let image = Image::from_pixels(ImageMode::Rgba, 1, 1, vec![1, 2, 3, 4])?;
@@ -242,6 +313,19 @@ mod tests {
             .into_rgba8();
         assert_eq!(decoded.as_raw(), &[1, 2, 3, 4]);
         fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_rgba_jpeg_image() -> Result<()> {
+        let path = temp_path("rejects_rgba_jpeg_image", "jpg");
+        let image = Image::from_pixels(ImageMode::Rgba, 1, 1, vec![1, 2, 3, 4])?;
+
+        let err = SimpleImageWriter::default()
+            .save_image(&image, &path)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unsupported feature"));
         Ok(())
     }
 
@@ -312,6 +396,23 @@ mod tests {
             .into_luma8();
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.as_raw(), &[0, 255]);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn saves_dataset_as_luma_jpeg() -> Result<()> {
+        let path = temp_path("saves_dataset_as_luma_jpeg", "jpg");
+        let dataset = Dataset::new(DataId::new("VIS006")?).with_array(
+            DataArray::<u8>::from_vec_named([1, 2], ["y", "x"], vec![0, 10])?,
+        );
+
+        SimpleImageWriter::default().save_dataset(&dataset, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_luma8();
+        assert_eq!(decoded.dimensions(), (2, 1));
         fs::remove_file(path).ok();
         Ok(())
     }
@@ -390,6 +491,19 @@ mod tests {
         let image = Image::from_pixels(ImageMode::Luma, 1, 1, vec![0])?;
         let err =
             write_png_image(&image, temp_path("rejects_non_png_extension", "jpg")).unwrap_err();
+
+        assert!(err.to_string().contains("unsupported feature"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_16_bit_jpeg_output() -> Result<()> {
+        let path = temp_path("rejects_16_bit_jpeg_output", "jpg");
+        let image = Image16::from_pixels(ImageMode::Luma, 1, 1, vec![65535])?;
+
+        let err = SimpleImageWriter::default()
+            .save_image16(&image, &path)
+            .unwrap_err();
 
         assert!(err.to_string().contains("unsupported feature"));
         Ok(())

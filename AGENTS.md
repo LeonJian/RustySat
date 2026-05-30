@@ -331,7 +331,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` W2-m2d: PNG writer using the Rust `image` crate with format detection and u8 Luma/RGB/RGBA image support.
   - `[x]` W2-m2d2: Add 16-bit PNG/HDR output path or a clearly typed writer interface that can preserve 16-bit display output.
   - `[x]` W2-m7f2a: Add explicit 16-bit dataset-to-PNG output mode for `SimpleImageWriter` and `Scene::save_dataset`, preserving more display depth for AHI scientific/calibrated outputs.
-  - `[ ]` W2-next: JPEG output, transparency/fill/mode polish, PNG metadata parity, and broader Satpy `PillowWriter` behavior.
+  - `[~]` W2-next: JPEG output, transparency/fill/mode polish, PNG metadata parity, and broader Satpy `PillowWriter` behavior.
+    - `[x]` W2-next-a: Add extension-detected JPEG output for u8 Luma/RGB images and datasets, with explicit RGBA/16-bit rejection tests.
 - `[~]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
   - `[x]` W3-m7f2b1: Add baseline uncompressed float32 TIFF writer foundation for calibrated/scientific dataset output; CRS/GeoTIFF tags remain future work.
   - `[x]` W3-m7f2b2a: Add dependency-free GeoTIFF tag foundation for float TIFF outputs: model pixel scale, model tiepoint, GeoKey directory, and projection citation derived from dataset `area` attrs or x/y coordinate axes.
@@ -471,6 +472,7 @@ Before starting or closing a milestone, check this table and update both the mil
       - `[ ]` M7-AHI-production-f2b2c: Add representative real/sample parity fixtures and fuller GeoTIFF CRS/COG assertions when sample data and broader W3 support are available. Roadmap: T/W3.
 - `[~]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
   - `[x]` M8-writers-composites-focused-a: Add extension-based built-in writer selection for current output formats. Roadmap: W1/SC4.
+  - `[x]` M8-writers-composites-focused-b: Add JPEG output support for simple u8 image/dataset workflows. Roadmap: W2.
 - `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
 - `[ ]` M10-full-satpy-parity-deferred: Resume full Satpy reader/modifier/orbit/writer/composite parity after AHI HSD and AHI NetCDF are complete.
 
@@ -621,9 +623,9 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 | Can | Cannot |
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
-| `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers, write u16 PNG from finalized `Image16` buffers, save 2D datasets through current luma finalization, opt into 16-bit dataset-to-PNG output through `Scene::save_dataset`, and preserve more display depth for calibrated AHI outputs | PNG metadata parity, alpha/fill polish beyond existing image buffers, GeoTIFF/scientific float output |
+| `SimpleImageWriter` write u8 PNG/JPEG from finalized Luma/RGB `Image` buffers, u8 PNG from RGBA buffers, u16 PNG from `Image16` buffers, save 2D datasets through current luma finalization, and opt into 16-bit dataset-to-PNG output through `Scene::save_dataset` | PNG/JPEG metadata parity, JPEG alpha handling beyond explicit RGBA rejection, 16-bit JPEG, alpha/fill polish beyond existing image buffers |
 | `FloatTiffWriter` writes baseline uncompressed single-band TIFF from 2D y/x datasets through `Scene::save_dataset`; explicit sample policies support float32, float64, and scaled u16 output with mask/fill handling, and area/x-y metadata writes GeoTIFF model pixel scale, model tiepoint, GeoKey directory, and projection citation tags | Full CRS GeoTIFF key parity, COG layout, compression, tiling, multiband TIFF, BigTIFF, and full Satpy GeoTIFF parity |
-| `BuiltinWriterFactory` selects current dataset writers by filename extension (`.pgm`, `.png`, `.tif`, `.tiff`) with configurable PNG bit depth and TIFF sample policy | Satpy writer YAML loading, filename templating, writer config merging, and multi-dataset writer orchestration |
+| `BuiltinWriterFactory` selects current dataset writers by filename extension (`.pgm`, `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`) with configurable PNG bit depth and TIFF sample policy | Satpy writer YAML loading, filename templating, writer config merging, and multi-dataset writer orchestration |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
 ### rusty_sat_cli
