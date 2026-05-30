@@ -1,8 +1,8 @@
-//! Minimal scientific TIFF writer foundation.
+//! Minimal scientific TIFF/GeoTIFF writer foundation.
 //!
 //! This is intentionally a baseline uncompressed TIFF writer, not full GeoTIFF
-//! parity yet. It preserves calibrated values as 32-bit floating point samples
-//! so AHI scientific output paths do not have to go through display scaling.
+//! parity yet. It preserves calibrated values as floating point samples, and
+//! provides an explicit scaled u16 path for HDR display-oriented products.
 
 use crate::Writer;
 use rusty_sat_core::{Dataset, MetadataValue, Result, RustySatError};
@@ -36,6 +36,7 @@ const TYPE_DOUBLE: u16 = 12;
 
 const COMPRESSION_NONE: u16 = 1;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
+const SAMPLE_FORMAT_UNSIGNED_INTEGER: u16 = 1;
 const SAMPLE_FORMAT_IEEE_FLOAT: u16 = 3;
 const GEO_KEY_DIRECTORY_VERSION: u16 = 1;
 const GEO_KEY_REVISION: u16 = 1;
@@ -51,7 +52,22 @@ const GEO_USER_DEFINED: u16 = 32767;
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatTiffWriter {
     name: String,
-    fill_value: f32,
+    sample_policy: TiffSamplePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TiffSamplePolicy {
+    Float32 {
+        fill_value: f32,
+    },
+    Float64 {
+        fill_value: f64,
+    },
+    UInt16Scaled {
+        min: Option<f64>,
+        max: Option<f64>,
+        fill_value: u16,
+    },
 }
 
 impl FloatTiffWriter {
@@ -64,17 +80,43 @@ impl FloatTiffWriter {
         }
         Ok(Self {
             name,
-            fill_value: f32::NAN,
+            sample_policy: TiffSamplePolicy::Float32 {
+                fill_value: f32::NAN,
+            },
         })
     }
 
     pub fn with_fill_value(mut self, fill_value: f32) -> Self {
-        self.fill_value = fill_value;
+        self.sample_policy = TiffSamplePolicy::Float32 { fill_value };
         self
     }
 
+    pub fn with_float64_output(mut self, fill_value: f64) -> Self {
+        self.sample_policy = TiffSamplePolicy::Float64 { fill_value };
+        self
+    }
+
+    pub fn with_u16_auto_scaled_output(mut self, fill_value: u16) -> Self {
+        self.sample_policy = TiffSamplePolicy::UInt16Scaled {
+            min: None,
+            max: None,
+            fill_value,
+        };
+        self
+    }
+
+    pub fn with_u16_scaled_output(mut self, min: f64, max: f64, fill_value: u16) -> Result<Self> {
+        validate_u16_scale(min, max)?;
+        self.sample_policy = TiffSamplePolicy::UInt16Scaled {
+            min: Some(min),
+            max: Some(max),
+            fill_value,
+        };
+        self.sample_policy.validate().map(|()| self)
+    }
+
     pub fn save_dataset(&self, dataset: &Dataset, path: impl AsRef<Path>) -> Result<()> {
-        write_float_tiff_dataset(dataset, path, self.fill_value)
+        write_tiff_dataset_with_policy(dataset, path, &self.sample_policy)
     }
 }
 
@@ -82,7 +124,9 @@ impl Default for FloatTiffWriter {
     fn default() -> Self {
         Self {
             name: "float_tiff".to_string(),
-            fill_value: f32::NAN,
+            sample_policy: TiffSamplePolicy::Float32 {
+                fill_value: f32::NAN,
+            },
         }
     }
 }
@@ -108,6 +152,41 @@ pub fn write_float_tiff_dataset(
     path: impl AsRef<Path>,
     fill_value: f32,
 ) -> Result<()> {
+    write_tiff_dataset_with_policy(dataset, path, &TiffSamplePolicy::Float32 { fill_value })
+}
+
+pub fn write_float64_tiff_dataset(
+    dataset: &Dataset,
+    path: impl AsRef<Path>,
+    fill_value: f64,
+) -> Result<()> {
+    write_tiff_dataset_with_policy(dataset, path, &TiffSamplePolicy::Float64 { fill_value })
+}
+
+pub fn write_u16_scaled_tiff_dataset(
+    dataset: &Dataset,
+    path: impl AsRef<Path>,
+    min: f64,
+    max: f64,
+    fill_value: u16,
+) -> Result<()> {
+    write_tiff_dataset_with_policy(
+        dataset,
+        path,
+        &TiffSamplePolicy::UInt16Scaled {
+            min: Some(min),
+            max: Some(max),
+            fill_value,
+        },
+    )
+}
+
+fn write_tiff_dataset_with_policy(
+    dataset: &Dataset,
+    path: impl AsRef<Path>,
+    sample_policy: &TiffSamplePolicy,
+) -> Result<()> {
+    sample_policy.validate()?;
     let path = path.as_ref();
     validate_tiff_extension(path)?;
     let Some(array) = dataset.array() else {
@@ -125,32 +204,91 @@ pub fn write_float_tiff_dataset(
     let (height, width) = array.shape_yx()?;
     let values = array.values_as_f64();
     let mask = array.mask();
-    let pixels = values
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            if mask.is_some_and(|mask| mask.is_masked(idx) == Some(true)) || !value.is_finite() {
-                fill_value
-            } else {
-                *value as f32
-            }
-        })
-        .collect::<Vec<_>>();
+    let sample_data = sample_policy.encode_values(&values, mask)?;
 
-    write_float_tiff_pixels(
+    write_tiff_pixels(
         path,
         width,
         height,
-        &pixels,
+        &sample_data,
         geo_info_from_dataset(dataset)?,
     )
 }
 
-fn write_float_tiff_pixels(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TiffSampleData {
+    bits_per_sample: u16,
+    sample_format: u16,
+    bytes: Vec<u8>,
+}
+
+impl TiffSamplePolicy {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Float32 { fill_value } => finite_or_nan(*fill_value as f64, "float32 fill value"),
+            Self::Float64 { fill_value } => finite_or_nan(*fill_value, "float64 fill value"),
+            Self::UInt16Scaled { min, max, .. } => match (*min, *max) {
+                (Some(min), Some(max)) => validate_u16_scale(min, max),
+                (None, None) => Ok(()),
+                _ => Err(RustySatError::invalid_input(
+                    "u16 scaled TIFF output requires both min and max or neither",
+                )),
+            },
+        }
+    }
+
+    fn encode_values(
+        &self,
+        values: &[f64],
+        mask: Option<&rusty_sat_core::ValidityMask>,
+    ) -> Result<TiffSampleData> {
+        match self {
+            Self::Float32 { fill_value } => Ok(TiffSampleData {
+                bits_per_sample: 32,
+                sample_format: SAMPLE_FORMAT_IEEE_FLOAT,
+                bytes: encode_f32_samples(values, mask, *fill_value),
+            }),
+            Self::Float64 { fill_value } => Ok(TiffSampleData {
+                bits_per_sample: 64,
+                sample_format: SAMPLE_FORMAT_IEEE_FLOAT,
+                bytes: encode_f64_samples(values, mask, *fill_value),
+            }),
+            Self::UInt16Scaled {
+                min,
+                max,
+                fill_value,
+            } => {
+                let (scale_min, scale_max) = match (*min, *max) {
+                    (Some(min), Some(max)) => (min, max),
+                    (None, None) => finite_min_max(values, mask).ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "u16 scaled TIFF output has no finite unmasked values for autoscale",
+                        )
+                    })?,
+                    _ => unreachable!("sample policy validation rejects partial u16 scale"),
+                };
+                validate_u16_scale(scale_min, scale_max)?;
+                Ok(TiffSampleData {
+                    bits_per_sample: 16,
+                    sample_format: SAMPLE_FORMAT_UNSIGNED_INTEGER,
+                    bytes: encode_u16_scaled_samples(
+                        values,
+                        mask,
+                        scale_min,
+                        scale_max,
+                        *fill_value,
+                    ),
+                })
+            }
+        }
+    }
+}
+
+fn write_tiff_pixels(
     path: &Path,
     width: usize,
     height: usize,
-    pixels: &[f32],
+    sample_data: &TiffSampleData,
     geo_info: Option<GeoTiffInfo>,
 ) -> Result<()> {
     if width == 0 || height == 0 {
@@ -161,21 +299,27 @@ fn write_float_tiff_pixels(
     let pixel_count = width
         .checked_mul(height)
         .ok_or_else(|| RustySatError::invalid_input("float TIFF pixel count overflow"))?;
-    if pixel_count != pixels.len() {
+    let bytes_per_sample = usize::from(sample_data.bits_per_sample / 8);
+    if sample_data.bits_per_sample % 8 != 0 || bytes_per_sample == 0 {
+        return Err(RustySatError::invalid_input(
+            "TIFF bits per sample must be a positive multiple of 8",
+        ));
+    }
+    let expected_byte_count = pixel_count
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| RustySatError::invalid_input("float TIFF byte count overflow"))?;
+    if expected_byte_count != sample_data.bytes.len() {
         return Err(RustySatError::invalid_input(format!(
-            "float TIFF has {} pixels but shape ({height}, {width}) requires {pixel_count}",
-            pixels.len()
+            "float TIFF has {} sample bytes but shape ({height}, {width}) requires {expected_byte_count}",
+            sample_data.bytes.len()
         )));
     }
     let width_u32 = u32::try_from(width)
         .map_err(|_| RustySatError::invalid_input("float TIFF width does not fit u32"))?;
     let height_u32 = u32::try_from(height)
         .map_err(|_| RustySatError::invalid_input("float TIFF height does not fit u32"))?;
-    let byte_count = pixels
-        .len()
-        .checked_mul(4)
-        .and_then(|count| u32::try_from(count).ok())
-        .ok_or_else(|| RustySatError::invalid_input("float TIFF byte count overflow"))?;
+    let byte_count = u32::try_from(sample_data.bytes.len())
+        .map_err(|_| RustySatError::invalid_input("float TIFF byte count overflow"))?;
 
     let geotiff_data = geo_info
         .as_ref()
@@ -205,7 +349,11 @@ fn write_float_tiff_pixels(
     write_u16(&mut writer, entry_count)?;
     write_ifd_long(&mut writer, TAG_IMAGE_WIDTH, width_u32)?;
     write_ifd_long(&mut writer, TAG_IMAGE_LENGTH, height_u32)?;
-    write_ifd_short(&mut writer, TAG_BITS_PER_SAMPLE, 32)?;
+    write_ifd_short(
+        &mut writer,
+        TAG_BITS_PER_SAMPLE,
+        sample_data.bits_per_sample,
+    )?;
     write_ifd_short(&mut writer, TAG_COMPRESSION, COMPRESSION_NONE)?;
     write_ifd_short(
         &mut writer,
@@ -216,7 +364,7 @@ fn write_float_tiff_pixels(
     write_ifd_short(&mut writer, TAG_SAMPLES_PER_PIXEL, 1)?;
     write_ifd_long(&mut writer, TAG_ROWS_PER_STRIP, height_u32)?;
     write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, byte_count)?;
-    write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, SAMPLE_FORMAT_IEEE_FLOAT)?;
+    write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
     if let Some(geotiff_data) = geotiff_data.as_ref() {
         geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
     }
@@ -224,12 +372,101 @@ fn write_float_tiff_pixels(
     if let Some(geotiff_data) = geotiff_data.as_ref() {
         geotiff_data.write_data(&mut writer)?;
     }
-    for pixel in pixels {
-        writer
-            .write_all(&pixel.to_le_bytes())
-            .map_err(write_error)?;
+    writer.write_all(&sample_data.bytes).map_err(write_error)?;
+    Ok(())
+}
+
+fn encode_f32_samples(
+    values: &[f64],
+    mask: Option<&rusty_sat_core::ValidityMask>,
+    fill_value: f32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for (idx, value) in values.iter().enumerate() {
+        let sample = if is_missing(mask, idx, *value) {
+            fill_value
+        } else {
+            *value as f32
+        };
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn encode_f64_samples(
+    values: &[f64],
+    mask: Option<&rusty_sat_core::ValidityMask>,
+    fill_value: f64,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 8);
+    for (idx, value) in values.iter().enumerate() {
+        let sample = if is_missing(mask, idx, *value) {
+            fill_value
+        } else {
+            *value
+        };
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn encode_u16_scaled_samples(
+    values: &[f64],
+    mask: Option<&rusty_sat_core::ValidityMask>,
+    min: f64,
+    max: f64,
+    fill_value: u16,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 2);
+    let scale = f64::from(u16::MAX) / (max - min);
+    for (idx, value) in values.iter().enumerate() {
+        let sample = if is_missing(mask, idx, *value) {
+            fill_value
+        } else {
+            ((*value).clamp(min, max) - min).mul_add(scale, 0.0).round() as u16
+        };
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn finite_min_max(
+    values: &[f64],
+    mask: Option<&rusty_sat_core::ValidityMask>,
+) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for (idx, value) in values.iter().enumerate() {
+        if is_missing(mask, idx, *value) {
+            continue;
+        }
+        min = min.min(*value);
+        max = max.max(*value);
+    }
+    (min.is_finite() && max.is_finite()).then_some((min, max))
+}
+
+fn is_missing(mask: Option<&rusty_sat_core::ValidityMask>, idx: usize, value: f64) -> bool {
+    mask.is_some_and(|mask| mask.is_masked(idx) == Some(true)) || !value.is_finite()
+}
+
+fn validate_u16_scale(min: f64, max: f64) -> Result<()> {
+    if !min.is_finite() || !max.is_finite() || max <= min {
+        return Err(RustySatError::invalid_input(
+            "u16 scaled TIFF output requires finite max greater than min",
+        ));
     }
     Ok(())
+}
+
+fn finite_or_nan(value: f64, name: &str) -> Result<()> {
+    if value.is_finite() || value.is_nan() {
+        Ok(())
+    } else {
+        Err(RustySatError::invalid_input(format!(
+            "{name} must be finite or NaN"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -589,6 +826,99 @@ mod tests {
         assert_eq!(read_f32(&bytes, offset + 4), -9999.0);
         assert_eq!(read_f32(&bytes, offset + 8), 3.0);
         fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_float64_tiff_dataset_without_precision_truncation() -> Result<()> {
+        let path = temp_tiff_path("writes_float64_tiff_dataset_without_precision_truncation");
+        let dataset =
+            Dataset::new(DataId::new("B03")?).with_array(DataArray::<f64>::from_vec_named(
+                [1, 2],
+                ["y", "x"],
+                vec![1.000_000_119_209_289_6, 42.25],
+            )?);
+
+        FloatTiffWriter::default()
+            .with_float64_output(f64::NAN)
+            .save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        assert_eq!(read_tag_u16(&bytes, TAG_BITS_PER_SAMPLE), 64);
+        assert_eq!(
+            read_tag_u16(&bytes, TAG_SAMPLE_FORMAT),
+            SAMPLE_FORMAT_IEEE_FLOAT
+        );
+        let offset = read_tag_u32(&bytes, TAG_STRIP_OFFSETS) as usize;
+        assert_eq!(read_f64(&bytes, offset), 1.000_000_119_209_289_6);
+        assert_eq!(read_f64(&bytes, offset + 8), 42.25);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_u16_scaled_tiff_dataset_with_fill_and_clamp_policy() -> Result<()> {
+        let path = temp_tiff_path("writes_u16_scaled_tiff_dataset_with_fill_and_clamp_policy");
+        let mask = ValidityMask::from_masked_flags([false, false, false, true, false]);
+        let array = DataArray::<f64>::from_vec_named(
+            [1, 5],
+            ["y", "x"],
+            vec![-10.0, 0.0, 50.0, 75.0, 120.0],
+        )?
+        .with_mask(mask)?;
+        let dataset = Dataset::new(DataId::new("B03")?).with_array(array);
+
+        FloatTiffWriter::default()
+            .with_u16_scaled_output(0.0, 100.0, 17)?
+            .save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        assert_eq!(read_tag_u16(&bytes, TAG_BITS_PER_SAMPLE), 16);
+        assert_eq!(
+            read_tag_u16(&bytes, TAG_SAMPLE_FORMAT),
+            SAMPLE_FORMAT_UNSIGNED_INTEGER
+        );
+        let offset = read_tag_u32(&bytes, TAG_STRIP_OFFSETS) as usize;
+        assert_eq!(read_u16(&bytes, offset), 0);
+        assert_eq!(read_u16(&bytes, offset + 2), 0);
+        assert_eq!(read_u16(&bytes, offset + 4), 32768);
+        assert_eq!(read_u16(&bytes, offset + 6), 17);
+        assert_eq!(read_u16(&bytes, offset + 8), 65535);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_u16_auto_scaled_tiff_dataset_from_unmasked_finite_values() -> Result<()> {
+        let path =
+            temp_tiff_path("writes_u16_auto_scaled_tiff_dataset_from_unmasked_finite_values");
+        let mask = ValidityMask::from_masked_flags([true, false, false]);
+        let array = DataArray::<f32>::from_vec_named([1, 3], ["y", "x"], vec![1000.0, 10.0, 20.0])?
+            .with_mask(mask)?;
+        let dataset = Dataset::new(DataId::new("B03")?).with_array(array);
+
+        FloatTiffWriter::default()
+            .with_u16_auto_scaled_output(9)
+            .save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        let offset = read_tag_u32(&bytes, TAG_STRIP_OFFSETS) as usize;
+        assert_eq!(read_u16(&bytes, offset), 9);
+        assert_eq!(read_u16(&bytes, offset + 2), 0);
+        assert_eq!(read_u16(&bytes, offset + 4), 65535);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_u16_scale_policy() -> Result<()> {
+        let err = FloatTiffWriter::default()
+            .with_u16_scaled_output(1.0, 1.0, 0)
+            .unwrap_err();
+        assert!(err.to_string().contains("max greater than min"));
         Ok(())
     }
 
