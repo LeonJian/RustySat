@@ -9,7 +9,9 @@ pub use pgm::{
     encode_pgm, encode_pgm_array, encode_pgm_from_f64, write_pgm, write_pgm_array, LinearScale,
     PgmWriter,
 };
-pub use simple_image::{write_png16_image, write_png_image, SimpleImageWriter};
+pub use simple_image::{
+    write_png16_image, write_png_image, SimpleImageDatasetBitDepth, SimpleImageWriter,
+};
 
 use rusty_sat_core::{Dataset, DatasetWriter, Result, RustySatError};
 use rusty_sat_image::Image;

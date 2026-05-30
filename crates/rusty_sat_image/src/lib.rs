@@ -194,6 +194,22 @@ impl Image16 {
         })
     }
 
+    pub fn from_luma_dataset(dataset: &Dataset) -> Result<Self> {
+        let Some(array) = dataset.array() else {
+            return Err(RustySatError::invalid_input(format!(
+                "dataset '{}' has no array data",
+                dataset.id().name()
+            )));
+        };
+        Self::from_luma_array(array)
+    }
+
+    pub fn from_luma_array(array: &AnyDataArray) -> Result<Self> {
+        FloatImage::<f64>::from_luma_array(array)?
+            .crude_stretched(None, None)
+            .to_u16_image(0)
+    }
+
     pub fn mode(&self) -> ImageMode {
         self.mode
     }
@@ -463,6 +479,23 @@ impl<T: ImageFloat> FloatImage<T> {
         Image::from_pixels(self.mode, self.height, self.width, pixels)
     }
 
+    pub fn to_u16_image(&self, fill_value: u16) -> Result<Image16> {
+        let channels = self.mode.channels();
+        let pixels = self
+            .pixels
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                if self.is_masked_pixel(idx / channels) || !value.is_finite() {
+                    fill_value
+                } else {
+                    (value.to_f64() * 65_535.0).clamp(0.0, 65_535.0).round() as u16
+                }
+            })
+            .collect();
+        Image16::from_pixels(self.mode, self.height, self.width, pixels)
+    }
+
     pub fn to_u8_rgba_image(
         &self,
         fill_value: u8,
@@ -678,6 +711,19 @@ mod tests {
     }
 
     #[test]
+    fn creates_16_bit_luma_image_from_dataset_array() {
+        let array =
+            DataArray::<f64>::from_vec_named(vec![1, 3], ["y", "x"], vec![1.0, 2.0, 3.0]).unwrap();
+        let dataset = Dataset::new(rusty_sat_core::DataId::new("test").unwrap()).with_array(array);
+
+        let image = Image16::from_luma_dataset(&dataset).unwrap();
+
+        assert_eq!(image.mode(), ImageMode::Luma);
+        assert_eq!(image.shape(), (1, 3));
+        assert_eq!(image.pixels(), &[0, 32_768, 65_535]);
+    }
+
+    #[test]
     fn creates_luma_image_with_masked_pixels_filled_black() {
         let mask = rusty_sat_core::ValidityMask::from_masked_flags([false, true, false, false]);
         let array =
@@ -688,6 +734,29 @@ mod tests {
         let image = Image::from_luma_array(&array.into()).unwrap();
 
         assert_eq!(image.pixels(), &[0, 0, 128, 255]);
+    }
+
+    #[test]
+    fn creates_16_bit_luma_image_with_masked_pixels_filled_black() {
+        let mask = rusty_sat_core::ValidityMask::from_masked_flags([false, true, false]);
+        let array = DataArray::<f32>::from_vec_named(vec![1, 3], ["y", "x"], vec![1.0, 99.0, 3.0])
+            .unwrap()
+            .with_mask(mask)
+            .unwrap();
+
+        let image = Image16::from_luma_array(&array.into()).unwrap();
+
+        assert_eq!(image.pixels(), &[0, 0, 65_535]);
+    }
+
+    #[test]
+    fn float_image_finalizes_to_16_bit_without_u8_quantization() {
+        let image = FloatImage::from_pixels(ImageMode::Luma, 1, 3, vec![0.0_f64, 0.5, 1.0])
+            .unwrap()
+            .to_u16_image(0)
+            .unwrap();
+
+        assert_eq!(image.pixels(), &[0, 32_768, 65_535]);
     }
 
     #[test]
