@@ -333,6 +333,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[ ]` W2-next: JPEG output, transparency/fill/mode polish, PNG metadata parity, and broader Satpy `PillowWriter` behavior.
 - `[~]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
   - `[x]` W3-m7f2b1: Add baseline uncompressed float32 TIFF writer foundation for calibrated/scientific dataset output; CRS/GeoTIFF tags remain future work.
+  - `[x]` W3-m7f2b2a: Add dependency-free GeoTIFF tag foundation for float TIFF outputs: model pixel scale, model tiepoint, GeoKey directory, and projection citation derived from dataset `area` attrs or x/y coordinate axes.
   - `[ ]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
 - `[ ]` W5: CF NetCDF writer: dataset saving, CF dimensions/variables/global attrs, geolocation coordinates, `da2cf`, encoding, compression, and chunks.
@@ -463,7 +464,8 @@ Before starting or closing a milestone, check this table and update both the mil
     - `[~]` M7-AHI-production-f2: Add representative real/sample parity fixtures and HDR/GeoTIFF-style output assertions once suitable sample data or writer policy is available. Roadmap: T/W2/W3.
       - `[x]` M7-AHI-production-f2a: Add 16-bit PNG dataset output policy and Scene writer tests as the first HDR output assertion path. Roadmap: W2.
       - `[x]` M7-AHI-production-f2b1: Add baseline float32 TIFF scientific output writer and AHI HSD Scene output assertion. Roadmap: W3/SC4.
-      - `[ ]` M7-AHI-production-f2b2: Add representative real/sample parity fixtures and full GeoTIFF tag assertions when sample data or W3 GeoTIFF tag support is available. Roadmap: T/W3.
+      - `[x]` M7-AHI-production-f2b2a: Add GeoTIFF tag assertions for area-backed float TIFF output. Roadmap: W3/SC4.
+      - `[ ]` M7-AHI-production-f2b2b: Add representative real/sample parity fixtures and fuller GeoTIFF CRS/COG assertions when sample data and broader W3 support are available. Roadmap: T/W3.
 - `[ ]` M8-writers-composites-focused: Finish the writer/composite/enhancement pieces needed for AHI production output, then broaden to GeoTIFF/CF and other instruments.
 - `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
 - `[ ]` M10-full-satpy-parity-deferred: Resume full Satpy reader/modifier/orbit/writer/composite parity after AHI HSD and AHI NetCDF are complete.
@@ -616,7 +618,7 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
 | `SimpleImageWriter` write u8 PNG from finalized Luma/RGB/RGBA `Image` buffers, write u16 PNG from finalized `Image16` buffers, save 2D datasets through current luma finalization, opt into 16-bit dataset-to-PNG output through `Scene::save_dataset`, and preserve more display depth for calibrated AHI outputs | PNG metadata parity, alpha/fill polish beyond existing image buffers, GeoTIFF/scientific float output |
-| `FloatTiffWriter` writes baseline uncompressed single-band float32 TIFF from 2D y/x datasets through `Scene::save_dataset`, preserving calibrated values and configurable fill values for masks | CRS GeoTIFF tags, COG layout, compression, tiling, multiband TIFF, BigTIFF, and full Satpy GeoTIFF parity |
+| `FloatTiffWriter` writes baseline uncompressed single-band float32 TIFF from 2D y/x datasets through `Scene::save_dataset`, preserving calibrated values and configurable fill values for masks; when dataset `area` attrs or x/y coordinate axes are present it writes GeoTIFF model pixel scale, model tiepoint, GeoKey directory, and projection citation tags | Full CRS GeoTIFF key parity, COG layout, compression, tiling, multiband TIFF, BigTIFF, and full Satpy GeoTIFF parity |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
 ### rusty_sat_cli

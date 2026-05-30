@@ -5,7 +5,7 @@
 //! so AHI scientific output paths do not have to go through display scaling.
 
 use crate::Writer;
-use rusty_sat_core::{Dataset, Result, RustySatError};
+use rusty_sat_core::{Dataset, MetadataValue, Result, RustySatError};
 use rusty_sat_image::Image;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -23,14 +23,30 @@ const TAG_STRIP_OFFSETS: u16 = 273;
 const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 const TAG_ROWS_PER_STRIP: u16 = 278;
 const TAG_STRIP_BYTE_COUNTS: u16 = 279;
+const TAG_MODEL_PIXEL_SCALE: u16 = 33550;
+const TAG_MODEL_TIEPOINT: u16 = 33922;
 const TAG_SAMPLE_FORMAT: u16 = 339;
+const TAG_GEO_KEY_DIRECTORY: u16 = 34735;
+const TAG_GEO_ASCII_PARAMS: u16 = 34737;
 
+const TYPE_ASCII: u16 = 2;
 const TYPE_SHORT: u16 = 3;
 const TYPE_LONG: u16 = 4;
+const TYPE_DOUBLE: u16 = 12;
 
 const COMPRESSION_NONE: u16 = 1;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
 const SAMPLE_FORMAT_IEEE_FLOAT: u16 = 3;
+const GEO_KEY_DIRECTORY_VERSION: u16 = 1;
+const GEO_KEY_REVISION: u16 = 1;
+const GEO_KEY_MINOR_REVISION: u16 = 0;
+const GEO_KEY_MODEL_TYPE: u16 = 1024;
+const GEO_KEY_RASTER_TYPE: u16 = 1025;
+const GEO_KEY_PROJECTED_CS_TYPE: u16 = 3072;
+const GEO_KEY_PROJECTED_CITATION: u16 = 3073;
+const GEO_MODEL_TYPE_PROJECTED: u16 = 1;
+const GEO_RASTER_PIXEL_IS_AREA: u16 = 1;
+const GEO_USER_DEFINED: u16 = 32767;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatTiffWriter {
@@ -121,10 +137,22 @@ pub fn write_float_tiff_dataset(
         })
         .collect::<Vec<_>>();
 
-    write_float_tiff_pixels(path, width, height, &pixels)
+    write_float_tiff_pixels(
+        path,
+        width,
+        height,
+        &pixels,
+        geo_info_from_dataset(dataset)?,
+    )
 }
 
-fn write_float_tiff_pixels(path: &Path, width: usize, height: usize, pixels: &[f32]) -> Result<()> {
+fn write_float_tiff_pixels(
+    path: &Path,
+    width: usize,
+    height: usize,
+    pixels: &[f32],
+    geo_info: Option<GeoTiffInfo>,
+) -> Result<()> {
     if width == 0 || height == 0 {
         return Err(RustySatError::invalid_input(
             "float TIFF dimensions must be non-zero",
@@ -149,11 +177,23 @@ fn write_float_tiff_pixels(path: &Path, width: usize, height: usize, pixels: &[f
         .and_then(|count| u32::try_from(count).ok())
         .ok_or_else(|| RustySatError::invalid_input("float TIFF byte count overflow"))?;
 
-    let entry_count = 10_u16;
+    let geotiff_data = geo_info
+        .as_ref()
+        .map(GeoTiffExtraData::from_info)
+        .transpose()?;
+    let entry_count = 10_u16 + if geotiff_data.is_some() { 4_u16 } else { 0_u16 };
     let ifd_bytes = 2_u32 + u32::from(entry_count) * 12 + 4;
+    let extra_bytes = geotiff_data
+        .as_ref()
+        .map(GeoTiffExtraData::byte_len)
+        .unwrap_or(0);
     let pixel_offset = IFD_OFFSET
         .checked_add(ifd_bytes)
+        .and_then(|offset| offset.checked_add(u32::try_from(extra_bytes).ok()?))
         .ok_or_else(|| RustySatError::invalid_input("float TIFF pixel offset overflow"))?;
+    let extra_offset = IFD_OFFSET
+        .checked_add(ifd_bytes)
+        .ok_or_else(|| RustySatError::invalid_input("float TIFF GeoTIFF offset overflow"))?;
 
     let file = File::create(path).map_err(|err| {
         RustySatError::invalid_input(format!("failed to create float TIFF file: {err}"))
@@ -177,13 +217,267 @@ fn write_float_tiff_pixels(path: &Path, width: usize, height: usize, pixels: &[f
     write_ifd_long(&mut writer, TAG_ROWS_PER_STRIP, height_u32)?;
     write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, byte_count)?;
     write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, SAMPLE_FORMAT_IEEE_FLOAT)?;
+    if let Some(geotiff_data) = geotiff_data.as_ref() {
+        geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
+    }
     write_u32(&mut writer, 0)?;
+    if let Some(geotiff_data) = geotiff_data.as_ref() {
+        geotiff_data.write_data(&mut writer)?;
+    }
     for pixel in pixels {
         writer
             .write_all(&pixel.to_le_bytes())
             .map_err(write_error)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GeoTiffInfo {
+    pixel_scale: [f64; 3],
+    tiepoint: [f64; 6],
+    citation: String,
+}
+
+impl GeoTiffInfo {
+    fn from_area_attr(area: &MetadataValue) -> Result<Option<Self>> {
+        let MetadataValue::Map(map) = area else {
+            return Ok(None);
+        };
+        let Some(extent) = map.get("area_extent").and_then(metadata_f64_list4) else {
+            return Ok(None);
+        };
+        let Some(height) = map.get("height").and_then(metadata_usize) else {
+            return Ok(None);
+        };
+        let Some(width) = map.get("width").and_then(metadata_usize) else {
+            return Ok(None);
+        };
+        if height == 0 || width == 0 {
+            return Ok(None);
+        }
+        let pixel_size_x = (extent[2] - extent[0]) / width as f64;
+        let pixel_size_y = (extent[3] - extent[1]) / height as f64;
+        if !pixel_size_x.is_finite() || !pixel_size_y.is_finite() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            pixel_scale: [pixel_size_x.abs(), pixel_size_y.abs(), 0.0],
+            tiepoint: [0.0, 0.0, 0.0, extent[0], extent[3], 0.0],
+            citation: geotiff_citation(map),
+        }))
+    }
+
+    fn from_xy_coords(array: &rusty_sat_core::AnyDataArray) -> Result<Option<Self>> {
+        let Some(x_coord) = array.coord("x") else {
+            return Ok(None);
+        };
+        let Some(y_coord) = array.coord("y") else {
+            return Ok(None);
+        };
+        let x = x_coord.values();
+        let y = y_coord.values();
+        if x.is_empty() || y.is_empty() {
+            return Ok(None);
+        }
+        let pixel_size_x = coord_spacing(x).unwrap_or(1.0).abs();
+        let pixel_size_y = coord_spacing(y).unwrap_or(1.0).abs();
+        if !pixel_size_x.is_finite() || !pixel_size_y.is_finite() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            pixel_scale: [pixel_size_x, pixel_size_y, 0.0],
+            tiepoint: [
+                0.0,
+                0.0,
+                0.0,
+                x[0] - 0.5 * pixel_size_x,
+                y[0] + 0.5 * pixel_size_y,
+                0.0,
+            ],
+            citation: "RustySat x/y coordinate axes".to_string(),
+        }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GeoTiffExtraData {
+    pixel_scale: Vec<u8>,
+    tiepoint: Vec<u8>,
+    geo_key_directory: Vec<u8>,
+    geo_ascii_params: Vec<u8>,
+}
+
+impl GeoTiffExtraData {
+    fn from_info(info: &GeoTiffInfo) -> Result<Self> {
+        let mut ascii = info.citation.clone();
+        if !ascii.ends_with('|') {
+            ascii.push('|');
+        }
+        let ascii_bytes = ascii.into_bytes();
+        let ascii_len = u16::try_from(ascii_bytes.len())
+            .map_err(|_| RustySatError::invalid_input("GeoTIFF citation is too long"))?;
+        let keys = [
+            GEO_KEY_MODEL_TYPE,
+            0,
+            1,
+            GEO_MODEL_TYPE_PROJECTED,
+            GEO_KEY_RASTER_TYPE,
+            0,
+            1,
+            GEO_RASTER_PIXEL_IS_AREA,
+            GEO_KEY_PROJECTED_CS_TYPE,
+            0,
+            1,
+            GEO_USER_DEFINED,
+            GEO_KEY_PROJECTED_CITATION,
+            TAG_GEO_ASCII_PARAMS,
+            ascii_len,
+            0,
+        ];
+        let mut geo_key_directory = Vec::with_capacity((4 + keys.len()) * 2);
+        for value in [
+            GEO_KEY_DIRECTORY_VERSION,
+            GEO_KEY_REVISION,
+            GEO_KEY_MINOR_REVISION,
+            4,
+        ] {
+            geo_key_directory.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in keys {
+            geo_key_directory.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(Self {
+            pixel_scale: f64_values_to_bytes(&info.pixel_scale),
+            tiepoint: f64_values_to_bytes(&info.tiepoint),
+            geo_key_directory,
+            geo_ascii_params: ascii_bytes,
+        })
+    }
+
+    fn byte_len(&self) -> u32 {
+        (self.pixel_scale.len()
+            + self.tiepoint.len()
+            + self.geo_key_directory.len()
+            + self.geo_ascii_params.len()) as u32
+    }
+
+    fn write_ifd_entries(&self, writer: &mut impl Write, offset: u32) -> Result<()> {
+        let pixel_scale_offset = offset;
+        let tiepoint_offset = pixel_scale_offset + self.pixel_scale.len() as u32;
+        let geo_key_offset = tiepoint_offset + self.tiepoint.len() as u32;
+        let geo_ascii_offset = geo_key_offset + self.geo_key_directory.len() as u32;
+        write_ifd_offset(
+            writer,
+            TAG_MODEL_PIXEL_SCALE,
+            TYPE_DOUBLE,
+            3,
+            pixel_scale_offset,
+        )?;
+        write_ifd_offset(writer, TAG_MODEL_TIEPOINT, TYPE_DOUBLE, 6, tiepoint_offset)?;
+        write_ifd_offset(
+            writer,
+            TAG_GEO_KEY_DIRECTORY,
+            TYPE_SHORT,
+            u32::try_from(self.geo_key_directory.len() / 2).map_err(|_| {
+                RustySatError::invalid_input("GeoTIFF key directory count overflow")
+            })?,
+            geo_key_offset,
+        )?;
+        write_ifd_offset(
+            writer,
+            TAG_GEO_ASCII_PARAMS,
+            TYPE_ASCII,
+            u32::try_from(self.geo_ascii_params.len())
+                .map_err(|_| RustySatError::invalid_input("GeoTIFF ASCII count overflow"))?,
+            geo_ascii_offset,
+        )
+    }
+
+    fn write_data(&self, writer: &mut impl Write) -> Result<()> {
+        writer.write_all(&self.pixel_scale).map_err(write_error)?;
+        writer.write_all(&self.tiepoint).map_err(write_error)?;
+        writer
+            .write_all(&self.geo_key_directory)
+            .map_err(write_error)?;
+        writer
+            .write_all(&self.geo_ascii_params)
+            .map_err(write_error)
+    }
+}
+
+fn geo_info_from_dataset(dataset: &Dataset) -> Result<Option<GeoTiffInfo>> {
+    if let Some(info) = dataset
+        .attr("area")
+        .map(GeoTiffInfo::from_area_attr)
+        .transpose()
+        .map(Option::flatten)?
+    {
+        return Ok(Some(info));
+    }
+    let Some(array) = dataset.array() else {
+        return Ok(None);
+    };
+    GeoTiffInfo::from_xy_coords(array)
+}
+
+fn geotiff_citation(area: &std::collections::BTreeMap<String, MetadataValue>) -> String {
+    let proj_id = area
+        .get("proj_id")
+        .and_then(MetadataValue::as_str)
+        .unwrap_or("unknown");
+    let projection = area
+        .get("projection")
+        .and_then(|value| value.get_path(&["proj"]))
+        .and_then(MetadataValue::as_str)
+        .unwrap_or("unknown");
+    format!("RustySat area {proj_id} proj={projection}")
+}
+
+fn metadata_usize(value: &MetadataValue) -> Option<usize> {
+    let MetadataValue::Integer(value) = value else {
+        return None;
+    };
+    usize::try_from(*value).ok()
+}
+
+fn metadata_f64_list4(value: &MetadataValue) -> Option<[f64; 4]> {
+    let MetadataValue::List(values) = value else {
+        return None;
+    };
+    if values.len() != 4 {
+        return None;
+    }
+    Some([
+        metadata_f64(&values[0])?,
+        metadata_f64(&values[1])?,
+        metadata_f64(&values[2])?,
+        metadata_f64(&values[3])?,
+    ])
+}
+
+fn metadata_f64(value: &MetadataValue) -> Option<f64> {
+    match value {
+        MetadataValue::Float(value) => Some(value.get()),
+        MetadataValue::Integer(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn coord_spacing(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return Some(1.0);
+    }
+    let spacing = values[1] - values[0];
+    spacing.is_finite().then_some(spacing)
+}
+
+fn f64_values_to_bytes(values: &[f64]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 8);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 fn validate_tiff_extension(path: &Path) -> Result<()> {
@@ -216,6 +510,19 @@ fn write_ifd_long(writer: &mut impl Write, tag: u16, value: u32) -> Result<()> {
     write_u32(writer, value)
 }
 
+fn write_ifd_offset(
+    writer: &mut impl Write,
+    tag: u16,
+    field_type: u16,
+    count: u32,
+    offset: u32,
+) -> Result<()> {
+    write_u16(writer, tag)?;
+    write_u16(writer, field_type)?;
+    write_u32(writer, count)?;
+    write_u32(writer, offset)
+}
+
 fn write_u16(writer: &mut impl Write, value: u16) -> Result<()> {
     writer.write_all(&value.to_le_bytes()).map_err(write_error)
 }
@@ -231,7 +538,7 @@ fn write_error(err: std::io::Error) -> RustySatError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_sat_core::{DataArray, DataId, Dataset, Scene, ValidityMask};
+    use rusty_sat_core::{DataArray, DataId, Dataset, MetadataValue, Scene, ValidityMask};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -311,6 +618,67 @@ mod tests {
     }
 
     #[test]
+    fn writes_geotiff_tags_from_area_metadata() -> Result<()> {
+        let path = temp_tiff_path("writes_geotiff_tags_from_area_metadata");
+        let mut dataset = Dataset::new(DataId::new("B03")?).with_array(
+            DataArray::<f64>::from_vec_named([2, 3], ["y", "x"], vec![1.0; 6])?,
+        );
+        dataset.insert_attr("area", test_area_attr()?)?;
+
+        FloatTiffWriter::default().save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        let scale_offset = read_tag_u32(&bytes, TAG_MODEL_PIXEL_SCALE) as usize;
+        assert_eq!(read_f64(&bytes, scale_offset), 10.0);
+        assert_eq!(read_f64(&bytes, scale_offset + 8), 10.0);
+        assert_eq!(read_f64(&bytes, scale_offset + 16), 0.0);
+        let tiepoint_offset = read_tag_u32(&bytes, TAG_MODEL_TIEPOINT) as usize;
+        assert_eq!(read_f64(&bytes, tiepoint_offset), 0.0);
+        assert_eq!(read_f64(&bytes, tiepoint_offset + 8), 0.0);
+        assert_eq!(read_f64(&bytes, tiepoint_offset + 24), 100.0);
+        assert_eq!(read_f64(&bytes, tiepoint_offset + 32), 220.0);
+        let key_offset = read_tag_u32(&bytes, TAG_GEO_KEY_DIRECTORY) as usize;
+        assert_eq!(read_u16(&bytes, key_offset), GEO_KEY_DIRECTORY_VERSION);
+        assert_eq!(read_u16(&bytes, key_offset + 6), 4);
+        let ascii_offset = read_tag_u32(&bytes, TAG_GEO_ASCII_PARAMS) as usize;
+        let ascii_count = read_tag_count(&bytes, TAG_GEO_ASCII_PARAMS) as usize;
+        let ascii = std::str::from_utf8(&bytes[ascii_offset..ascii_offset + ascii_count])
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?;
+        assert_eq!(ascii, "RustySat area test_area proj=geos|");
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn writes_geotiff_tags_from_xy_coordinate_axes() -> Result<()> {
+        let path = temp_tiff_path("writes_geotiff_tags_from_xy_coordinate_axes");
+        let array = DataArray::<f64>::from_vec_named([2, 3], ["y", "x"], vec![1.0; 6])?
+            .with_coordinate(
+                "x",
+                rusty_sat_core::Coordinate::axis("x", vec![105.0, 115.0, 125.0])?,
+            )?
+            .with_coordinate(
+                "y",
+                rusty_sat_core::Coordinate::axis("y", vec![215.0, 205.0])?,
+            )?;
+        let dataset = Dataset::new(DataId::new("B03")?).with_array(array);
+
+        FloatTiffWriter::default().save_dataset(&dataset, &path)?;
+
+        let bytes = fs::read(&path)
+            .map_err(|err| RustySatError::invalid_input(format!("failed to read TIFF: {err}")))?;
+        let scale_offset = read_tag_u32(&bytes, TAG_MODEL_PIXEL_SCALE) as usize;
+        assert_eq!(read_f64(&bytes, scale_offset), 10.0);
+        assert_eq!(read_f64(&bytes, scale_offset + 8), 10.0);
+        let tiepoint_offset = read_tag_u32(&bytes, TAG_MODEL_TIEPOINT) as usize;
+        assert_eq!(read_f64(&bytes, tiepoint_offset + 24), 100.0);
+        assert_eq!(read_f64(&bytes, tiepoint_offset + 32), 220.0);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
     fn rejects_non_tiff_extension() -> Result<()> {
         let path = temp_path("rejects_non_tiff_extension", "png");
         let dataset = Dataset::new(DataId::new("B03")?).with_array(
@@ -332,6 +700,11 @@ mod tests {
 
     fn read_tag_u32(bytes: &[u8], tag: u16) -> u32 {
         let offset = find_ifd_entry(bytes, tag) + 8;
+        read_u32(bytes, offset)
+    }
+
+    fn read_tag_count(bytes: &[u8], tag: u16) -> u32 {
+        let offset = find_ifd_entry(bytes, tag) + 4;
         read_u32(bytes, offset)
     }
 
@@ -367,6 +740,46 @@ mod tests {
             bytes[offset + 2],
             bytes[offset + 3],
         ])
+    }
+
+    fn read_f64(bytes: &[u8], offset: usize) -> f64 {
+        f64::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ])
+    }
+
+    fn test_area_attr() -> Result<MetadataValue> {
+        Ok(MetadataValue::map([
+            ("type", MetadataValue::string("area")),
+            ("id", MetadataValue::string("test_area")),
+            ("description", MetadataValue::string("test area")),
+            ("proj_id", MetadataValue::string("test_area")),
+            (
+                "projection",
+                MetadataValue::map([
+                    ("proj", MetadataValue::string("geos")),
+                    ("lon_0", MetadataValue::string("140.7")),
+                ]),
+            ),
+            ("height", MetadataValue::Integer(2)),
+            ("width", MetadataValue::Integer(3)),
+            (
+                "area_extent",
+                MetadataValue::List(
+                    [100.0, 200.0, 130.0, 220.0]
+                        .into_iter()
+                        .map(MetadataValue::float)
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+            ),
+        ]))
     }
 
     fn temp_tiff_path(name: &str) -> std::path::PathBuf {
