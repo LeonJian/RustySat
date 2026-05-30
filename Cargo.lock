@@ -330,6 +330,7 @@ dependencies = [
  "png",
  "rusty_sat_core",
  "rusty_sat_image",
+ "rusty_sat_resample",
 ]
 
 [[package]]
