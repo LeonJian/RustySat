@@ -1,6 +1,7 @@
 //! Reader framework foundations.
 
 pub mod ahi_hsd;
+pub mod ahi_l2_nc;
 pub mod fci_l1c_nc;
 pub mod filename_pattern;
 pub mod netcdf;
@@ -11,6 +12,9 @@ pub use ahi_hsd::{
     parse_initial_hsd_header, AhiBandCalibration, AhiBasicInfo, AhiCalibration, AhiCalibrationInfo,
     AhiDataInfo, AhiHsdFileHandler, AhiHsdHeader, AhiHsdReader, AhiNavigationInfo,
     AhiProjectionInfo, AhiSegmentBlockInfo, AhiSegmentInfo,
+};
+pub use ahi_l2_nc::{
+    ahi_l2_dataset_defs, AhiL2DatasetDef, AhiL2NcFileHandler, AhiL2NcFileType, AhiL2NcFixtureReader,
 };
 pub use fci_l1c_nc::FciL1cFixtureReader;
 pub use netcdf::{
