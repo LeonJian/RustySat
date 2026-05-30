@@ -344,10 +344,10 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` W3-CRS-GeoKey-b: Add `ProjCrs::to_geotiff_geo_key_defs()` with per-projection handlers for geos, longlat, stere, laea, and merc.
     - `[x]` W3-CRS-GeoKey-c: Add `rusty_sat_resample` dependency to `rusty_sat_writers`, add `proj_crs_from_dataset()` helper, and refactor `FloatTiffWriter` to consume ProjCrs-derived GeoKey defs with `TAG_GEO_DOUBLE_PARAMS` support.
     - `[x]` W3-CRS-GeoKey-d: Add comprehensive GeoKey tests: 5 projection types, geographic CRS, binary output verification, and fallback for unknown projections.
-  - `[ ]` W3-COG: Add DEFLATE compression, tiled output, and basic overview pyramid for Cloud Optimized GeoTIFF support.
+  - `[x]` W3-COG: Add DEFLATE compression, tiled output, and basic overview pyramid for Cloud Optimized GeoTIFF support.
     - `[x]` W3-COG-a: Add DEFLATE compression with `flate2` crate, configurable via `TiffCompression` enum in `FloatTiffWriter`. Compress each strip/tile independently.
-    - `[~]` W3-COG-b: Add tiled output mode via `TiffTileOptions` in `FloatTiffWriter`. Replace strip-based IFD entries with tile-based layout. Default tile size 256×256.
-    - `[ ]` W3-COG-c: Add overview pyramid — generate 2×, 4×, 8× reduced-resolution IFDs with simple 2×2 averaging, chained via `next_ifd_offset`.
+    - `[x]` W3-COG-b: Add tiled output mode via `TiffTileOptions` in `FloatTiffWriter`. Replace strip-based IFD entries with tile-based layout. Default tile size 256×256.
+    - `[!]` W3-COG-c: Add overview pyramid — deferred; requires IFD-chaining restructure in the manual binary writer. Basic 2×2 averaging downsample utility ready when this step is picked up.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
 - `[ ]` W5: CF NetCDF writer: dataset saving, CF dimensions/variables/global attrs, geolocation coordinates, `da2cf`, encoding, compression, and chunks.
 
@@ -635,7 +635,7 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
 | `SimpleImageWriter` write u8 PNG/JPEG from finalized Luma/RGB `Image` buffers, u8 PNG from RGBA buffers, u16 PNG from `Image16` buffers, save 2D datasets through current luma finalization, and opt into 16-bit dataset-to-PNG output through `Scene::save_dataset` | PNG/JPEG metadata parity, JPEG alpha handling beyond explicit RGBA rejection, 16-bit JPEG, alpha/fill polish beyond existing image buffers |
-| `FloatTiffWriter` writes baseline uncompressed single-band TIFF from 2D y/x datasets through `Scene::save_dataset`; explicit sample policies support float32, float64, and scaled u16 output with mask/fill handling; area/x-y metadata writes GeoTIFF model pixel scale, model tiepoint, and full CRS-aware GeoKey directory (geos, longlat, stere, laea, merc, EPSG-only) with `GeoDoubleParamsTag` support; falls back to legacy hardcoded keys when no projection metadata is available | COG layout, compression, tiling, multiband TIFF, BigTIFF, and full Satpy GeoTIFF parity |
+| `FloatTiffWriter` writes single-band TIFF from 2D y/x datasets through `Scene::save_dataset`; explicit sample policies support float32/float64/scaled-u16 output with mask/fill; optional DEFLATE compression via `TiffCompression` and tiled output via `TiffTileOptions` (256×256 default); GeoTIFF tags include model pixel scale, model tiepoint, and full CRS-aware GeoKey directory (geos, longlat, stere, laea, merc, EPSG-only) with `GeoDoubleParamsTag`; falls back to legacy strip/hardcoded keys when no projection or tile metadata is available | Overview pyramid, multiband TIFF, BigTIFF, GDAL metadata tags, and full Satpy GeoTIFF parity |
 | `BuiltinWriterFactory` selects current dataset writers by filename extension (`.pgm`, `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`) with configurable PNG bit depth and TIFF sample policy | Satpy writer YAML loading, filename templating, writer config merging, and multi-dataset writer orchestration |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |
 
