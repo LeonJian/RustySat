@@ -3040,6 +3040,10 @@ datasets:
         assert_eq!(read_tiff_tag_u32(&bytes, 257), expected_height);
         assert_eq!(read_tiff_tag_u16(&bytes, 258), 32);
         assert_eq!(read_tiff_tag_u16(&bytes, 339), 3);
+        assert!(read_tiff_tag_u32(&bytes, 33550) > 0);
+        assert!(read_tiff_tag_u32(&bytes, 33922) > 0);
+        assert!(read_tiff_tag_u32(&bytes, 34735) > 0);
+        assert!(read_tiff_tag_u32(&bytes, 34737) > 0);
         let offset = read_tiff_tag_u32(&bytes, 273) as usize;
         assert!(read_le_f32(&bytes, offset).is_finite());
     }
