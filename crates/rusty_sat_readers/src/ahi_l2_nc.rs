@@ -15,8 +15,8 @@ use crate::{
     Reader,
 };
 use rusty_sat_core::{
-    AnyDataArray, DataId, Dataset, MetadataValue, ReaderInventory, Result, RustySatError,
-    ValidityMask,
+    AnyDataArray, Coordinate, DataArray, DataId, Dataset, MetadataValue, NumericElement,
+    ReaderInventory, Result, RustySatError, ValidityMask,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -230,10 +230,40 @@ impl AhiL2NcFileHandler {
         })?
         .with_renamed_dims([("Rows", "y"), ("Columns", "x")])?;
         array.require_dims_exact(&["y", "x"])?;
+        let (height, width) = array.shape_yx()?;
+        let array = attach_projection_coordinates_to_any_array(array, AHI_L2_AREA_EXTENT)?;
 
         let mut dataset = Dataset::new(DataId::new(def.name())?).with_array(array);
         self.attach_common_dataset_attrs(&mut dataset, def)?;
+        dataset.insert_attr("area", self.area_metadata_value_for_shape(height, width)?)?;
         Ok(dataset)
+    }
+
+    fn area_metadata_value_for_shape(&self, height: usize, width: usize) -> Result<MetadataValue> {
+        Ok(MetadataValue::map([
+            ("type", MetadataValue::string("area")),
+            ("id", MetadataValue::string("Himawari_Area")),
+            ("description", MetadataValue::string("AHI Full Disk area")),
+            (
+                "proj_id",
+                MetadataValue::string(format!("geos{}", self.platform_shortname)),
+            ),
+            (
+                "projection",
+                MetadataValue::Map(ahi_l2_projection_metadata()),
+            ),
+            ("height", MetadataValue::Integer(height as i64)),
+            ("width", MetadataValue::Integer(width as i64)),
+            (
+                "area_extent",
+                MetadataValue::List(
+                    AHI_L2_AREA_EXTENT
+                        .into_iter()
+                        .map(MetadataValue::float)
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+            ),
+        ]))
     }
 
     fn attach_common_dataset_attrs(
@@ -417,6 +447,55 @@ fn metadata_as_f64(value: &MetadataValue) -> Option<f64> {
 
 fn nearly_equal(left: f64, right: f64) -> bool {
     (left - right).abs() <= f64::EPSILON
+}
+
+fn attach_projection_coordinates_to_any_array(
+    array: AnyDataArray,
+    area_extent: [f64; 4],
+) -> Result<AnyDataArray> {
+    Ok(match array {
+        AnyDataArray::F32(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::F64(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::U8(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::U16(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+        AnyDataArray::I16(array) => {
+            attach_projection_coordinates_to_array(array, area_extent)?.into()
+        }
+    })
+}
+
+fn attach_projection_coordinates_to_array<T: NumericElement>(
+    array: DataArray<T>,
+    area_extent: [f64; 4],
+) -> Result<DataArray<T>> {
+    let (height, width) = array.shape_yx()?;
+    let x_coords = projection_x_coords(width, area_extent);
+    let y_coords = projection_y_coords(height, area_extent);
+    array
+        .with_coordinate("x", Coordinate::axis("x", x_coords)?)?
+        .with_coordinate("y", Coordinate::axis("y", y_coords)?)
+}
+
+fn projection_x_coords(width: usize, area_extent: [f64; 4]) -> Vec<f64> {
+    let pixel_size = (area_extent[2] - area_extent[0]) / width as f64;
+    (0..width)
+        .map(|x| area_extent[0] + (x as f64 + 0.5) * pixel_size)
+        .collect()
+}
+
+fn projection_y_coords(height: usize, area_extent: [f64; 4]) -> Vec<f64> {
+    let pixel_size = (area_extent[3] - area_extent[1]) / height as f64;
+    (0..height)
+        .map(|y| area_extent[3] - (y as f64 + 0.5) * pixel_size)
+        .collect()
 }
 
 fn ahi_l2_projection_metadata() -> BTreeMap<String, MetadataValue> {
@@ -603,6 +682,10 @@ const AHI_L2_DATASETS: &[AhiL2DatasetDef] = &[
 mod tests {
     use super::*;
     use rusty_sat_core::{DataQuery, Scene};
+    use rusty_sat_resample::{
+        area_from_metadata_value, resample_dataset_from_attrs, source_geometry_from_dataset,
+        ResampleOptions, SourceGeometry,
+    };
 
     const AHI_L2_FULL_DISK_FIXTURE: &str = r#"
 attrs:
@@ -858,10 +941,16 @@ variables:
         };
         assert_eq!(array.shape_nd(), &[2, 3]);
         assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
+        assert_eq!(array.coord("x").unwrap().values().len(), 3);
+        assert_eq!(array.coord("y").unwrap().values().len(), 2);
         assert_eq!(array.values(), &[0, 1, 2, 3, 65535, 1]);
         assert_eq!(array.is_masked(2), Some(false));
         assert_eq!(array.is_masked(3), Some(true));
         assert_eq!(array.is_masked(4), Some(true));
+        let SourceGeometry::Area(area) = source_geometry_from_dataset(&dataset).unwrap() else {
+            panic!("expected area source geometry");
+        };
+        assert_eq!(area.shape(), (2, 3));
     }
 
     #[test]
@@ -884,6 +973,42 @@ variables:
         assert_eq!(array.dims(), &["y".to_string(), "x".to_string()]);
         assert_eq!(array.values()[3], 0.75);
         assert!(array.mask().is_none());
+    }
+
+    #[test]
+    fn ahi_l2_loaded_dataset_area_attr_and_xy_coords_drive_resampling_pipeline() {
+        let fixture = AHI_L2_SMALL_DATA_FIXTURE.replacen("dtype: f32", "dtype: f64", 1);
+        let source = NetCdfFixtureSource::from_yaml_str(&fixture).unwrap();
+        let reader = AhiL2NcFixtureReader::from_source(
+            "fixture.yaml",
+            filename_info(),
+            AhiL2NcFileType::Mask,
+            source,
+        )
+        .unwrap();
+        let dataset = reader
+            .load(&DataId::new("cloud_probability").unwrap())
+            .unwrap();
+
+        let area = area_from_metadata_value(dataset.attr("area").unwrap()).unwrap();
+        let array = dataset.array().unwrap();
+        assert_eq!(
+            array.coord("x").unwrap().values(),
+            &[-3_666_666.6008, 0.0, 3_666_666.6008]
+        );
+        assert_eq!(
+            array.coord("y").unwrap().values(),
+            &[2_749_999.9506, -2_749_999.9506]
+        );
+
+        let resampled =
+            resample_dataset_from_attrs(&dataset, &area, ResampleOptions::default()).unwrap();
+
+        let rusty_sat_core::AnyDataArray::F64(output) = resampled.array().unwrap() else {
+            panic!("expected f64 output");
+        };
+        assert_eq!(output.dims(), &["y".to_string(), "x".to_string()]);
+        assert_eq!(output.values(), &[0.0, 0.25, 0.5, 0.75, 1.0, 0.1]);
     }
 
     #[test]
