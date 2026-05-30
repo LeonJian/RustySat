@@ -2045,7 +2045,7 @@ mod tests {
     }
 
     #[test]
-    fn ahi_hsd_reader_drives_scene_load_and_png_output() {
+    fn ahi_hsd_reader_drives_scene_load_resample_and_png_output() {
         let hsd_path = temp_path("ahi_hsd_scene", "DAT");
         let png_path = temp_path("ahi_hsd_scene", "png");
         fs::write(
@@ -2057,8 +2057,9 @@ mod tests {
         let handler =
             AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
                 .unwrap();
-        let reader =
-            AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler]).unwrap();
+        let reader = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler])
+            .unwrap()
+            .with_output(AhiCalibrationOutput::ScientificF64);
         let inventory = reader.inventory().unwrap();
         let mut scene = Scene::new();
         let plan = scene
@@ -2074,11 +2075,16 @@ mod tests {
             .clone();
 
         scene.insert_dataset(reader.load(&id).unwrap());
+        let area = area_from_metadata_value(scene.get(&id).unwrap().attr("area").unwrap()).unwrap();
+        let resampled =
+            resample_dataset_from_attrs(scene.get(&id).unwrap(), &area, ResampleOptions::default())
+                .unwrap();
+        scene.insert_dataset(resampled);
         scene
             .save_dataset(&id, &SimpleImageWriter::default(), &png_path)
             .unwrap();
 
-        assert!(png_path.metadata().unwrap().len() > 0);
+        assert_png_dimensions(&png_path, 3, 2);
         fs::remove_file(hsd_path).ok();
         fs::remove_file(png_path).ok();
     }
@@ -2989,6 +2995,20 @@ datasets:
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("rusty_sat_{name}_{nanos}.{extension}"))
+    }
+
+    fn assert_png_dimensions(path: &std::path::Path, expected_width: u32, expected_height: u32) {
+        let bytes = fs::read(path).unwrap();
+        assert!(bytes.len() >= 24);
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+            expected_width
+        );
+        assert_eq!(
+            u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+            expected_height
+        );
     }
 
     fn write_u8(bytes: &mut [u8], offset: usize, value: u8) {
