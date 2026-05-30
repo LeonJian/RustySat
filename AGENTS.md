@@ -339,11 +339,15 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` W3-m7f2b2a: Add dependency-free GeoTIFF tag foundation for float TIFF outputs: model pixel scale, model tiepoint, GeoKey directory, and projection citation derived from dataset `area` attrs or x/y coordinate axes.
   - `[x]` W3-hdr: Add 16-bit integer and float HDR/scientific GeoTIFF output policy, including scale/fill handling.
     - `[x]` W3-hdr-a: Add explicit TIFF sample policy for float32, float64, and scaled u16 outputs with mask/fill handling, scale validation, and autoscale tests.
-  - `[ ]` W3-CRS-GeoKey: Add full CRS-to-GeoTIFF GeoKey mapping for all supported projection types.
+  - `[x]` W3-CRS-GeoKey: Add full CRS-to-GeoTIFF GeoKey mapping for all supported projection types.
     - `[x]` W3-CRS-GeoKey-a: Define GeoTIFF GeoKey constants, logical GeoKey types (`GeoKeyDef`, `GeoKeyValue`, `GeoTiffGeoKeyFinal`), and `finalize_geo_key_defs()` in a new `rusty_sat_resample::geo_keys` module.
     - `[x]` W3-CRS-GeoKey-b: Add `ProjCrs::to_geotiff_geo_key_defs()` with per-projection handlers for geos, longlat, stere, laea, and merc.
     - `[x]` W3-CRS-GeoKey-c: Add `rusty_sat_resample` dependency to `rusty_sat_writers`, add `proj_crs_from_dataset()` helper, and refactor `FloatTiffWriter` to consume ProjCrs-derived GeoKey defs with `TAG_GEO_DOUBLE_PARAMS` support.
     - `[x]` W3-CRS-GeoKey-d: Add comprehensive GeoKey tests: 5 projection types, geographic CRS, binary output verification, and fallback for unknown projections.
+  - `[ ]` W3-COG: Add DEFLATE compression, tiled output, and basic overview pyramid for Cloud Optimized GeoTIFF support.
+    - `[ ]` W3-COG-a: Add DEFLATE compression with `flate2` crate, configurable via `TiffCompression` enum in `FloatTiffWriter`. Compress each strip/tile independently.
+    - `[ ]` W3-COG-b: Add tiled output mode via `TiffTileOptions` in `FloatTiffWriter`. Replace strip-based IFD entries with tile-based layout. Default tile size 256×256.
+    - `[ ]` W3-COG-c: Add overview pyramid — generate 2×, 4×, 8× reduced-resolution IFDs with simple 2×2 averaging, chained via `next_ifd_offset`.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
 - `[ ]` W5: CF NetCDF writer: dataset saving, CF dimensions/variables/global attrs, geolocation coordinates, `da2cf`, encoding, compression, and chunks.
 
