@@ -23,6 +23,13 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleImageWriter {
     name: String,
+    dataset_bit_depth: SimpleImageDatasetBitDepth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimpleImageDatasetBitDepth {
+    Eight,
+    Sixteen,
 }
 
 impl SimpleImageWriter {
@@ -33,7 +40,19 @@ impl SimpleImageWriter {
                 "simple image writer name cannot be empty",
             ));
         }
-        Ok(Self { name })
+        Ok(Self {
+            name,
+            dataset_bit_depth: SimpleImageDatasetBitDepth::Eight,
+        })
+    }
+
+    pub fn with_dataset_bit_depth(mut self, dataset_bit_depth: SimpleImageDatasetBitDepth) -> Self {
+        self.dataset_bit_depth = dataset_bit_depth;
+        self
+    }
+
+    pub fn with_16_bit_dataset_output(self) -> Self {
+        self.with_dataset_bit_depth(SimpleImageDatasetBitDepth::Sixteen)
     }
 
     pub fn save_image16(&self, image: &Image16, path: &Path) -> Result<()> {
@@ -45,6 +64,7 @@ impl Default for SimpleImageWriter {
     fn default() -> Self {
         Self {
             name: "simple_image".to_string(),
+            dataset_bit_depth: SimpleImageDatasetBitDepth::Eight,
         }
     }
 }
@@ -59,8 +79,16 @@ impl Writer for SimpleImageWriter {
     }
 
     fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
-        let image = Image::from_luma_dataset(dataset)?;
-        self.save_image(&image, path)
+        match self.dataset_bit_depth {
+            SimpleImageDatasetBitDepth::Eight => {
+                let image = Image::from_luma_dataset(dataset)?;
+                self.save_image(&image, path)
+            }
+            SimpleImageDatasetBitDepth::Sixteen => {
+                let image = Image16::from_luma_dataset(dataset)?;
+                self.save_image16(&image, path)
+            }
+        }
     }
 }
 
@@ -284,6 +312,53 @@ mod tests {
             .into_luma8();
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.as_raw(), &[0, 255]);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn saves_dataset_as_16_bit_luma_png_when_requested() -> Result<()> {
+        let path = temp_png_path("saves_dataset_as_16_bit_luma_png_when_requested");
+        let dataset = Dataset::new(DataId::new("B03")?).with_array(
+            DataArray::<f64>::from_vec_named([1, 3], ["y", "x"], vec![1.0, 2.0, 3.0])?,
+        );
+
+        SimpleImageWriter::default()
+            .with_16_bit_dataset_output()
+            .save_dataset(&dataset, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_luma16();
+        assert_eq!(decoded.dimensions(), (3, 1));
+        assert_eq!(decoded.as_raw(), &[0, 32_768, 65_535]);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn scene_saves_dataset_as_16_bit_luma_png_when_requested() -> Result<()> {
+        let path = temp_png_path("scene_saves_dataset_as_16_bit_luma_png_when_requested");
+        let data_id = DataId::new("B03")?;
+        let dataset = Dataset::new(data_id.clone()).with_array(DataArray::<f64>::from_vec_named(
+            [1, 3],
+            ["y", "x"],
+            vec![10.0, 20.0, 30.0],
+        )?);
+        let mut scene = Scene::new();
+        scene.insert_dataset(dataset);
+
+        scene.save_dataset(
+            &data_id,
+            &SimpleImageWriter::default()
+                .with_dataset_bit_depth(SimpleImageDatasetBitDepth::Sixteen),
+            &path,
+        )?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_luma16();
+        assert_eq!(decoded.as_raw(), &[0, 32_768, 65_535]);
         fs::remove_file(path).ok();
         Ok(())
     }

@@ -2081,10 +2081,14 @@ mod tests {
                 .unwrap();
         scene.insert_dataset(resampled);
         scene
-            .save_dataset(&id, &SimpleImageWriter::default(), &png_path)
+            .save_dataset(
+                &id,
+                &SimpleImageWriter::default().with_16_bit_dataset_output(),
+                &png_path,
+            )
             .unwrap();
 
-        assert_png_dimensions(&png_path, 3, 2);
+        assert_png_luma_dimensions_and_bit_depth(&png_path, 3, 2, 16);
         fs::remove_file(hsd_path).ok();
         fs::remove_file(png_path).ok();
     }
@@ -2997,9 +3001,14 @@ datasets:
         std::env::temp_dir().join(format!("rusty_sat_{name}_{nanos}.{extension}"))
     }
 
-    fn assert_png_dimensions(path: &std::path::Path, expected_width: u32, expected_height: u32) {
+    fn assert_png_luma_dimensions_and_bit_depth(
+        path: &std::path::Path,
+        expected_width: u32,
+        expected_height: u32,
+        expected_bit_depth: u8,
+    ) {
         let bytes = fs::read(path).unwrap();
-        assert!(bytes.len() >= 24);
+        assert!(bytes.len() >= 26);
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(
             u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
@@ -3009,6 +3018,8 @@ datasets:
             u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
             expected_height
         );
+        assert_eq!(bytes[24], expected_bit_depth);
+        assert_eq!(bytes[25], 0);
     }
 
     fn write_u8(bytes: &mut [u8], offset: usize, value: u8) {
