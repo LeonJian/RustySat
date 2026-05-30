@@ -1052,8 +1052,7 @@ variables:
             .save_dataset(&id, &SimpleImageWriter::default(), &output_path)
             .unwrap();
 
-        let bytes = fs::read(&output_path).unwrap();
-        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_png_dimensions(&output_path, 3, 2);
         fs::remove_file(output_path).ok();
     }
 
@@ -1112,5 +1111,19 @@ variables:
             std::process::id(),
             nanos
         ))
+    }
+
+    fn assert_png_dimensions(path: &std::path::Path, expected_width: u32, expected_height: u32) {
+        let bytes = fs::read(path).unwrap();
+        assert!(bytes.len() >= 24);
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+            expected_width
+        );
+        assert_eq!(
+            u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+            expected_height
+        );
     }
 }
