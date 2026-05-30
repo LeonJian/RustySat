@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rusty_sat_core = { path = "../rusty_sat_core" }
+rusty_sat_image = { path = "../rusty_sat_image" }
 serde_norway = "0.9"
 
 [lints]
