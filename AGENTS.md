@@ -345,8 +345,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
     - `[x]` W3-CRS-GeoKey-c: Add `rusty_sat_resample` dependency to `rusty_sat_writers`, add `proj_crs_from_dataset()` helper, and refactor `FloatTiffWriter` to consume ProjCrs-derived GeoKey defs with `TAG_GEO_DOUBLE_PARAMS` support.
     - `[x]` W3-CRS-GeoKey-d: Add comprehensive GeoKey tests: 5 projection types, geographic CRS, binary output verification, and fallback for unknown projections.
   - `[ ]` W3-COG: Add DEFLATE compression, tiled output, and basic overview pyramid for Cloud Optimized GeoTIFF support.
-    - `[ ]` W3-COG-a: Add DEFLATE compression with `flate2` crate, configurable via `TiffCompression` enum in `FloatTiffWriter`. Compress each strip/tile independently.
-    - `[ ]` W3-COG-b: Add tiled output mode via `TiffTileOptions` in `FloatTiffWriter`. Replace strip-based IFD entries with tile-based layout. Default tile size 256×256.
+    - `[x]` W3-COG-a: Add DEFLATE compression with `flate2` crate, configurable via `TiffCompression` enum in `FloatTiffWriter`. Compress each strip/tile independently.
+    - `[~]` W3-COG-b: Add tiled output mode via `TiffTileOptions` in `FloatTiffWriter`. Replace strip-based IFD entries with tile-based layout. Default tile size 256×256.
     - `[ ]` W3-COG-c: Add overview pyramid — generate 2×, 4×, 8× reduced-resolution IFDs with simple 2×2 averaging, chained via `next_ifd_offset`.
 - `[ ]` W4: NINJO, MI, and AWIPS writers.
 - `[ ]` W5: CF NetCDF writer: dataset saving, CF dimensions/variables/global attrs, geolocation coordinates, `da2cf`, encoding, compression, and chunks.
