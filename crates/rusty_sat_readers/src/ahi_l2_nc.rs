@@ -686,6 +686,9 @@ mod tests {
         area_from_metadata_value, resample_dataset_from_attrs, source_geometry_from_dataset,
         ResampleOptions, SourceGeometry,
     };
+    use rusty_sat_writers::SimpleImageWriter;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const AHI_L2_FULL_DISK_FIXTURE: &str = r#"
 attrs:
@@ -1012,6 +1015,49 @@ variables:
     }
 
     #[test]
+    fn ahi_l2_scene_load_resample_and_png_output_vertical_slice() {
+        let fixture = AHI_L2_SMALL_DATA_FIXTURE.replace(
+            "CloudProbability:\n    dtype: f32",
+            "CloudProbability:\n    dtype: f64",
+        );
+        let source = NetCdfFixtureSource::from_yaml_str(&fixture).unwrap();
+        let reader = AhiL2NcFixtureReader::from_source(
+            "fixture.yaml",
+            filename_info(),
+            AhiL2NcFileType::Mask,
+            source,
+        )
+        .unwrap();
+        let inventory = reader.inventory().unwrap();
+        let mut scene = Scene::new();
+        let plan = scene
+            .plan_reader_loads(
+                [DataQuery::named("cloud_probability").unwrap()],
+                [&inventory],
+            )
+            .unwrap();
+        let planned = plan.reader_datasets().get("ahi_l2_nc").unwrap();
+        let id = planned.iter().next().unwrap().clone();
+        let dataset = reader.load(&id).unwrap();
+        let area = area_from_metadata_value(dataset.attr("area").unwrap()).unwrap();
+        scene.insert_dataset(dataset);
+
+        let resampled =
+            resample_dataset_from_attrs(scene.get(&id).unwrap(), &area, ResampleOptions::default())
+                .unwrap();
+        scene.insert_dataset(resampled);
+        let output_path = temp_png_path("ahi_l2_scene_output");
+
+        scene
+            .save_dataset(&id, &SimpleImageWriter::default(), &output_path)
+            .unwrap();
+
+        let bytes = fs::read(&output_path).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        fs::remove_file(output_path).ok();
+    }
+
+    #[test]
     fn ahi_l2_load_rejects_multidimensional_product_like_satpy_reader_note() {
         let fixture = r#"
 attrs:
@@ -1054,5 +1100,17 @@ variables:
         let err = reader.load(&id).unwrap_err();
 
         assert!(err.to_string().contains("do not match expected"));
+    }
+
+    fn temp_png_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "rusty_sat_{name}_{}_{}.png",
+            std::process::id(),
+            nanos
+        ))
     }
 }
