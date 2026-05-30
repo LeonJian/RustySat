@@ -6,6 +6,7 @@ pub mod bucket;
 pub mod crs;
 pub mod data_reduce;
 pub mod ewa;
+pub mod geo_keys;
 pub mod geometry;
 pub mod image_container;
 pub mod linesample;
@@ -38,6 +39,9 @@ pub use data_reduce::{
     lonlat_grid_boundaries, LonLatBoundaries,
 };
 pub use ewa::{resample_swath_ewa, resample_swath_ewa_owned, EwaOptions, EwaResampler};
+pub use geo_keys::{
+    finalize_geo_key_defs, serialize_geo_key_directory, GeoKeyDef, GeoKeyValue, GeoTiffGeoKeyFinal,
+};
 pub use geometry::{
     CoordinateDefinition, GeometryDefinition, GeometryKind, GridDefinition, ProjectionDefinition,
 };
