@@ -2,9 +2,11 @@
 
 use std::path::Path;
 
+pub mod float_tiff;
 pub mod pgm;
 pub mod simple_image;
 
+pub use float_tiff::{write_float_tiff_dataset, FloatTiffWriter};
 pub use pgm::{
     encode_pgm, encode_pgm_array, encode_pgm_from_f64, write_pgm, write_pgm_array, LinearScale,
     PgmWriter,
@@ -37,6 +39,12 @@ pub trait Writer {
 impl DatasetWriter for PgmWriter {
     fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
         PgmWriter::save_dataset(self, dataset, path)
+    }
+}
+
+impl DatasetWriter for FloatTiffWriter {
+    fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
+        FloatTiffWriter::save_dataset(self, dataset, path)
     }
 }
 
