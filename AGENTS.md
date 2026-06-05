@@ -334,6 +334,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` W2-m7f2a: Add explicit 16-bit dataset-to-PNG output mode for `SimpleImageWriter` and `Scene::save_dataset`, preserving more display depth for AHI scientific/calibrated outputs.
   - `[~]` W2-next: JPEG output, transparency/fill/mode polish, PNG metadata parity, and broader Satpy `PillowWriter` behavior.
     - `[x]` W2-next-a: Add extension-detected JPEG output for u8 Luma/RGB images and datasets, with explicit RGBA/16-bit rejection tests.
+    - `[x]` W2-next-b: Add band-major RGB dataset finalization so compositor output with `mode=RGB` can be saved as 8-bit or 16-bit color PNG for AHI quicklook band assembly.
 - `[~]` W3: GeoTIFF writer: CRS tags, Cloud Optimized GeoTIFF behavior, GDAL metadata, pixel scale/tie point, and float32 support.
   - `[x]` W3-m7f2b1: Add baseline uncompressed float32 TIFF writer foundation for calibrated/scientific dataset output; CRS/GeoTIFF tags remain future work.
   - `[x]` W3-m7f2b2a: Add dependency-free GeoTIFF tag foundation for float TIFF outputs: model pixel scale, model tiepoint, GeoKey directory, and projection citation derived from dataset `area` attrs or x/y coordinate axes.
@@ -484,6 +485,7 @@ Before starting or closing a milestone, check this table and update both the mil
   - `[x]` M8-writers-composites-focused-a: Add extension-based built-in writer selection for current output formats. Roadmap: W1/SC4.
   - `[x]` M8-writers-composites-focused-b: Add JPEG output support for simple u8 image/dataset workflows. Roadmap: W2.
   - `[x]` M8-writers-composites-focused-c: Execute the first safe subset of YAML enhancement operations. Roadmap: I5.
+  - `[x]` M8-writers-composites-focused-d: Add RGB dataset-to-color PNG finalization for simple AHI B03/B02/B01 band assembly quicklooks. Roadmap: C0/W2/I1.
 - `[ ]` M9-production-core: Complete Scene API, CLI, QA, benchmarks, and CI hardening for AHI-first production workflows.
 - `[ ]` M10-full-satpy-parity-deferred: Resume full Satpy reader/modifier/orbit/writer/composite parity after AHI HSD and AHI NetCDF are complete.
 
@@ -627,14 +629,14 @@ For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure 
 
 | Can | Cannot |
 |-----|--------|
-| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; apply in-place crude stretch, Trollimage-style gamma/invert, and mask-aware RGBA finalization | Broader XRImage parity: band-aware dimensions, broader alpha/finalize policy, colorize, mode conversion, or save helpers |
+| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; construct RGB images from compositor-style band-major `[bands,y,x]` datasets with per-channel crude stretch and pixel-level mask collapse; apply in-place crude stretch, Trollimage-style gamma/invert, and mask-aware RGBA finalization | Broader XRImage parity: richer band metadata, broader alpha/finalize policy, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 
 | Can | Cannot |
 |-----|--------|
 | `PgmWriter` write binary PGM (P5) from `DataGrid`, `AnyDataArray`, or `LazyDataArray<T>`; autoscale, fill value, mask-aware | JPEG output, GeoTIFF, CF NetCDF |
-| `SimpleImageWriter` write u8 PNG/JPEG from finalized Luma/RGB `Image` buffers, u8 PNG from RGBA buffers, u16 PNG from `Image16` buffers, save 2D datasets through current luma finalization, and opt into 16-bit dataset-to-PNG output through `Scene::save_dataset` | PNG/JPEG metadata parity, JPEG alpha handling beyond explicit RGBA rejection, 16-bit JPEG, alpha/fill polish beyond existing image buffers |
+| `SimpleImageWriter` write u8 PNG/JPEG from finalized Luma/RGB `Image` buffers, u8 PNG from RGBA buffers, u16 PNG from `Image16` buffers, save 2D datasets through current luma finalization, save `mode=RGB` band-major datasets as color PNG/JPEG quicklooks, and opt into 16-bit dataset-to-PNG output through `Scene::save_dataset` | PNG/JPEG metadata parity, JPEG alpha handling beyond explicit RGBA rejection, 16-bit JPEG, alpha/fill polish beyond existing image buffers |
 | `FloatTiffWriter` writes single-band TIFF from 2D y/x datasets through `Scene::save_dataset`; explicit sample policies support float32/float64/scaled-u16 output with mask/fill; optional DEFLATE compression via `TiffCompression` and tiled output via `TiffTileOptions` (256×256 default); GeoTIFF tags include model pixel scale, model tiepoint, and full CRS-aware GeoKey directory (geos, longlat, stere, laea, merc, EPSG-only) with `GeoDoubleParamsTag`; falls back to legacy strip/hardcoded keys when no projection or tile metadata is available | Overview pyramid, multiband TIFF, BigTIFF, GDAL metadata tags, and full Satpy GeoTIFF parity |
 | `BuiltinWriterFactory` selects current dataset writers by filename extension (`.pgm`, `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`) with configurable PNG bit depth and TIFF sample policy | Satpy writer YAML loading, filename templating, writer config merging, and multi-dataset writer orchestration |
 | Lazy PGM writes read chunks into one y-stripe at a time (incremental) | Single-pass autoscale+write (currently reads chunks twice: autoscale then write) |

@@ -80,13 +80,26 @@ impl Writer for SimpleImageWriter {
     }
 
     fn save_dataset(&self, dataset: &Dataset, path: &Path) -> Result<()> {
+        let is_rgb = dataset
+            .attr("mode")
+            .and_then(|value| value.as_str())
+            .map(|mode| mode.eq_ignore_ascii_case("RGB"))
+            .unwrap_or(false);
         match self.dataset_bit_depth {
             SimpleImageDatasetBitDepth::Eight => {
-                let image = Image::from_luma_dataset(dataset)?;
+                let image = if is_rgb {
+                    Image::from_rgb_dataset(dataset)?
+                } else {
+                    Image::from_luma_dataset(dataset)?
+                };
                 self.save_image(&image, path)
             }
             SimpleImageDatasetBitDepth::Sixteen => {
-                let image = Image16::from_luma_dataset(dataset)?;
+                let image = if is_rgb {
+                    Image16::from_rgb_dataset(dataset)?
+                } else {
+                    Image16::from_luma_dataset(dataset)?
+                };
                 self.save_image16(&image, path)
             }
         }
@@ -413,6 +426,52 @@ mod tests {
             .map_err(|err| RustySatError::invalid_input(err.to_string()))?
             .into_luma8();
         assert_eq!(decoded.dimensions(), (2, 1));
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn saves_rgb_dataset_as_color_png() -> Result<()> {
+        let path = temp_png_path("saves_rgb_dataset_as_color_png");
+        let mut dataset =
+            Dataset::new(DataId::new("true_color")?).with_array(DataArray::<f64>::from_vec_named(
+                [3, 1, 2],
+                ["bands", "y", "x"],
+                vec![0.0, 10.0, 0.0, 20.0, 0.0, 30.0],
+            )?);
+        dataset.insert_attr("mode", "RGB")?;
+
+        SimpleImageWriter::default().save_dataset(&dataset, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_rgb8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &[0, 0, 0, 255, 255, 255]);
+        fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn saves_rgb_dataset_as_16_bit_color_png_when_requested() -> Result<()> {
+        let path = temp_png_path("saves_rgb_dataset_as_16_bit_color_png_when_requested");
+        let mut dataset =
+            Dataset::new(DataId::new("true_color")?).with_array(DataArray::<f64>::from_vec_named(
+                [3, 1, 2],
+                ["bands", "y", "x"],
+                vec![0.0, 10.0, 0.0, 20.0, 0.0, 30.0],
+            )?);
+        dataset.insert_attr("mode", "RGB")?;
+
+        SimpleImageWriter::default()
+            .with_16_bit_dataset_output()
+            .save_dataset(&dataset, &path)?;
+
+        let decoded = image::open(&path)
+            .map_err(|err| RustySatError::invalid_input(err.to_string()))?
+            .into_rgb16();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &[0, 0, 0, 65_535, 65_535, 65_535]);
         fs::remove_file(path).ok();
         Ok(())
     }
