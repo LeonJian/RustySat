@@ -137,6 +137,22 @@ impl Image {
             .to_u8_image(0)
     }
 
+    pub fn from_rgb_dataset(dataset: &Dataset) -> Result<Self> {
+        let Some(array) = dataset.array() else {
+            return Err(RustySatError::invalid_input(format!(
+                "dataset '{}' has no array data",
+                dataset.id().name()
+            )));
+        };
+        Self::from_rgb_array(array)
+    }
+
+    pub fn from_rgb_array(array: &AnyDataArray) -> Result<Self> {
+        FloatImage::<f32>::from_rgb_array(array)?
+            .crude_stretched(None, None)
+            .to_u8_image(0)
+    }
+
     pub fn mode(&self) -> ImageMode {
         self.mode
     }
@@ -206,6 +222,22 @@ impl Image16 {
 
     pub fn from_luma_array(array: &AnyDataArray) -> Result<Self> {
         FloatImage::<f64>::from_luma_array(array)?
+            .crude_stretched(None, None)
+            .to_u16_image(0)
+    }
+
+    pub fn from_rgb_dataset(dataset: &Dataset) -> Result<Self> {
+        let Some(array) = dataset.array() else {
+            return Err(RustySatError::invalid_input(format!(
+                "dataset '{}' has no array data",
+                dataset.id().name()
+            )));
+        };
+        Self::from_rgb_array(array)
+    }
+
+    pub fn from_rgb_array(array: &AnyDataArray) -> Result<Self> {
+        FloatImage::<f64>::from_rgb_array(array)?
             .crude_stretched(None, None)
             .to_u16_image(0)
     }
@@ -291,6 +323,31 @@ impl<T: ImageFloat> FloatImage<T> {
         Ok(image)
     }
 
+    pub fn from_rgb_dataset(dataset: &Dataset) -> Result<Self> {
+        let Some(array) = dataset.array() else {
+            return Err(RustySatError::invalid_input(format!(
+                "dataset '{}' has no array data",
+                dataset.id().name()
+            )));
+        };
+        Self::from_rgb_array(array)
+    }
+
+    pub fn from_rgb_array(array: &AnyDataArray) -> Result<Self> {
+        let (height, width, pixel_count) = require_band_major_rgb_shape(array)?;
+        let mut image = match array {
+            AnyDataArray::F32(array) => Self::from_numeric_rgb_array(array, height, width)?,
+            AnyDataArray::F64(array) => Self::from_numeric_rgb_array(array, height, width)?,
+            AnyDataArray::U8(array) => Self::from_numeric_rgb_array(array, height, width)?,
+            AnyDataArray::U16(array) => Self::from_numeric_rgb_array(array, height, width)?,
+            AnyDataArray::I16(array) => Self::from_numeric_rgb_array(array, height, width)?,
+        };
+        if let Some(mask) = array.mask() {
+            image.mask = Some(pixel_mask_from_band_major_rgb_mask(mask, pixel_count)?);
+        }
+        Ok(image)
+    }
+
     fn from_numeric_luma_array<U: NumericElement>(
         array: &DataArray<U>,
         height: usize,
@@ -302,6 +359,26 @@ impl<T: ImageFloat> FloatImage<T> {
             .map(|value| T::from_f64(value.to_f64()))
             .collect();
         Self::from_pixels(ImageMode::Luma, height, width, pixels)
+    }
+
+    fn from_numeric_rgb_array<U: NumericElement>(
+        array: &DataArray<U>,
+        height: usize,
+        width: usize,
+    ) -> Result<Self> {
+        let pixel_count = height
+            .checked_mul(width)
+            .ok_or_else(|| RustySatError::invalid_input("RGB image shape is too large"))?;
+        let values = array.values();
+        let mut pixels = Vec::with_capacity(pixel_count * ImageMode::Rgb.channels());
+        for pixel_index in 0..pixel_count {
+            for band in 0..ImageMode::Rgb.channels() {
+                pixels.push(T::from_f64(
+                    values[band * pixel_count + pixel_index].to_f64(),
+                ));
+            }
+        }
+        Self::from_pixels(ImageMode::Rgb, height, width, pixels)
     }
 
     pub fn crude_stretched(mut self, min_stretch: Option<T>, max_stretch: Option<T>) -> Self {
@@ -602,6 +679,55 @@ fn validate_channel_count(name: &str, provided: usize, expected: usize) -> Resul
     Ok(())
 }
 
+fn require_band_major_rgb_shape(array: &AnyDataArray) -> Result<(usize, usize, usize)> {
+    let shape = array.shape();
+    if shape.len() != 3 || shape[0] != ImageMode::Rgb.channels() {
+        return Err(RustySatError::invalid_input(format!(
+            "RGB image requires a band-major [3, y, x] array, got shape {:?}",
+            shape
+        )));
+    }
+    let dims = array.dims();
+    if dims.len() != 3 || dims[0] != "bands" || dims[1] != "y" || dims[2] != "x" {
+        return Err(RustySatError::invalid_input(format!(
+            "RGB image requires dimensions ['bands', 'y', 'x'], got {:?}",
+            dims
+        )));
+    }
+    let height = shape[1];
+    let width = shape[2];
+    let pixel_count = height
+        .checked_mul(width)
+        .ok_or_else(|| RustySatError::invalid_input("RGB image shape is too large"))?;
+    Ok((height, width, pixel_count))
+}
+
+fn pixel_mask_from_band_major_rgb_mask(
+    mask: &ValidityMask,
+    pixel_count: usize,
+) -> Result<ValidityMask> {
+    let expected = pixel_count
+        .checked_mul(ImageMode::Rgb.channels())
+        .ok_or_else(|| RustySatError::invalid_input("RGB mask shape is too large"))?;
+    if mask.len() != expected {
+        return Err(RustySatError::invalid_input(format!(
+            "RGB mask length {} does not match expected band-major length {expected}",
+            mask.len()
+        )));
+    }
+    let mut output = ValidityMask::all_valid(pixel_count);
+    for pixel_index in 0..pixel_count {
+        let masked = (0..ImageMode::Rgb.channels()).any(|band| {
+            mask.is_masked(band * pixel_count + pixel_index)
+                .unwrap_or(false)
+        });
+        if masked {
+            output.set_masked(pixel_index, true);
+        }
+    }
+    Ok(output)
+}
+
 fn rgba_image_from_float<T: ImageFloat>(
     pixels: &[T],
     mask: Option<&ValidityMask>,
@@ -747,6 +873,77 @@ mod tests {
         let image = Image16::from_luma_array(&array.into()).unwrap();
 
         assert_eq!(image.pixels(), &[0, 0, 65_535]);
+    }
+
+    #[test]
+    fn creates_rgb_image_from_band_major_dataset_array() {
+        let array = DataArray::<f64>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![0.0, 10.0, 0.0, 20.0, 0.0, 30.0],
+        )
+        .unwrap();
+        let dataset =
+            Dataset::new(rusty_sat_core::DataId::new("true_color").unwrap()).with_array(array);
+
+        let image = Image::from_rgb_dataset(&dataset).unwrap();
+
+        assert_eq!(image.mode(), ImageMode::Rgb);
+        assert_eq!(image.shape(), (1, 2));
+        assert_eq!(image.pixels(), &[0, 0, 0, 255, 255, 255]);
+    }
+
+    #[test]
+    fn creates_float_rgb_image_by_interleaving_band_major_values() {
+        let array = DataArray::<u16>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![1, 2, 10, 20, 100, 200],
+        )
+        .unwrap();
+
+        let image = FloatImage::<f64>::from_rgb_array(&array.into()).unwrap();
+
+        assert_eq!(image.mode(), ImageMode::Rgb);
+        assert_eq!(image.shape(), (1, 2));
+        assert_eq!(image.pixels(), &[1.0, 10.0, 100.0, 2.0, 20.0, 200.0]);
+    }
+
+    #[test]
+    fn creates_rgb_image_with_any_masked_channel_filled_black() {
+        let array = DataArray::<f64>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![0.0, 10.0, 0.0, 20.0, 0.0, 30.0],
+        )
+        .unwrap()
+        .with_mask(rusty_sat_core::ValidityMask::from_masked_flags([
+            false, false, false, true, false, false,
+        ]))
+        .unwrap();
+        let dataset =
+            Dataset::new(rusty_sat_core::DataId::new("true_color").unwrap()).with_array(array);
+
+        let image = Image::from_rgb_dataset(&dataset).unwrap();
+
+        assert_eq!(image.pixels(), &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn creates_16_bit_rgb_image_from_band_major_dataset_array() {
+        let array = DataArray::<f64>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![0.0, 10.0, 0.0, 20.0, 0.0, 30.0],
+        )
+        .unwrap();
+        let dataset =
+            Dataset::new(rusty_sat_core::DataId::new("true_color").unwrap()).with_array(array);
+
+        let image = Image16::from_rgb_dataset(&dataset).unwrap();
+
+        assert_eq!(image.mode(), ImageMode::Rgb);
+        assert_eq!(image.pixels(), &[0, 0, 0, 65_535, 65_535, 65_535]);
     }
 
     #[test]
