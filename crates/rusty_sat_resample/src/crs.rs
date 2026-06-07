@@ -18,15 +18,15 @@ use rusty_sat_core::{Result, RustySatError};
 use std::collections::BTreeMap;
 
 use crate::geo_keys::{
-    GeoKeyDef, ANGULAR_UNIT_DEGREE, CT_GEOSTATIONARY_SATELLITE,
-    CT_LAMBERT_AZIMUTHAL_EQUAL_AREA, CT_MERCATOR, CT_POLAR_STEREOGRAPHIC, CT_STEREOGRAPHIC,
-    EPSG_DATUM_WGS_84, EPSG_WGS_84, GEOGRAPHIC_TYPE_GEO_KEY, GEOG_ANGULAR_UNITS_GEO_KEY,
-    GEOG_CITATION_GEO_KEY, GEOG_GEODETIC_DATUM_GEO_KEY, GEO_USER_DEFINED, GT_MODEL_TYPE_GEO_KEY,
-    LINEAR_UNIT_METER, MODEL_TYPE_GEOGRAPHIC, MODEL_TYPE_PROJECTED, PROJ_CENTER_LONG_GEO_KEY,
-    PROJ_COORD_TRANS_GEO_KEY, PROJ_FALSE_EASTING_GEO_KEY, PROJ_FALSE_NORTHING_GEO_KEY,
-    PROJ_INV_FLATTENING_GEO_KEY, PROJ_LINEAR_UNITS_GEO_KEY, PROJ_NAT_ORIGIN_LAT_GEO_KEY,
-    PROJ_NAT_ORIGIN_LONG_GEO_KEY, PROJ_SEMI_MAJOR_AXIS_GEO_KEY, PROJ_SEMI_MINOR_AXIS_GEO_KEY,
-    PROJECTED_CITATION_GEO_KEY, PROJECTED_CS_TYPE_GEO_KEY,
+    GeoKeyDef, ANGULAR_UNIT_DEGREE, CT_GEOSTATIONARY_SATELLITE, CT_LAMBERT_AZIMUTHAL_EQUAL_AREA,
+    CT_MERCATOR, CT_POLAR_STEREOGRAPHIC, CT_STEREOGRAPHIC, EPSG_DATUM_WGS_84, EPSG_WGS_84,
+    GEOGRAPHIC_TYPE_GEO_KEY, GEOG_ANGULAR_UNITS_GEO_KEY, GEOG_CITATION_GEO_KEY,
+    GEOG_GEODETIC_DATUM_GEO_KEY, GEO_USER_DEFINED, GT_MODEL_TYPE_GEO_KEY, LINEAR_UNIT_METER,
+    MODEL_TYPE_GEOGRAPHIC, MODEL_TYPE_PROJECTED, PROJECTED_CITATION_GEO_KEY,
+    PROJECTED_CS_TYPE_GEO_KEY, PROJ_CENTER_LONG_GEO_KEY, PROJ_COORD_TRANS_GEO_KEY,
+    PROJ_FALSE_EASTING_GEO_KEY, PROJ_FALSE_NORTHING_GEO_KEY, PROJ_INV_FLATTENING_GEO_KEY,
+    PROJ_LINEAR_UNITS_GEO_KEY, PROJ_NAT_ORIGIN_LAT_GEO_KEY, PROJ_NAT_ORIGIN_LONG_GEO_KEY,
+    PROJ_SEMI_MAJOR_AXIS_GEO_KEY, PROJ_SEMI_MINOR_AXIS_GEO_KEY,
 };
 
 /// Current projection dependency decision for Rusty Sat.
@@ -190,7 +190,9 @@ impl ProjCrs {
     /// Used by `to_geotiff_geo_key_defs` to extract numeric projection
     /// parameters from the params map.
     pub fn parse_param_f64(&self, key: &str) -> Option<f64> {
-        self.param(key).flatten().and_then(|s| s.parse::<f64>().ok())
+        self.param(key)
+            .flatten()
+            .and_then(|s| s.parse::<f64>().ok())
     }
 
     /// Generate GeoTIFF GeoKey definitions for this CRS.
@@ -275,12 +277,11 @@ impl ProjCrs {
     fn geos_geo_keys(&self) -> Vec<GeoKeyDef> {
         let lon_0 = self.parse_param_f64("lon_0").unwrap_or(0.0);
         let a = self.parse_param_f64("a");
-        let b = self.parse_param_f64("b")
-            .or_else(|| {
-                let semi_major = a?;
-                let rf = self.parse_param_f64("rf")?;
-                Some(semi_major * (1.0 - 1.0 / rf))
-            });
+        let b = self.parse_param_f64("b").or_else(|| {
+            let semi_major = a?;
+            let rf = self.parse_param_f64("rf")?;
+            Some(semi_major * (1.0 - 1.0 / rf))
+        });
         let x_0 = self.parse_param_f64("x_0");
         let y_0 = self.parse_param_f64("y_0");
         let citation = self.geos_citation(lon_0, a, b);
@@ -338,8 +339,7 @@ impl ProjCrs {
         let lon_0 = self.parse_param_f64("lon_0").unwrap_or(0.0);
         let x_0 = self.parse_param_f64("x_0");
         let y_0 = self.parse_param_f64("y_0");
-        let is_polar = (lat_0 - 90.0).abs() < f64::EPSILON
-            || (lat_0 + 90.0).abs() < f64::EPSILON;
+        let is_polar = (lat_0 - 90.0).abs() < f64::EPSILON || (lat_0 + 90.0).abs() < f64::EPSILON;
         let coord_trans = if is_polar {
             CT_POLAR_STEREOGRAPHIC
         } else {
@@ -381,10 +381,7 @@ impl ProjCrs {
             GeoKeyDef::short(GT_MODEL_TYPE_GEO_KEY, MODEL_TYPE_PROJECTED),
             GeoKeyDef::short(PROJECTED_CS_TYPE_GEO_KEY, GEO_USER_DEFINED),
             GeoKeyDef::ascii(PROJECTED_CITATION_GEO_KEY, citation),
-            GeoKeyDef::short(
-                PROJ_COORD_TRANS_GEO_KEY,
-                CT_LAMBERT_AZIMUTHAL_EQUAL_AREA,
-            ),
+            GeoKeyDef::short(PROJ_COORD_TRANS_GEO_KEY, CT_LAMBERT_AZIMUTHAL_EQUAL_AREA),
             GeoKeyDef::short(PROJ_LINEAR_UNITS_GEO_KEY, LINEAR_UNIT_METER),
             GeoKeyDef::double(PROJ_NAT_ORIGIN_LAT_GEO_KEY, lat_0),
             GeoKeyDef::double(PROJ_NAT_ORIGIN_LONG_GEO_KEY, lon_0),
@@ -911,19 +908,10 @@ mod tests {
                 }
             })
         };
-        assert!(
-            (find_double(PROJ_CENTER_LONG_GEO_KEY).unwrap() - 140.7).abs() < 1e-10
-        );
-        assert!(
-            (find_double(PROJ_NAT_ORIGIN_LONG_GEO_KEY).unwrap() - 140.7).abs() < 1e-10
-        );
-        assert!(
-            (find_double(PROJ_SEMI_MAJOR_AXIS_GEO_KEY).unwrap() - 6_378_137.0).abs() < 1e-10
-        );
-        assert!(
-            (find_double(PROJ_SEMI_MINOR_AXIS_GEO_KEY).unwrap() - 6_356_752.3).abs()
-                < 1e-6
-        );
+        assert!((find_double(PROJ_CENTER_LONG_GEO_KEY).unwrap() - 140.7).abs() < 1e-10);
+        assert!((find_double(PROJ_NAT_ORIGIN_LONG_GEO_KEY).unwrap() - 140.7).abs() < 1e-10);
+        assert!((find_double(PROJ_SEMI_MAJOR_AXIS_GEO_KEY).unwrap() - 6_378_137.0).abs() < 1e-10);
+        assert!((find_double(PROJ_SEMI_MINOR_AXIS_GEO_KEY).unwrap() - 6_356_752.3).abs() < 1e-6);
     }
 
     #[test]
@@ -1013,8 +1001,7 @@ mod tests {
 
     #[test]
     fn geotiff_keys_stere_oblique() {
-        let crs =
-            ProjCrs::from_proj4_str("+proj=stere +lat_0=60 +lon_0=10 +units=m").unwrap();
+        let crs = ProjCrs::from_proj4_str("+proj=stere +lat_0=60 +lon_0=10 +units=m").unwrap();
         let keys = crs.to_geotiff_geo_key_defs();
         // ProjCoordTransGeoKey = Stereographic (NOT polar)
         assert_eq!(keys[3].key_id, PROJ_COORD_TRANS_GEO_KEY);
@@ -1027,8 +1014,7 @@ mod tests {
 
     #[test]
     fn geotiff_keys_laea() {
-        let crs =
-            ProjCrs::from_proj4_str("+proj=laea +lat_0=45 +lon_0=-100 +units=m").unwrap();
+        let crs = ProjCrs::from_proj4_str("+proj=laea +lat_0=45 +lon_0=-100 +units=m").unwrap();
         let keys = crs.to_geotiff_geo_key_defs();
         assert!(keys.len() >= 7);
         // ProjCoordTransGeoKey = LambertAzimEqualArea
@@ -1038,7 +1024,9 @@ mod tests {
             GeoKeyValue::Short(CT_LAMBERT_AZIMUTHAL_EQUAL_AREA)
         );
         // Contains lat_0 and lon_0 as doubles
-        let lat = keys.iter().find(|k| k.key_id == PROJ_NAT_ORIGIN_LAT_GEO_KEY);
+        let lat = keys
+            .iter()
+            .find(|k| k.key_id == PROJ_NAT_ORIGIN_LAT_GEO_KEY);
         assert!(lat.is_some());
         let lon = keys
             .iter()
@@ -1067,10 +1055,7 @@ mod tests {
 
     #[test]
     fn geotiff_keys_merc_with_lat_ts() {
-        let crs = ProjCrs::from_proj4_str(
-            "+proj=merc +lon_0=140.7 +lat_ts=30 +units=m",
-        )
-        .unwrap();
+        let crs = ProjCrs::from_proj4_str("+proj=merc +lon_0=140.7 +lat_ts=30 +units=m").unwrap();
         let keys = crs.to_geotiff_geo_key_defs();
         let lat = keys
             .iter()

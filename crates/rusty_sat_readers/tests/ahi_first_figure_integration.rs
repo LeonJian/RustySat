@@ -132,7 +132,11 @@ fn try_files_for_band(dir: &Path, band: &str) -> Option<Vec<(PathBuf, AhiSegment
 fn parses_all_50_hsd_file_headers() {
     let dir = require_data!();
     let all_files = scan_hsd_files(&dir);
-    assert_eq!(all_files.len(), 5, "expected 5 bands (B01, B02, B03, B04, B13)");
+    assert_eq!(
+        all_files.len(),
+        5,
+        "expected 5 bands (B01, B02, B03, B04, B13)"
+    );
 
     let mut total_files = 0;
     for (band, files) in &all_files {
@@ -153,8 +157,14 @@ fn parses_all_50_hsd_file_headers() {
             assert_eq!(h.basic.header_block_number, 1);
             assert_eq!(h.basic.satellite, "Himawari-9");
             assert_eq!(h.basic.observation_area, "FLDK");
-            assert!(h.basic.total_header_length > 0, "total_header_length must be > 0");
-            assert!(h.basic.total_data_length > 0, "total_data_length must be > 0");
+            assert!(
+                h.basic.total_header_length > 0,
+                "total_header_length must be > 0"
+            );
+            assert!(
+                h.basic.total_data_length > 0,
+                "total_data_length must be > 0"
+            );
             assert!(
                 h.basic.observation_start_time_days > 0.0,
                 "observation_start_time must be set"
@@ -236,15 +246,14 @@ fn parses_all_50_hsd_file_headers() {
 fn loads_raw_counts_with_error_and_outside_scan_masking() {
     let dir = require_data!();
     // Use B04 (1km resolution, smaller memory footprint)
-    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B04") else {
+        eprintln!("SKIP: B04 not in test data");
+        return;
+    };
     let first = &files[0];
 
-    let handler = AhiHsdFileHandler::from_path(
-        &first.0,
-        "hsd_b04",
-        first.1,
-    )
-    .expect("open first segment");
+    let handler =
+        AhiHsdFileHandler::from_path(&first.0, "hsd_b04", first.1).expect("open first segment");
 
     let h = handler.header();
     let dataset = handler.load_counts_dataset().expect("load counts");
@@ -254,7 +263,10 @@ fn loads_raw_counts_with_error_and_outside_scan_masking() {
     };
 
     // Validate dimensions
-    assert_eq!(array.shape_nd(), &[h.data.lines as usize, h.data.columns as usize]);
+    assert_eq!(
+        array.shape_nd(),
+        &[h.data.lines as usize, h.data.columns as usize]
+    );
     assert_eq!(array.dims(), &["y", "x"]);
 
     // Validate masking: every error pixel value should be masked
@@ -295,9 +307,18 @@ fn loads_raw_counts_with_error_and_outside_scan_masking() {
     eprintln!("B04 segment {} raw counts:", first.1.segment_number);
     eprintln!("  shape: {:?}", array.shape_nd());
     eprintln!("  total pixels:  {total}");
-    eprintln!("  valid pixels:  {valid_count} ({:.1}%)", valid_count as f64 / total as f64 * 100.0);
-    eprintln!("  error pixels:  {error_count} ({:.1}%)", error_count as f64 / total as f64 * 100.0);
-    eprintln!("  outside-scan:  {outside_count} ({:.1}%)", outside_count as f64 / total as f64 * 100.0);
+    eprintln!(
+        "  valid pixels:  {valid_count} ({:.1}%)",
+        valid_count as f64 / total as f64 * 100.0
+    );
+    eprintln!(
+        "  error pixels:  {error_count} ({:.1}%)",
+        error_count as f64 / total as f64 * 100.0
+    );
+    eprintln!(
+        "  outside-scan:  {outside_count} ({:.1}%)",
+        outside_count as f64 / total as f64 * 100.0
+    );
     eprintln!("  valid range:   [{min_valid}, {max_valid}]");
     eprintln!("  data type:     u16");
 
@@ -311,14 +332,19 @@ fn loads_raw_counts_with_error_and_outside_scan_masking() {
         Some("counts")
     );
     assert_eq!(
-        dataset.attr("platform_name").and_then(MetadataValue::as_str),
+        dataset
+            .attr("platform_name")
+            .and_then(MetadataValue::as_str),
         Some("Himawari-9")
     );
     assert_eq!(
         dataset.attr("sensor").and_then(MetadataValue::as_str),
         Some("ahi")
     );
-    assert!(dataset.attr("area").is_some(), "area metadata must be present");
+    assert!(
+        dataset.attr("area").is_some(),
+        "area metadata must be present"
+    );
     assert!(dataset.attr("first_line_number").is_some());
 
     eprintln!("PASS: raw count loading with masking validated");
@@ -331,11 +357,14 @@ fn loads_raw_counts_with_error_and_outside_scan_masking() {
 #[test]
 fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
     let dir = require_data!();
-    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B01") else {
+        eprintln!("SKIP: B01 not in test data");
+        return;
+    };
     let first = &files[0];
 
-    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1)
-        .expect("open first B01 segment");
+    let handler =
+        AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1).expect("open first B01 segment");
 
     // --- Counts ---
     let counts_ds = handler.load_counts_dataset().expect("load counts");
@@ -375,7 +404,10 @@ fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
     eprintln!("  data type:     f32");
 
     assert!(rad_valid > 0, "must have valid radiance pixels");
-    assert!(rad_min > -100.0, "radiance must be in reasonable range, got min={rad_min}");
+    assert!(
+        rad_min > -100.0,
+        "radiance must be in reasonable range, got min={rad_min}"
+    );
     assert!(rad_max > rad_min, "radiance must have variation");
 
     // --- Reflectance ---
@@ -408,7 +440,10 @@ fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
     eprintln!("  data type:     f32");
 
     assert!(ref_valid > 0, "must have valid reflectance pixels");
-    assert!(ref_min >= 0.0, "reflectance must be >= 0%, got min={ref_min}");
+    assert!(
+        ref_min >= 0.0,
+        "reflectance must be >= 0%, got min={ref_min}"
+    );
     assert!(ref_max > 0.0, "reflectance must be > 0%");
     assert!(ref_max > ref_min, "reflectance must have variation");
 
@@ -422,11 +457,14 @@ fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
 #[test]
 fn calibrates_infrared_band_counts_to_brightness_temperature() {
     let dir = require_data!();
-    let Some(files) = try_files_for_band(&dir, "B13") else { eprintln!("SKIP: B13 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B13") else {
+        eprintln!("SKIP: B13 not in test data");
+        return;
+    };
     let first = &files[0];
 
-    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b13", first.1)
-        .expect("open first B13 segment");
+    let handler =
+        AhiHsdFileHandler::from_path(&first.0, "hsd_b13", first.1).expect("open first B13 segment");
 
     let h = handler.header();
     eprintln!("B13 band info:");
@@ -458,7 +496,10 @@ fn calibrates_infrared_band_counts_to_brightness_temperature() {
             rad_max = rad_max.max(v);
         }
     }
-    eprintln!("B13 segment {} IR radiance: [{rad_min:.6}, {rad_max:.6}]", first.1.segment_number);
+    eprintln!(
+        "B13 segment {} IR radiance: [{rad_min:.6}, {rad_max:.6}]",
+        first.1.segment_number
+    );
 
     // --- Brightness Temperature ---
     let bt_ds = handler
@@ -489,7 +530,10 @@ fn calibrates_infrared_band_counts_to_brightness_temperature() {
             }
         }
     }
-    eprintln!("B13 segment {} brightness temperature:", first.1.segment_number);
+    eprintln!(
+        "B13 segment {} brightness temperature:",
+        first.1.segment_number
+    );
     eprintln!("  valid pixels:  {bt_valid}");
     eprintln!("  NaN pixels:    {bt_nan}");
     eprintln!("  range:         [{bt_min:.2} K, {bt_max:.2} K]");
@@ -513,12 +557,14 @@ fn assembles_all_10_segments_into_full_disk() {
     let dir = require_data!();
 
     // Test assembly with B04 (1km, 11000x11000 full-disk = 10 segments × 1100 lines)
-    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B04") else {
+        eprintln!("SKIP: B04 not in test data");
+        return;
+    };
     let handlers: Vec<AhiHsdFileHandler> = files
         .iter()
         .map(|(path, seg)| {
-            AhiHsdFileHandler::from_path(path, "hsd_b04", *seg)
-                .expect("open segment")
+            AhiHsdFileHandler::from_path(path, "hsd_b04", *seg).expect("open segment")
         })
         .collect();
 
@@ -556,7 +602,10 @@ fn assembles_all_10_segments_into_full_disk() {
     assert_eq!(dataset.attr("lines"), Some(&MetadataValue::Integer(11000)));
 
     // Verify columns attribute
-    assert_eq!(dataset.attr("columns"), Some(&MetadataValue::Integer(11000)));
+    assert_eq!(
+        dataset.attr("columns"),
+        Some(&MetadataValue::Integer(11000))
+    );
 
     // Verify area is present and has correct dimensions
     let area = dataset.attr("area").expect("area metadata");
@@ -565,14 +614,8 @@ fn assembles_all_10_segments_into_full_disk() {
             area_map.get("id").and_then(MetadataValue::as_str),
             Some("FLDK")
         );
-        assert_eq!(
-            area_map.get("height"),
-            Some(&MetadataValue::Integer(11000))
-        );
-        assert_eq!(
-            area_map.get("width"),
-            Some(&MetadataValue::Integer(11000))
-        );
+        assert_eq!(area_map.get("height"), Some(&MetadataValue::Integer(11000)));
+        assert_eq!(area_map.get("width"), Some(&MetadataValue::Integer(11000)));
     }
 
     eprintln!("B04 assembled: 10 segments → [11000, 11000] full-disk");
@@ -588,11 +631,13 @@ fn assembles_all_10_segments_into_full_disk() {
 #[test]
 fn generates_correct_geostationary_area_and_projection_coordinates() {
     let dir = require_data!();
-    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B01") else {
+        eprintln!("SKIP: B01 not in test data");
+        return;
+    };
     let first = &files[0];
 
-    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1)
-        .expect("open segment");
+    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1).expect("open segment");
 
     let dataset = handler
         .load_calibrated_dataset(AhiCalibration::Reflectance)
@@ -605,7 +650,10 @@ fn generates_correct_geostationary_area_and_projection_coordinates() {
     };
 
     // Area identity
-    assert_eq!(area.get("type").and_then(MetadataValue::as_str), Some("area"));
+    assert_eq!(
+        area.get("type").and_then(MetadataValue::as_str),
+        Some("area")
+    );
     assert_eq!(area.get("id").and_then(MetadataValue::as_str), Some("FLDK"));
     assert!(area
         .get("description")
@@ -615,7 +663,10 @@ fn generates_correct_geostationary_area_and_projection_coordinates() {
 
     // Proj ID: geosh9 for Himawari-9
     let proj_id = area.get("proj_id").and_then(MetadataValue::as_str).unwrap();
-    assert!(proj_id.starts_with("geosh"), "proj_id={proj_id} must start with 'geosh'");
+    assert!(
+        proj_id.starts_with("geosh"),
+        "proj_id={proj_id} must start with 'geosh'"
+    );
     eprintln!("  proj_id: {proj_id}");
 
     // Area extent
@@ -630,8 +681,10 @@ fn generates_correct_geostationary_area_and_projection_coordinates() {
             _ => panic!("extent values must be floats"),
         })
         .collect();
-    eprintln!("  area_extent: [{:.4}, {:.4}, {:.4}, {:.4}]",
-        ext_values[0], ext_values[1], ext_values[2], ext_values[3]);
+    eprintln!(
+        "  area_extent: [{:.4}, {:.4}, {:.4}, {:.4}]",
+        ext_values[0], ext_values[1], ext_values[2], ext_values[3]
+    );
     assert!(ext_values[0] < ext_values[2], "ll_x < ur_x");
     assert!(ext_values[1] < ext_values[3], "ll_y < ur_y");
 
@@ -639,15 +692,27 @@ fn generates_correct_geostationary_area_and_projection_coordinates() {
     let MetadataValue::Map(proj) = area.get("projection").expect("projection") else {
         panic!("projection must be a map");
     };
-    assert_eq!(proj.get("lon_0").and_then(MetadataValue::as_str), Some("140.7"));
-    assert_eq!(proj.get("proj").and_then(MetadataValue::as_str), Some("geos"));
+    assert_eq!(
+        proj.get("lon_0").and_then(MetadataValue::as_str),
+        Some("140.7")
+    );
+    assert_eq!(
+        proj.get("proj").and_then(MetadataValue::as_str),
+        Some("geos")
+    );
     assert_eq!(proj.get("units").and_then(MetadataValue::as_str), Some("m"));
     let a = proj.get("a").and_then(MetadataValue::as_str).unwrap();
     let b = proj.get("b").and_then(MetadataValue::as_str).unwrap();
     let h = proj.get("h").and_then(MetadataValue::as_str).unwrap();
     eprintln!("  projection: proj=geos, lon_0=140.7, a={a}, b={b}, h={h}");
-    assert!(a.parse::<f64>().unwrap() > 6_000_000.0, "earth radius must be reasonable");
-    assert!(h.parse::<f64>().unwrap() > 35_000_000.0, "satellite height must be reasonable");
+    assert!(
+        a.parse::<f64>().unwrap() > 6_000_000.0,
+        "earth radius must be reasonable"
+    );
+    assert!(
+        h.parse::<f64>().unwrap() > 35_000_000.0,
+        "satellite height must be reasonable"
+    );
 
     // Coordinate axes
     let array = dataset.array().expect("array");
@@ -655,10 +720,18 @@ fn generates_correct_geostationary_area_and_projection_coordinates() {
     let y = array.coord("y").expect("y coordinate");
     assert!(!x.values().is_empty(), "x coords must not be empty");
     assert!(!y.values().is_empty(), "y coords must not be empty");
-    eprintln!("  x coords: {} values, range [{:.4}, {:.4}]",
-        x.values().len(), x.values().first().unwrap(), x.values().last().unwrap());
-    eprintln!("  y coords: {} values, range [{:.4}, {:.4}]",
-        y.values().len(), y.values().first().unwrap(), y.values().last().unwrap());
+    eprintln!(
+        "  x coords: {} values, range [{:.4}, {:.4}]",
+        x.values().len(),
+        x.values().first().unwrap(),
+        x.values().last().unwrap()
+    );
+    eprintln!(
+        "  y coords: {} values, range [{:.4}, {:.4}]",
+        y.values().len(),
+        y.values().first().unwrap(),
+        y.values().last().unwrap()
+    );
 
     eprintln!("PASS: geostationary area and projection coordinates validated");
 }
@@ -673,18 +746,19 @@ fn outputs_png8_png16_and_geotiff_with_auto_stretch() {
     let out = output_dir();
 
     // Use B01 for smaller size (11000x11000 full-disk)
-    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B01") else {
+        eprintln!("SKIP: B01 not in test data");
+        return;
+    };
     let handlers: Vec<AhiHsdFileHandler> = files
         .iter()
         .map(|(path, seg)| {
-            AhiHsdFileHandler::from_path(path, "hsd_b01", *seg)
-                .expect("open segment")
+            AhiHsdFileHandler::from_path(path, "hsd_b01", *seg).expect("open segment")
         })
         .collect();
 
-    let reader =
-        AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)
-            .expect("create reader");
+    let reader = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)
+        .expect("create reader");
     let id = reader.available_dataset_ids().pop().expect("dataset ID");
     let dataset = reader.load(&id).expect("load assembled B01");
 
@@ -698,8 +772,18 @@ fn outputs_png8_png16_and_geotiff_with_auto_stretch() {
 
     let png8_bytes = std::fs::read(&png8_path).expect("read PNG8");
     assert_eq!(&png8_bytes[..8], b"\x89PNG\r\n\x1a\n");
-    let png8_w = u32::from_be_bytes([png8_bytes[16], png8_bytes[17], png8_bytes[18], png8_bytes[19]]);
-    let png8_h = u32::from_be_bytes([png8_bytes[20], png8_bytes[21], png8_bytes[22], png8_bytes[23]]);
+    let png8_w = u32::from_be_bytes([
+        png8_bytes[16],
+        png8_bytes[17],
+        png8_bytes[18],
+        png8_bytes[19],
+    ]);
+    let png8_h = u32::from_be_bytes([
+        png8_bytes[20],
+        png8_bytes[21],
+        png8_bytes[22],
+        png8_bytes[23],
+    ]);
     assert_eq!(png8_w, 11000);
     assert_eq!(png8_h, 11000);
     assert_eq!(png8_bytes[24], 8); // bit depth
@@ -758,12 +842,14 @@ fn outputs_png8_png16_and_geotiff_with_auto_stretch() {
 #[test]
 fn applies_user_calibration_radiance_correction_and_dn_mode() {
     let dir = require_data!();
-    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B04") else {
+        eprintln!("SKIP: B04 not in test data");
+        return;
+    };
     let first = &files[0];
 
     // --- Base handler (no user calibration) ---
-    let base = AhiHsdFileHandler::from_path(&first.0, "hsd_b04", first.1)
-        .expect("open segment");
+    let base = AhiHsdFileHandler::from_path(&first.0, "hsd_b04", first.1).expect("open segment");
 
     let base_radiance = base
         .load_calibrated_dataset(AhiCalibration::Radiance)
@@ -787,15 +873,13 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
     // --- Radiance correction mode ---
     let slope = 0.95_f64;
     let offset = -0.1_f64;
-    let rad_corr = base
-        .clone()
-        .with_user_calibration(
-            AhiUserCalibration::radiance_correction([(
-                "B04",
-                AhiUserCalibrationCoefficients { slope, offset },
-            )])
-            .expect("valid radiance correction"),
-        );
+    let rad_corr = base.clone().with_user_calibration(
+        AhiUserCalibration::radiance_correction([(
+            "B04",
+            AhiUserCalibrationCoefficients { slope, offset },
+        )])
+        .expect("valid radiance correction"),
+    );
 
     let corr_rad = rad_corr
         .load_calibrated_dataset(AhiCalibration::Radiance)
@@ -817,23 +901,24 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
         );
     }
     eprintln!("  Radiance correction: slope={slope}, offset={offset}");
-    eprintln!("    verified {} sample pixels match expected (base - offset) / slope", sample_indices.len());
+    eprintln!(
+        "    verified {} sample pixels match expected (base - offset) / slope",
+        sample_indices.len()
+    );
 
     // --- Digital Number mode ---
     let dn_slope = -0.0032_f64;
     let dn_offset = 15.20_f64;
-    let dn_handler = base
-        .clone()
-        .with_user_calibration(
-            AhiUserCalibration::digital_number([(
-                "B04",
-                AhiUserCalibrationCoefficients {
-                    slope: dn_slope,
-                    offset: dn_offset,
-                },
-            )])
-            .expect("valid DN calibration"),
-        );
+    let dn_handler = base.clone().with_user_calibration(
+        AhiUserCalibration::digital_number([(
+            "B04",
+            AhiUserCalibrationCoefficients {
+                slope: dn_slope,
+                offset: dn_offset,
+            },
+        )])
+        .expect("valid DN calibration"),
+    );
 
     let dn_rad = dn_handler
         .load_calibrated_dataset(AhiCalibration::Radiance)
@@ -861,7 +946,10 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
         );
     }
     eprintln!("  Digital Number mode: slope={dn_slope}, offset={dn_offset}");
-    eprintln!("    verified {} sample pixels match expected count * slope + offset", sample_indices.len());
+    eprintln!(
+        "    verified {} sample pixels match expected count * slope + offset",
+        sample_indices.len()
+    );
 
     // --- Calibration mode: Nominal vs Update ---
     let nominal = base
@@ -875,8 +963,14 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
     };
 
     eprintln!("  Calibration mode:");
-    eprintln!("    Update (default): first valid pixel radiance = {:.6}", base_vals[sample_indices[0]]);
-    eprintln!("    Nominal:           first valid pixel radiance = {:.6}", nominal_arr.values()[sample_indices[0]]);
+    eprintln!(
+        "    Update (default): first valid pixel radiance = {:.6}",
+        base_vals[sample_indices[0]]
+    );
+    eprintln!(
+        "    Nominal:           first valid pixel radiance = {:.6}",
+        nominal_arr.values()[sample_indices[0]]
+    );
 
     eprintln!("PASS: user calibration (radiance correction + DN mode + nominal/update) validated");
 }
@@ -888,11 +982,13 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
 #[test]
 fn scientific_f64_output_produces_higher_precision() {
     let dir = require_data!();
-    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B04") else {
+        eprintln!("SKIP: B04 not in test data");
+        return;
+    };
     let first = &files[0];
 
-    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b04", first.1)
-        .expect("open segment");
+    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b04", first.1).expect("open segment");
 
     // F32 output (default)
     let f32_ds = handler
@@ -927,7 +1023,10 @@ fn scientific_f64_output_produces_higher_precision() {
     for (i, (&fv, &dv)) in f32_vals.iter().zip(f64_vals.iter()).enumerate() {
         if mask.map_or(true, |m| m.is_masked(i) != Some(true)) && fv.is_finite() {
             let diff = (dv - fv as f64).abs();
-            assert!(diff < 1e-4, "F32/F64 mismatch at idx {i}: f32={fv:.8}, f64={dv:.8}");
+            assert!(
+                diff < 1e-4,
+                "F32/F64 mismatch at idx {i}: f32={fv:.8}, f64={dv:.8}"
+            );
             compared += 1;
             if compared >= 100 {
                 break;
@@ -979,13 +1078,15 @@ fn end_to_end_pipeline_timing_and_statistics() {
         } else {
             AhiCalibration::Reflectance
         };
-        let reader =
-            AhiHsdReader::with_calibration(calibration, handlers).expect("reader");
+        let reader = AhiHsdReader::with_calibration(calibration, handlers).expect("reader");
         let id = reader.available_dataset_ids().pop().expect("dataset");
         let dataset = reader.load(&id).expect("load");
         let load_time = t_load.elapsed();
 
-        let shape = dataset.array().map(|a| a.shape().to_vec()).unwrap_or_default();
+        let shape = dataset
+            .array()
+            .map(|a| a.shape().to_vec())
+            .unwrap_or_default();
         let dtype = dataset
             .array()
             .map(|a| a.dtype().name().to_string())
@@ -998,9 +1099,7 @@ fn end_to_end_pipeline_timing_and_statistics() {
             .save_dataset(&dataset, &png_path)
             .expect("save PNG");
         let save_time = t_save.elapsed();
-        let png_size = std::fs::metadata(&png_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let png_size = std::fs::metadata(&png_path).map(|m| m.len()).unwrap_or(0);
 
         let total = t_total.elapsed();
         let calib_name = calibration.name();
@@ -1032,38 +1131,42 @@ fn end_to_end_pipeline_timing_and_statistics() {
 #[test]
 fn reader_can_select_scientific_f64_output_mode() {
     let dir = require_data!();
-    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
+    let Some(files) = try_files_for_band(&dir, "B01") else {
+        eprintln!("SKIP: B01 not in test data");
+        return;
+    };
     let first = &files[0];
 
-    let handler =
-        AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1).expect("open");
+    let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1).expect("open");
 
     // Display F32 (default)
-    let reader_f32 =
-        AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler.clone()])
-            .expect("reader");
+    let reader_f32 = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler.clone()])
+        .expect("reader");
     let id = reader_f32.available_dataset_ids().pop().expect("id");
     let ds_f32 = reader_f32.load(&id).expect("load");
     assert_eq!(
         ds_f32.attr("precision").and_then(MetadataValue::as_str),
         Some("f32")
     );
-    assert!(matches!(ds_f32.array().expect("array"), AnyDataArray::F32(_)));
+    assert!(matches!(
+        ds_f32.array().expect("array"),
+        AnyDataArray::F32(_)
+    ));
 
     // Scientific F64
-    let reader_f64 = AhiHsdReader::with_calibration(
-        AhiCalibration::Reflectance,
-        [handler],
-    )
-    .expect("reader")
-    .with_output(AhiCalibrationOutput::ScientificF64);
+    let reader_f64 = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler])
+        .expect("reader")
+        .with_output(AhiCalibrationOutput::ScientificF64);
     let id2 = reader_f64.available_dataset_ids().pop().expect("id");
     let ds_f64 = reader_f64.load(&id2).expect("load");
     assert_eq!(
         ds_f64.attr("precision").and_then(MetadataValue::as_str),
         Some("f64")
     );
-    assert!(matches!(ds_f64.array().expect("array"), AnyDataArray::F64(_)));
+    assert!(matches!(
+        ds_f64.array().expect("array"),
+        AnyDataArray::F64(_)
+    ));
 
     eprintln!("PASS: DisplayF32 / ScientificF64 reader output mode validated");
 }

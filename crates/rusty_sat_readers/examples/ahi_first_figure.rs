@@ -15,9 +15,7 @@
 //!
 //! Available bands in the default dataset: B01, B02, B03, B04, B13.
 
-use rusty_sat_readers::{
-    AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader,
-};
+use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,10 +36,7 @@ fn main() {
 
     let files_by_band = scan_hsd_files(&data_dir);
     if files_by_band.is_empty() {
-        eprintln!(
-            "No .DAT.bz2 / .DAT files found in '{}'",
-            data_dir.display()
-        );
+        eprintln!("No .DAT.bz2 / .DAT files found in '{}'", data_dir.display());
         std::process::exit(1);
     }
 
@@ -59,7 +54,10 @@ fn main() {
         std::process::exit(1);
     });
 
-    println!("--- Loading {target_band} ({}) segments ---", band_files.len());
+    println!(
+        "--- Loading {target_band} ({}) segments ---",
+        band_files.len()
+    );
     let t0 = Instant::now();
 
     let handlers: Vec<AhiHsdFileHandler> = band_files
@@ -73,8 +71,8 @@ fn main() {
                 seg.total_segments
             );
             let t = Instant::now();
-            let handler = AhiHsdFileHandler::from_path(path, &file_type, *seg)
-                .unwrap_or_else(|err| {
+            let handler =
+                AhiHsdFileHandler::from_path(path, &file_type, *seg).unwrap_or_else(|err| {
                     panic!("failed to open '{}': {err}", path.display());
                 });
             let h = handler.header();
@@ -98,10 +96,7 @@ fn main() {
         .collect();
 
     let header_time = t0.elapsed();
-    println!(
-        "Headers parsed in {:.1}s",
-        header_time.as_secs_f64()
-    );
+    println!("Headers parsed in {:.1}s", header_time.as_secs_f64());
     println!();
 
     println!("--- Assembling and calibrating (reflectance) ---");
@@ -120,9 +115,7 @@ fn main() {
     let load_time = t1.elapsed();
     let shape = dataset
         .array()
-        .map(|a: &rusty_sat_core::AnyDataArray| {
-            (a.shape().to_vec(), a.dtype().name().to_string())
-        })
+        .map(|a: &rusty_sat_core::AnyDataArray| (a.shape().to_vec(), a.dtype().name().to_string()))
         .unwrap_or_default();
     println!(
         "Assembled + calibrated in {:.1}s | shape={:?} dtype={}",
@@ -133,10 +126,10 @@ fn main() {
     println!();
 
     let output_path = data_dir
-        .parent()          // 07
-        .and_then(|p| p.parent())  // 20250923
-        .and_then(|p| p.parent())  // data
-        .and_then(|p| p.parent())  // ahi_input
+        .parent() // 07
+        .and_then(|p| p.parent()) // 20250923
+        .and_then(|p| p.parent()) // data
+        .and_then(|p| p.parent()) // ahi_input
         .map(|p| p.join("ahi_output"))
         .unwrap_or_else(|| PathBuf::from("local_data/ahi_output"));
     std::fs::create_dir_all(&output_path).ok();
@@ -150,9 +143,7 @@ fn main() {
             panic!("failed to save PNG: {err}");
         });
     let save_time = t2.elapsed();
-    let png_size = std::fs::metadata(&png_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let png_size = std::fs::metadata(&png_path).map(|m| m.len()).unwrap_or(0);
 
     println!(
         "Saved in {:.1}s | {:.1} MB",
@@ -183,10 +174,7 @@ fn scan_hsd_files(dir: &Path) -> BTreeMap<String, Vec<(PathBuf, AhiSegmentInfo)>
         let Some((band, seg)) = parse_hsd_filename(name) else {
             continue;
         };
-        by_band
-            .entry(band)
-            .or_default()
-            .push((path, seg));
+        by_band.entry(band).or_default().push((path, seg));
     }
 
     for files in by_band.values_mut() {

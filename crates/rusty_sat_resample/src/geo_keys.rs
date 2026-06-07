@@ -302,10 +302,7 @@ mod tests {
     fn geo_key_def_ascii() {
         let def = GeoKeyDef::ascii(PROJECTED_CITATION_GEO_KEY, "test citation");
         assert_eq!(def.key_id, 3073);
-        assert_eq!(
-            def.value,
-            GeoKeyValue::Ascii("test citation".to_string())
-        );
+        assert_eq!(def.value, GeoKeyValue::Ascii("test citation".to_string()));
     }
 
     #[test]
@@ -462,7 +459,7 @@ mod tests {
         assert_eq!(u16::from_le_bytes(bytes[2..4].try_into().unwrap()), 1); // revision
         assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 0); // minor
         assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 2); // key_count
-        // entry 0: GTModelTypeGeoKey=1024, location=0, count=1, value=2
+                                                                            // entry 0: GTModelTypeGeoKey=1024, location=0, count=1, value=2
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
             GT_MODEL_TYPE_GEO_KEY
@@ -492,7 +489,7 @@ mod tests {
         // 4 header + 3×4 entries = 16 u16 = 32 bytes
         assert_eq!(bytes.len(), 32);
         assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 3); // key_count
-        // ascii entry at index 1: key_id=3073, location=34737, count=2, offset=0
+                                                                            // ascii entry at index 1: key_id=3073, location=34737, count=2, offset=0
         let off = 8 + 8; // skip header + first entry
         assert_eq!(
             u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()),
@@ -506,7 +503,7 @@ mod tests {
             u16::from_le_bytes(bytes[off + 4..off + 6].try_into().unwrap()),
             2
         ); // count = "hi".len()
-        // double entry at index 2: key_id=3088, location=34736, count=1, offset=0
+           // double entry at index 2: key_id=3088, location=34736, count=1, offset=0
         let off2 = off + 8;
         assert_eq!(
             u16::from_le_bytes(bytes[off2..off2 + 2].try_into().unwrap()),
