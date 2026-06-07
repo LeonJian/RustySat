@@ -318,6 +318,7 @@ fn default_dim_names(ndim: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::sync::Mutex;
 

@@ -400,6 +400,7 @@ fn build_replacement_mask(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{Coordinate, DataType, NumericElement};
 

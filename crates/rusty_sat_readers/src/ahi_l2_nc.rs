@@ -680,6 +680,7 @@ const AHI_L2_DATASETS: &[AhiL2DatasetDef] = &[
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{DataQuery, Scene};
     use rusty_sat_resample::{
@@ -997,11 +998,11 @@ variables:
         let array = dataset.array().unwrap();
         assert_eq!(
             array.coord("x").unwrap().values(),
-            &[-3_666_666.6008, 0.0, 3_666_666.6008]
+            &[-3_666_666.600_8, 0.0, 3_666_666.600_8]
         );
         assert_eq!(
             array.coord("y").unwrap().values(),
-            &[2_749_999.9506, -2_749_999.9506]
+            &[2_749_999.950_6, -2_749_999.950_6]
         );
 
         let resampled =

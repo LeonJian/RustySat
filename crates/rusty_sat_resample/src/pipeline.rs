@@ -726,6 +726,7 @@ fn optional_f64_bits_eq(left: Option<f64>, right: Option<f64>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{DataGrid, DataId};
     use std::collections::BTreeMap;

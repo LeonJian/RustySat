@@ -1,4 +1,6 @@
 //! Standalone test program that generates the first AHI figure from real HSD data.
+
+#![allow(clippy::unwrap_used)]
 //!
 //! Loads Himawari-8/9 AHI HSD segment files (.DAT or .DAT.bz2), calibrates to
 //! reflectance, assembles the full-disk image, and saves it as a PNG.

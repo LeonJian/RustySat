@@ -463,6 +463,7 @@ fn optional_sequence<'a>(mapping: &'a Mapping, key: &str) -> Result<Option<&'a V
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     const CONFIG: &str = r#"

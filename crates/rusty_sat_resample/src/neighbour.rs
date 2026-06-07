@@ -727,6 +727,7 @@ fn clamp_pixel_index(value: f64, size: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::collections::BTreeMap;
 

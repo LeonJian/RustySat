@@ -1175,6 +1175,7 @@ fn row_major_offset(shape: &[usize], indexes: &[usize]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]

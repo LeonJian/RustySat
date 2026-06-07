@@ -179,6 +179,7 @@ fn metadata_bool(value: &MetadataValue) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::config::CompositeRegistryConfig;
     use rusty_sat_image::{FloatImage, ImageMode};

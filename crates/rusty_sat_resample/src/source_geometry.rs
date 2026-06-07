@@ -270,6 +270,7 @@ fn usize_to_i64(value: usize) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{Coordinate, DataGrid, DataId};
 

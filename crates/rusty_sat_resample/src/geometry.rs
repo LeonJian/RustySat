@@ -217,6 +217,7 @@ fn scalar_approx_eq(left: f64, right: f64, abs_tol: f64, rel_tol: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]

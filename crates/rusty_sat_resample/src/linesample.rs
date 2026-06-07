@@ -458,6 +458,7 @@ fn fill_type_error(expected: &str) -> RustySatError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::DataType;
 

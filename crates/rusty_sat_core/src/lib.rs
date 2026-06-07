@@ -1561,6 +1561,7 @@ fn reader_for_dataset(id: &DataId, inventories: &[&ReaderInventory]) -> Result<S
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};

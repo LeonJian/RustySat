@@ -247,6 +247,7 @@ fn u16_pixels_to_png_bytes(pixels: &[u16]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{DataArray, DataId, Scene};
     use std::fs;

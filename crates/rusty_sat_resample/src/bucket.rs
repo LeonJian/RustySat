@@ -708,6 +708,7 @@ fn should_preserve_coord(name: &str, coordinate: &Coordinate) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::DataId;
 

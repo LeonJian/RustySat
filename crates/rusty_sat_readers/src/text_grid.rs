@@ -219,6 +219,7 @@ fn parse_row(line: &str, line_number: usize) -> Result<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::Reader;
     use std::time::{SystemTime, UNIX_EPOCH};

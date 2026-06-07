@@ -306,6 +306,7 @@ fn finite_or_nan(value: f64, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{DataArray, DataId, Scene};
     use std::fs;

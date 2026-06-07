@@ -408,6 +408,7 @@ fn scale_value(value: f64, scale: LinearScale, fill_value: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataId};
     use std::sync::Mutex;

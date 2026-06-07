@@ -206,6 +206,7 @@ fn validate_dataset_geometry(dataset: &Dataset, source: &SourceGeometry) -> Resu
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{Coordinate, DataGrid, DataId};
     use std::collections::BTreeMap;

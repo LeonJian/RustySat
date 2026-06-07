@@ -1095,6 +1095,7 @@ fn write_error(err: std::io::Error) -> RustySatError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{DataArray, DataId, Dataset, MetadataValue, Scene, ValidityMask};
     use std::fs;

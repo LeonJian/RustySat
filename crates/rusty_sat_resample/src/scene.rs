@@ -49,6 +49,7 @@ impl SceneResampleExt for Scene {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::NearestAreaResampler;
     use rusty_sat_core::{DataGrid, DataId, Dataset};

@@ -1400,6 +1400,7 @@ fn yaml_value_to_f64(value: &Value, context: &str) -> Result<f64> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::DataArray;
 

@@ -1940,6 +1940,7 @@ fn read_bzip2_reader_bounded<R: std::io::BufRead>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::yaml_reader::YamlMetadataReader;
     use bzip2::write::BzEncoder;

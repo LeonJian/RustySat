@@ -628,6 +628,7 @@ fn pixel_center(area: &AreaDefinition, y: usize, x: usize) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataArray};
     use std::collections::BTreeMap;

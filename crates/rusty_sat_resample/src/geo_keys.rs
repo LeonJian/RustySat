@@ -236,6 +236,7 @@ pub fn serialize_geo_key_directory(finalized: &GeoTiffGeoKeyFinal) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     // ------------------------------------------------------------------

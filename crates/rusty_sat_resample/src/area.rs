@@ -646,6 +646,7 @@ fn yaml_scalar_to_string(value: &Value) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 

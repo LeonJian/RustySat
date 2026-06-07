@@ -1,4 +1,6 @@
 //! Integration test: AHI HSD first figure — comprehensive feature validation suite.
+
+#![allow(clippy::unwrap_used)]
 //!
 //! Validates every feature listed in the AHI implementation checklist
 //! against real Himawari-9 HSD segment data.

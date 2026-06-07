@@ -203,6 +203,7 @@ fn build_binary_mask(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{Coordinate, DataType, NumericElement};
 

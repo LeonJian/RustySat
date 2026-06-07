@@ -613,6 +613,7 @@ fn normalize_epsg_init(params: &mut BTreeMap<String, Option<String>>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::geo_keys::GeoKeyValue;
 

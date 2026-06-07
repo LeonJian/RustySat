@@ -324,6 +324,7 @@ fn is_masked(array: &AnyDataArray, pixel_index: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use rusty_sat_core::{DataArray, DataType};
 

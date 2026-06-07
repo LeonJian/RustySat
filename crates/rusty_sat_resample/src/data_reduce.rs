@@ -344,6 +344,7 @@ fn validate_radius(radius_of_influence: f64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     fn square_boundary() -> (LonLatBoundaries, LonLatBoundaries) {
