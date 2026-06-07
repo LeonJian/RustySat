@@ -4,7 +4,8 @@
 
 Rusty Sat is a high-performance reimplementation of the Python [Satpy](https://github.com/pytroll/satpy) library in Rust. It reads, calibrates, composites, enhances, resamples, and writes meteorological satellite imagery — with zero Python runtime dependency.
 
-his project is currently in very early our version, and not use in any professional occasion.
+**This project is currently in very early Alpha version, and not use in any professional occasion.**
+
 ---
 
 ## Table of Contents
