@@ -80,27 +80,3 @@ jobs:
           shared-key: ubuntu-stable
 
       - run: cargo nextest run --workspace --all-features
-
-  build:
-    if: github.event_name == 'push'
-
-    needs:
-      - fmt
-      - clippy
-      - feature-check
-      - test
-
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.8
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-stable
-
-      - run: cargo build --workspace --release --locked
