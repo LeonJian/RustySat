@@ -1,10 +1,37 @@
-//! Composite and modifier framework foundations.
+//! Satellite image compositing, spectral blending, arithmetic operations,
+//! and enhancement execution.
 //!
-//! Reference behavior inspected before implementation:
-//! - `satpy/satpy/composites/core.py` `GenericCompositor` concatenates
-//!   compatible single-band projectables along a `bands` dimension, assigns an
-//!   image mode like `RGB`, and by default combines invalid pixels across all
-//!   color channels when no alpha band is present.
+//! This crate implements the data combination and enhancement layers of the
+//! Satpy processing pipeline. All compositors implement the [`Compositor`]
+//! trait, which takes one or more input [`Dataset`]s and produces a new one.
+//!
+//! # Compositors
+//!
+//! - [`RgbCompositor`] — 3 single-band datasets → `[3, y, x]` RGB dataset
+//!   with common-channel masking. Use for true color, false color, etc.
+//! - [`SpectralBlender`](spectral::SpectralBlender) — weighted sum of N bands
+//!   for corrected-green and similar products.
+//! - [`ArithmeticCompositor`](arithmetic::ArithmeticCompositor) — binary ops:
+//!   difference, ratio, sum, normalized-difference (NDVI-style).
+//! - [`BandReplacementCompositor`](spectral::BandReplacementCompositor) —
+//!   in-place band replacement in a band-major composite.
+//!
+//! # Enhancement
+//!
+//! - [`EnhancementExecutor`](enhancement::EnhancementExecutor) — safely
+//!   executes enhancement operations (`stretch`, `gamma`, `invert`) from
+//!   YAML definitions.
+//! - [`CompositeRegistryConfig`](config::CompositeRegistryConfig) — parses
+//!   Satpy-style YAML composite and enhancement configurations.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use rusty_sat_composites::RgbCompositor;
+//! let rgb = RgbCompositor::new("true_color")?
+//!     .compose_rgb_owned(vec![red_ds, green_ds, blue_ds])?;
+//! // rgb has shape [3, height, width], mode = "RGB"
+//! ```
 
 pub mod arithmetic;
 mod common;

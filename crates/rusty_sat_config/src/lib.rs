@@ -11,10 +11,18 @@ use rusty_sat_core::{Result, RustySatError};
 use serde_norway::{Mapping, Value};
 
 pub const DEFAULT_CONFIG_ENV: &str = "RUSTY_SAT_CONFIG_PATH";
+
+/// Fallback env var for Satpy-compatible config paths.
 pub const SATPY_COMPAT_CONFIG_ENV: &str = "SATPY_CONFIG_PATH";
+
 const MAX_YAML_BYTES: usize = 8 * 1024 * 1024;
 const MAX_YAML_DEPTH: usize = 96;
 
+/// Ordered search path for YAML configuration files.
+///
+/// Searches paths in order, loading and merging all matching files.
+/// Supports environment-variable-based path injection and Satpy-compatible
+/// directory layout (`readers/`, `writers/`, `composites/`, `enhancements/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigSearchPath {
     paths: Vec<PathBuf>,

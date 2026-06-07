@@ -1,8 +1,43 @@
 //! Core public API foundations for Rusty Sat.
 //!
-//! This crate intentionally starts small. It provides the shared result/error
-//! type and lightweight versions of Satpy's central concepts so the rest of
-//! the workspace can compile while features are ported incrementally.
+//! This crate provides the shared data model used by every other crate in the
+//! workspace. It has **zero internal dependencies** and serves as the foundation
+//! layer for the entire processing pipeline.
+//!
+//! # Key Abstractions
+//!
+//! ## Data Identity & Query
+//!
+//! - [`DataId`] — named dataset identifier with qualifier map (wavelength,
+//!   calibration, modifiers). Every [`Dataset`] is keyed by its `DataId`.
+//! - [`DataQuery`] — pattern for matching and ranking datasets. Supports `Any`,
+//!   `One`, and `AnyOf` matching with distance-based sorting.
+//! - [`DataValue`] — typed qualifier value: `Text`, `Number`, `Wavelength`, `Modifiers`.
+//!
+//! ## Data Containers
+//!
+//! - [`Dataset`] — complete satellite dataset: identity + array data + metadata
+//!   attributes + coordinate axes + auxiliary variable references.
+//! - [`AnyDataArray`] — runtime-typed numeric array (`F32`, `F64`, `U8`, `U16`, `I16`).
+//! - [`DataArray<T>`] — owned n-dimensional array with shape, dimensions, values,
+//!   mask, coordinates, and chunk shape.
+//! - [`DataGrid`] — type alias for `DataArray<f64>` (2D legacy compatibility).
+//!
+//! ## Scene Management
+//!
+//! - [`Scene`] — main container: holds datasets, tracks a wishlist, manages a
+//!   dependency graph, and plans reader loads.
+//! - [`DependencyGraph`] — directed graph tracking what each dataset depends on
+//!   and which readers/compositors/modifiers produce them.
+//!
+//! ## Supporting Types
+//!
+//! - [`ValidityMask`] — bit-packed mask where set bit = invalid pixel.
+//! - [`Coordinate`] — named coordinate axis with f64 values.
+//! - [`MetadataValue`] — Satpy-style attribute value (`Null`, `String`, `Bool`,
+//!   `Integer`, `Float`, `List`, `Map`).
+//! - [`RustySatError`] — unified error type across the entire workspace.
+//! - [`ReaderInventory`] — reader name + set of available DataIds.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,8 +55,14 @@ pub use data_array::{
     ValidityMask,
 };
 
+/// Type alias for Results using [`RustySatError`] throughout the workspace.
 pub type Result<T> = std::result::Result<T, RustySatError>;
 
+/// Unified error type for all Rusty Sat operations.
+///
+/// All crates in the workspace use this single error type instead of
+/// per-crate error types. Variants distinguish between not-yet-implemented
+/// features, bad inputs, missing data, and ambiguous matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RustySatError {
     Unsupported { feature: String },
@@ -432,6 +473,12 @@ impl From<ModifierTuple> for QueryValue {
     }
 }
 
+/// Identifier for a satellite dataset: a name plus a map of typed qualifiers.
+///
+/// A `DataId` uniquely identifies what a [`Dataset`] represents — e.g., band
+/// "B03" with qualifier `calibration=reflectance` and `wavelength=0.64µm`.
+/// The qualifier map supports exact matching and distance-based ranking
+/// through [`DataQuery`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DataId {
     name: String,
@@ -519,6 +566,11 @@ impl DataId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Pattern for finding and ranking [`DataId`]s.
+///
+/// A `DataQuery` specifies what datasets the caller wants. It supports
+/// exact name matching, qualifier filters (`Any`, `One`, `AnyOf`), and
+/// distance-based best-match sorting via [`DataQuery::best_match`].
 pub struct DataQuery {
     name: Option<String>,
     filters: BTreeMap<String, QueryValue>,

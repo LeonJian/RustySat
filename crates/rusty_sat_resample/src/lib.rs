@@ -1,4 +1,36 @@
-//! Geometry and resampling foundations.
+//! Geometry definitions and spatial resampling algorithms.
+//!
+//! This crate provides the geometry model (`AreaDefinition`, `SwathDefinition`)
+//! and resampling methods that transform satellite datasets between spatial
+//! grids. It mirrors Satpy's Pyresample-based resampling pipeline.
+//!
+//! # Geometry Types
+//!
+//! - [`AreaDefinition`](area::AreaDefinition) — regular grid in a map projection.
+//!   Implements `ProjectionDefinition` for pixel-to-projection coordinate math.
+//! - [`SwathDefinition`](swath::SwathDefinition) — irregular swath with optional
+//!   lon/lat coordinate arrays.
+//! - [`CoordinateDefinition`](geometry::CoordinateDefinition) — point coordinates.
+//! - [`GridDefinition`](geometry::GridDefinition) — lon/lat grid.
+//!
+//! # Resampling Methods
+//!
+//! | Method | Source | Key Type |
+//! |--------|--------|----------|
+//! | Nearest | Area / Swath | [`NearestAreaResampler`](nearest::NearestAreaResampler) |
+//! | Bilinear | Area | [`BilinearAreaResampler`](bilinear::BilinearAreaResampler) |
+//! | EWA | Swath | [`EwaResampler`](ewa::EwaResampler) |
+//! | Native | Area | [`NativeResampler`](native::NativeResampler) |
+//! | Bucket (avg/sum/count/fraction) | Swath | [`BucketResampler`](bucket::BucketResampler) |
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use rusty_sat_resample::{resample_dataset_from_attrs, ResampleOptions};
+//! let resampled = resample_dataset_from_attrs(
+//!     &dataset, &target_area, ResampleOptions::nearest_area(),
+//! )?;
+//! ```
 
 pub mod area;
 pub mod bilinear;

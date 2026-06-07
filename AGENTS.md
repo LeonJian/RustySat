@@ -40,7 +40,8 @@ The following reference areas require especially careful parity work — do not 
 6. Add comprehensive tests for the capability, including success paths, edge/error paths, dtype/mask/metadata preservation, owned/consuming memory paths where relevant, and at least one Satpy/reference-inspired parity case when reference behavior exists.
 7. Run `cargo check --workspace` and `cargo test --workspace`.
 8. Update this file with completed work and known gaps.
-9. Commit the completed step before moving to the next step.
+9. Update `README.md` and `docs/ARCHITECTURE.md` when the step adds/removes features, changes the public API, or alters crate dependencies.
+10. Commit the completed step before moving to the next step.
 
 Do not bundle unrelated roadmap items together. If a Satpy update introduces new behavior, track it as a separate task and implement it separately.
 
@@ -553,9 +554,18 @@ Every implementation slice should add tests that are broad enough to catch regre
 
 For AHI HSD and AHI NetCDF work, tests must include realistic fixture structure and negative cases for truncated files, missing segments/variables, invalid calibration metadata, unsupported compression or projection paths, and output dtype/mask preservation.
 
+## Documentation Expectations
+
+After every implementation step that adds, removes, or changes public API, features, or crate relationships:
+
+- **`README.md`**: Update the features table, usage examples, sensor list, or output format table as needed.
+- **`docs/ARCHITECTURE.md`**: Update crate-level descriptions, dependency diagram, data flow, and type relationship diagrams.
+- **Crate-level `//!` doc comments**: Each crate's `lib.rs` must have a module doc explaining its purpose, key types, and how it fits into the pipeline.
+- **`///` doc comments on public items**: Every `pub struct`, `pub enum`, `pub trait`, and `pub fn` must have at least a one-line doc comment. Use `cargo doc` to verify rendering.
+
 ## Current Implementation State
 
-> **UPDATE RULE: After completing any roadmap item, update this section immediately.**
+> **UPDATE RULE: After completing any roadmap item, update this section immediately. Also update `README.md` and `docs/` when the change affects public API, features, or architecture.**
 > Only list each crate's **capability boundaries** — what it CAN and CANNOT do right now.
 > Do NOT re-describe completed roadmap steps (those are already tracked in the roadmap above).
 > Keep each entry to 2-4 lines max. Focus on: data types handled, operations supported, and the hard limit that blocks the next step.

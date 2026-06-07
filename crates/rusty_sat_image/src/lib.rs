@@ -1,4 +1,31 @@
-//! Image and enhancement foundations.
+//! Image types, color conversion, and enhancement operations.
+//!
+//! This crate bridges the gap between scientific float arrays and display-ready
+//! pixel buffers. It converts [`Dataset`] arrays into [`Image`] (8-bit) or
+//! [`Image16`] (16-bit) with automatic contrast stretching and optional gamma
+//! correction.
+//!
+//! # Image Types
+//!
+//! - [`FloatImage<T>`] — intermediate float representation (f32 or f64).
+//!   Enhancement operations (stretch, gamma, invert) are applied here and
+//!   tracked in history for reproducibility.
+//! - [`Image`] — 8-bit output (u8 pixels). Produced by `to_u8_image()` after
+//!   all enhancements are applied.
+//! - [`Image16`] — 16-bit output (u16 pixels). For HDR / scientific display.
+//!
+//! # ImageMode
+//!
+//! [`ImageMode::Luma`] (1 channel), [`ImageMode::Rgb`] (3 channels), or
+//! [`ImageMode::Rgba`] (4 channels with alpha).
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use rusty_sat_image::{Image, FloatImage};
+//! let img = Image::from_luma_dataset(&dataset)?;
+//! // img.pixels() → &[u8] with auto-stretched 0–255 range
+//! ```
 
 use rusty_sat_core::{
     AnyDataArray, DataArray, Dataset, NumericElement, Result, RustySatError, ValidityMask,

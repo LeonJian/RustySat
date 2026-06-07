@@ -14,5 +14,9 @@ serde_norway = "0.9"
 rusty_sat_resample = { path = "../rusty_sat_resample" }
 rusty_sat_writers = { path = "../rusty_sat_writers" }
 
+[[example]]
+name = "ahi_first_figure"
+path = "examples/ahi_first_figure.rs"
+
 [lints]
 workspace = true

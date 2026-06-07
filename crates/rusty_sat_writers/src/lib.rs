@@ -1,4 +1,30 @@
-//! Writer framework foundations.
+//! File output writers for satellite imagery.
+//!
+//! This crate serializes [`Dataset`] and [`Image`] objects to disk in standard
+//! geospatial and image formats. All writers implement the [`Writer`] trait.
+//!
+//! # Writers
+//!
+//! - [`SimpleImageWriter`](simple_image::SimpleImageWriter) — PNG (8/16-bit
+//!   grayscale) and JPEG (8-bit) via the `image` crate. Auto-stretches float
+//!   datasets to the target bit depth.
+//! - [`FloatTiffWriter`](float_tiff::FloatTiffWriter) — GeoTIFF with full
+//!   GeoKey georeferencing. Supports float32, float64, and uint16-scaled
+//!   output, with optional Deflate compression and tiling.
+//! - [`PgmWriter`](pgm::PgmWriter) — Portable GrayMap (8/16-bit) with
+//!   configurable linear scaling.
+//!
+//! # Factory
+//!
+//! [`BuiltinWriterFactory`] selects the correct writer by file extension
+//! (`.png` → SimpleImageWriter, `.tif` → FloatTiffWriter, `.pgm` → PgmWriter).
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use rusty_sat_writers::{SimpleImageWriter, Writer};
+//! SimpleImageWriter::default().save_dataset(&dataset, "output.png")?;
+//! ```
 
 use std::path::Path;
 

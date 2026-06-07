@@ -10,8 +10,9 @@ pub mod yaml_reader;
 
 pub use ahi_hsd::{
     parse_initial_hsd_header, AhiBandCalibration, AhiBasicInfo, AhiCalibration, AhiCalibrationInfo,
-    AhiDataInfo, AhiHsdFileHandler, AhiHsdHeader, AhiHsdReader, AhiNavigationInfo,
-    AhiProjectionInfo, AhiSegmentBlockInfo, AhiSegmentInfo,
+    AhiCalibrationMode, AhiCalibrationOutput, AhiDataInfo, AhiHsdFileHandler, AhiHsdHeader,
+    AhiHsdReader, AhiNavigationInfo, AhiProjectionInfo, AhiSegmentBlockInfo, AhiSegmentInfo,
+    AhiUserCalibration, AhiUserCalibrationCoefficients,
 };
 pub use ahi_l2_nc::{
     ahi_l2_dataset_defs, AhiL2DatasetDef, AhiL2NcFileHandler, AhiL2NcFileType, AhiL2NcFixtureReader,
