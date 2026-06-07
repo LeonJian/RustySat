@@ -2964,7 +2964,7 @@ datasets:
         let block7_offset = data_offset - 47;
         write_u8(&mut bytes, block7_offset + 3, total_segments);
         write_u8(&mut bytes, block7_offset + 4, segment);
-        let first_line = 1 + (u16::from(segment) - 1) * u16::from(header.data.lines);
+        let first_line = 1 + (u16::from(segment) - 1) * header.data.lines;
         write_u16(&mut bytes, block7_offset + 5, first_line);
         write_u32(&mut bytes, 74, (values.len() * 2) as u32);
         bytes.truncate(data_offset);

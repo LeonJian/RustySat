@@ -392,7 +392,7 @@ fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
     let mut rad_max = f32::MIN;
     let mut rad_valid = 0;
     for (i, &v) in rad_values.iter().enumerate() {
-        if mask.map_or(true, |m| m.is_masked(i) != Some(true)) {
+        if mask.is_none_or(|m| m.is_masked(i) != Some(true)) {
             rad_valid += 1;
             rad_min = rad_min.min(v);
             rad_max = rad_max.max(v);
@@ -428,7 +428,7 @@ fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
     let mut ref_max = f32::MIN;
     let mut ref_valid = 0;
     for (i, &v) in ref_values.iter().enumerate() {
-        if ref_mask.map_or(true, |m| m.is_masked(i) != Some(true)) {
+        if ref_mask.is_none_or(|m| m.is_masked(i) != Some(true)) {
             ref_valid += 1;
             ref_min = ref_min.min(v);
             ref_max = ref_max.max(v);
@@ -491,7 +491,7 @@ fn calibrates_infrared_band_counts_to_brightness_temperature() {
     let mut rad_min = f32::MAX;
     let mut rad_max = f32::MIN;
     for (i, &v) in rad_values.iter().enumerate() {
-        if rad_mask.map_or(true, |m| m.is_masked(i) != Some(true)) && v.is_finite() {
+        if rad_mask.is_none_or(|m| m.is_masked(i) != Some(true)) && v.is_finite() {
             rad_min = rad_min.min(v);
             rad_max = rad_max.max(v);
         }
@@ -520,7 +520,7 @@ fn calibrates_infrared_band_counts_to_brightness_temperature() {
     let mut bt_valid = 0;
     let mut bt_nan = 0;
     for (i, &v) in bt_values.iter().enumerate() {
-        if bt_mask.map_or(true, |m| m.is_masked(i) != Some(true)) {
+        if bt_mask.is_none_or(|m| m.is_masked(i) != Some(true)) {
             if v.is_finite() {
                 bt_valid += 1;
                 bt_min = bt_min.min(v);
@@ -864,7 +864,7 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
     let sample_indices: Vec<usize> = base_vals
         .iter()
         .enumerate()
-        .filter(|(i, _)| mask.map_or(true, |m| m.is_masked(*i) != Some(true)))
+        .filter(|(i, _)| mask.is_none_or(|m| m.is_masked(*i) != Some(true)))
         .take(10)
         .map(|(i, _)| i)
         .collect();
@@ -1021,7 +1021,7 @@ fn scientific_f64_output_produces_higher_precision() {
     let f64_vals = f64_arr.values();
     let mut compared = 0;
     for (i, (&fv, &dv)) in f32_vals.iter().zip(f64_vals.iter()).enumerate() {
-        if mask.map_or(true, |m| m.is_masked(i) != Some(true)) && fv.is_finite() {
+        if mask.is_none_or(|m| m.is_masked(i) != Some(true)) && fv.is_finite() {
             let diff = (dv - fv as f64).abs();
             assert!(
                 diff < 1e-4,

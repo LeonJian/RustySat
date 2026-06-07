@@ -1086,7 +1086,7 @@ variables:
     shape: [2, 3]
     values: [140.0, 140.1, 140.2, 139.9, 139.8, 139.7]
 "#;
-        let source = NetCdfFixtureSource::from_yaml_str(&fixture).unwrap();
+        let source = NetCdfFixtureSource::from_yaml_str(fixture).unwrap();
         let reader = AhiL2NcFixtureReader::from_source(
             "fixture.yaml",
             filename_info(),
