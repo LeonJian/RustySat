@@ -372,7 +372,7 @@ fn write_tiff_pixels(
         .checked_mul(height)
         .ok_or_else(|| RustySatError::invalid_input("float TIFF pixel count overflow"))?;
     let bytes_per_sample = usize::from(sample_data.bits_per_sample / 8);
-    if sample_data.bits_per_sample % 8 != 0 || bytes_per_sample == 0 {
+    if !sample_data.bits_per_sample.is_multiple_of(8) || bytes_per_sample == 0 {
         return Err(RustySatError::invalid_input(
             "TIFF bits per sample must be a positive multiple of 8",
         ));
@@ -505,8 +505,7 @@ fn write_tiff_pixels(
         // Write tile byte counts
         let counts_bytes: Vec<u8> = compressed_blocks
             .iter()
-            .map(|b| u32::try_from(b.len()).unwrap_or(0).to_le_bytes())
-            .flatten()
+            .flat_map(|b| u32::try_from(b.len()).unwrap_or(0).to_le_bytes())
             .collect();
         let counts_data_offset = current_offset;
         current_offset = current_offset
