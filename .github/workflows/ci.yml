@@ -19,6 +19,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+      
+      - uses: mozilla-actions/sccache-action@v0.0.5
+
+      - uses: taiki-e/install-action@nextest
 
       - run: cargo fmt --check
 
