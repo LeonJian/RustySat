@@ -24,10 +24,10 @@ use std::path::Path;
 const EXPECTED_DATA_AREA: &str = "Full Disk";
 const FULL_DISK_SIZE: usize = 5500;
 const AHI_L2_AREA_EXTENT: [f64; 4] = [
-    -5_499_999.9012,
-    -5_499_999.9012,
-    5_499_999.9012,
-    5_499_999.9012,
+    -5_499_999.901_2,
+    -5_499_999.901_2,
+    5_499_999.901_2,
+    5_499_999.901_2,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

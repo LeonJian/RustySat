@@ -353,6 +353,7 @@ impl TiffSamplePolicy {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_tiff_pixels(
     path: &Path,
     width: usize,
@@ -411,7 +412,7 @@ fn write_tiff_pixels(
         .unwrap_or(0);
     let pixel_offset = IFD_OFFSET
         .checked_add(ifd_bytes)
-        .and_then(|offset| offset.checked_add(u32::try_from(extra_bytes).ok()?))
+        .and_then(|offset| offset.checked_add(extra_bytes))
         .ok_or_else(|| RustySatError::invalid_input("float TIFF pixel offset overflow"))?;
     let extra_offset = IFD_OFFSET
         .checked_add(ifd_bytes)
@@ -482,7 +483,7 @@ fn write_tiff_pixels(
         PHOTOMETRIC_BLACK_IS_ZERO,
     )?;
     if is_tiled {
-        let tiles = tile_options.unwrap();
+        let tiles = tile_options.expect("tile_options present when is_tiled");
         write_ifd_long(&mut writer, TAG_TILE_WIDTH, tiles.width as u32)?;
         write_ifd_long(&mut writer, TAG_TILE_LENGTH, tiles.height as u32)?;
         // Write tile offsets as a LONG array

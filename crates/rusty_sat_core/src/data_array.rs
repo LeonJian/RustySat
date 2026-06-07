@@ -902,8 +902,8 @@ fn is_full_yx_slice<T: NumericElement>(
 ) -> Result<bool> {
     validate_range(y, array.size_of_dim("y"), "y")?;
     validate_range(x, array.size_of_dim("x"), "x")?;
-    let y_dim = array.size_of_dim("y").unwrap();
-    let x_dim = array.size_of_dim("x").unwrap();
+    let y_dim = array.size_of_dim("y").expect("y dimension validated above");
+    let x_dim = array.size_of_dim("x").expect("x dimension validated above");
     Ok(y.start == 0 && y.end == y_dim && x.start == 0 && x.end == x_dim)
 }
 

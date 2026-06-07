@@ -755,6 +755,7 @@ fn pixel_mask_from_band_major_rgb_mask(
     Ok(output)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rgba_image_from_float<T: ImageFloat>(
     pixels: &[T],
     mask: Option<&ValidityMask>,

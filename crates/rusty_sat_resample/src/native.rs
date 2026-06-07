@@ -684,6 +684,7 @@ fn repeat_yx_typed_from_parts<T: NumericElement>(
     add_preserved_native_coords_owned_typed(array, source_coords)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aggregate_mean_yx_from_parts(
     source_shape_nd: Vec<usize>,
     dims: Vec<String>,
@@ -960,6 +961,7 @@ fn add_preserved_native_coords_owned_typed<T: NumericElement>(
     Ok(array)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aggregate_any_mean_yx_from_parts(
     source_shape_nd: Vec<usize>,
     dims: Vec<String>,
