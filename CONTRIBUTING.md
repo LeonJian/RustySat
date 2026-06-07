@@ -14,7 +14,7 @@
 git clone https://github.com/pytroll/satpy.git
 cd satpy
 cargo build
-cargo test --workspace
+cargo nextest run --workspace
 ```
 
 ### IDE Configuration
@@ -80,7 +80,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 
 # Tests
-cargo test --workspace
+cargo nextest run --workspace
 
 # If you have AHI test data:
 cargo test --package rusty_sat_readers \

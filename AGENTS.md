@@ -38,7 +38,7 @@ The following reference areas require especially careful parity work — do not 
 4. Read the matching Python reference docs and code before designing Rust behavior.
 5. Implement the smallest useful Rust capability.
 6. Add comprehensive tests for the capability, including success paths, edge/error paths, dtype/mask/metadata preservation, owned/consuming memory paths where relevant, and at least one Satpy/reference-inspired parity case when reference behavior exists.
-7. Run `cargo check --workspace` and `cargo test --workspace`.
+7. Run `cargo check --workspace`, `cargo clippy --workspace --all-features -- -D warnings`, and `cargo nextest run --workspace`.
 8. Update this file with completed work and known gaps.
 9. Update `README.md` and `docs/ARCHITECTURE.md` when the step adds/removes features, changes the public API, or alters crate dependencies.
 10. Commit the completed step before moving to the next step.
@@ -61,8 +61,8 @@ Every rewrite step must aim for Satpy-compatible results, not only similar-looki
 - Keep commits small and named after the completed step, for example `step 3a data query matching`.
 - Do not commit generated build artifacts, `.DS_Store`, or `target/`.
 - Do not commit the nested Python reference checkouts under `satpy/` or `deps/`; they are local reference material unless the user explicitly requests otherwise.
-- Before each commit, run `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace`.
-- Before merging a feature branch, run `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace` on that branch. After merging, run at least `cargo check --workspace`; run the full workspace tests again if the merge was non-trivial.
+- Before each commit, run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-features -- -D warnings`, and `cargo nextest run --workspace`.
+- Before merging a feature branch, run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-features -- -D warnings`, and `cargo nextest run --workspace` on that branch. After merging, run at least `cargo check --workspace`; run the full workspace tests again if the merge was non-trivial.
 
 ## Status Markers
 
@@ -539,9 +539,11 @@ Every step should leave the workspace passing:
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace
-cargo test --workspace
+cargo clippy --workspace --all-features -- -D warnings
+cargo nextest run --workspace
 ```
+
+Install `cargo-nextest` if not already present: `cargo install cargo-nextest`.
 
 Every implementation slice should add tests that are broad enough to catch regressions in real workflows, not only a happy-path compile check. Prefer a layered test set:
 
