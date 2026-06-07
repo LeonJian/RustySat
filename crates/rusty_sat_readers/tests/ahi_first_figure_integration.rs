@@ -23,18 +23,28 @@ use std::time::Instant;
 // Test data helpers
 // ══════════════════════════════════════════════════════════════════════════════
 
-fn data_dir() -> PathBuf {
+/// Returns `Some(dir)` if AHI test data is available, `None` otherwise.
+///
+/// Checks `AHI_DATA_DIR` env var first, then falls back to the default
+/// `local_data/ahi_input/data/20250923/07` relative to workspace root.
+/// Integration tests use `require_data!()` macro and return early when
+/// data is missing so CI passes without real satellite files.
+fn data_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("AHI_DATA_DIR") {
         let path = PathBuf::from(dir);
         if path.is_dir() {
-            return path;
+            return Some(path);
         }
     }
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    workspace_root.join("local_data/ahi_input/data/20250923/07")
+    let default_dir = workspace_root.join("local_data/ahi_input/data/20250923/07");
+    if default_dir.is_dir() {
+        return Some(default_dir);
+    }
+    None
 }
 
 fn output_dir() -> PathBuf {
@@ -45,6 +55,23 @@ fn output_dir() -> PathBuf {
         .join("local_data/ahi_output");
     std::fs::create_dir_all(&dir).ok();
     dir
+}
+
+/// Call at the top of each integration test. Returns `Some(dir)` if data is
+/// available, or prints a skip message and returns `None` (test returns early).
+macro_rules! require_data {
+    () => {
+        match $crate::data_dir() {
+            Some(dir) => dir,
+            None => {
+                eprintln!(
+                    "SKIP: AHI test data not found. Set AHI_DATA_DIR env var \
+                     or place data at local_data/ahi_input/data/20250923/07/"
+                );
+                return;
+            }
+        }
+    };
 }
 
 fn scan_hsd_files(dir: &Path) -> BTreeMap<String, Vec<(PathBuf, AhiSegmentInfo)>> {
@@ -87,32 +114,14 @@ fn parse_hsd_filename(name: &str) -> Option<(String, AhiSegmentInfo)> {
     Some((band, seg))
 }
 
-fn require_data_dir() -> PathBuf {
-    let dir = data_dir();
-    if !dir.is_dir() {
-        panic!(
-            "AHI test data directory not found: '{}'\n\
-             Set AHI_DATA_DIR env var to the directory containing .DAT.bz2 files.",
-            dir.display()
-        );
-    }
-    dir
-}
-
-fn require_files_for_band(dir: &Path, band: &str) -> Vec<(PathBuf, AhiSegmentInfo)> {
+/// Returns `Some(files)` for a band, or `None` if data is missing.
+fn try_files_for_band(dir: &Path, band: &str) -> Option<Vec<(PathBuf, AhiSegmentInfo)>> {
     let files_by_band = scan_hsd_files(dir);
-    let files = files_by_band
-        .get(band)
-        .unwrap_or_else(|| {
-            panic!(
-                "Band '{band}' not found in '{}'. Available: {:?}",
-                dir.display(),
-                files_by_band.keys().collect::<Vec<_>>()
-            )
-        })
-        .clone();
-    assert!(!files.is_empty(), "no files for band {band}");
-    files
+    let files = files_by_band.get(band)?.clone();
+    if files.is_empty() {
+        return None;
+    }
+    Some(files)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -121,7 +130,7 @@ fn require_files_for_band(dir: &Path, band: &str) -> Vec<(PathBuf, AhiSegmentInf
 
 #[test]
 fn parses_all_50_hsd_file_headers() {
-    let dir = require_data_dir();
+    let dir = require_data!();
     let all_files = scan_hsd_files(&dir);
     assert_eq!(all_files.len(), 5, "expected 5 bands (B01, B02, B03, B04, B13)");
 
@@ -225,9 +234,9 @@ fn parses_all_50_hsd_file_headers() {
 
 #[test]
 fn loads_raw_counts_with_error_and_outside_scan_masking() {
-    let dir = require_data_dir();
+    let dir = require_data!();
     // Use B04 (1km resolution, smaller memory footprint)
-    let files = require_files_for_band(&dir, "B04");
+    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
     let first = &files[0];
 
     let handler = AhiHsdFileHandler::from_path(
@@ -321,8 +330,8 @@ fn loads_raw_counts_with_error_and_outside_scan_masking() {
 
 #[test]
 fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
-    let dir = require_data_dir();
-    let files = require_files_for_band(&dir, "B01");
+    let dir = require_data!();
+    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
     let first = &files[0];
 
     let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1)
@@ -412,8 +421,8 @@ fn calibrates_visible_band_counts_to_radiance_and_reflectance() {
 
 #[test]
 fn calibrates_infrared_band_counts_to_brightness_temperature() {
-    let dir = require_data_dir();
-    let files = require_files_for_band(&dir, "B13");
+    let dir = require_data!();
+    let Some(files) = try_files_for_band(&dir, "B13") else { eprintln!("SKIP: B13 not in test data"); return; };
     let first = &files[0];
 
     let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b13", first.1)
@@ -501,10 +510,10 @@ fn calibrates_infrared_band_counts_to_brightness_temperature() {
 
 #[test]
 fn assembles_all_10_segments_into_full_disk() {
-    let dir = require_data_dir();
+    let dir = require_data!();
 
     // Test assembly with B04 (1km, 11000x11000 full-disk = 10 segments × 1100 lines)
-    let files = require_files_for_band(&dir, "B04");
+    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
     let handlers: Vec<AhiHsdFileHandler> = files
         .iter()
         .map(|(path, seg)| {
@@ -578,8 +587,8 @@ fn assembles_all_10_segments_into_full_disk() {
 
 #[test]
 fn generates_correct_geostationary_area_and_projection_coordinates() {
-    let dir = require_data_dir();
-    let files = require_files_for_band(&dir, "B01");
+    let dir = require_data!();
+    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
     let first = &files[0];
 
     let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b01", first.1)
@@ -660,11 +669,11 @@ fn generates_correct_geostationary_area_and_projection_coordinates() {
 
 #[test]
 fn outputs_png8_png16_and_geotiff_with_auto_stretch() {
-    let dir = require_data_dir();
+    let dir = require_data!();
     let out = output_dir();
 
     // Use B01 for smaller size (11000x11000 full-disk)
-    let files = require_files_for_band(&dir, "B01");
+    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
     let handlers: Vec<AhiHsdFileHandler> = files
         .iter()
         .map(|(path, seg)| {
@@ -748,8 +757,8 @@ fn outputs_png8_png16_and_geotiff_with_auto_stretch() {
 
 #[test]
 fn applies_user_calibration_radiance_correction_and_dn_mode() {
-    let dir = require_data_dir();
-    let files = require_files_for_band(&dir, "B04");
+    let dir = require_data!();
+    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
     let first = &files[0];
 
     // --- Base handler (no user calibration) ---
@@ -878,8 +887,8 @@ fn applies_user_calibration_radiance_correction_and_dn_mode() {
 
 #[test]
 fn scientific_f64_output_produces_higher_precision() {
-    let dir = require_data_dir();
-    let files = require_files_for_band(&dir, "B04");
+    let dir = require_data!();
+    let Some(files) = try_files_for_band(&dir, "B04") else { eprintln!("SKIP: B04 not in test data"); return; };
     let first = &files[0];
 
     let handler = AhiHsdFileHandler::from_path(&first.0, "hsd_b04", first.1)
@@ -935,7 +944,7 @@ fn scientific_f64_output_produces_higher_precision() {
 
 #[test]
 fn end_to_end_pipeline_timing_and_statistics() {
-    let dir = require_data_dir();
+    let dir = require_data!();
     let out = output_dir();
     eprintln!("\n=== AHI End-to-End Pipeline Statistics ===\n");
 
@@ -1022,8 +1031,8 @@ fn end_to_end_pipeline_timing_and_statistics() {
 
 #[test]
 fn reader_can_select_scientific_f64_output_mode() {
-    let dir = require_data_dir();
-    let files = require_files_for_band(&dir, "B01");
+    let dir = require_data!();
+    let Some(files) = try_files_for_band(&dir, "B01") else { eprintln!("SKIP: B01 not in test data"); return; };
     let first = &files[0];
 
     let handler =
