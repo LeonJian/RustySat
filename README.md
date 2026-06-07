@@ -316,6 +316,6 @@ Workspace lint rules:
 
 ## License
 
-GPL-3.0-or-later.
+GPL-3.0-only.
 
-This is a ground-up Rust reimplementation inspired by [Satpy](https://github.com/pytroll/satpy) (also GPL). Python source in `satpy/` and `deps/` is read-only design reference — not compiled, linked, or distributed with the Rusty Sat binary.
+This is a ground-up Rust reimplementation inspired by [Satpy](https://github.com/pytroll/satpy) (also GPL). 
