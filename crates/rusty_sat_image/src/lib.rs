@@ -159,9 +159,7 @@ impl Image {
     }
 
     pub fn from_luma_array(array: &AnyDataArray) -> Result<Self> {
-        FloatImage::<f32>::from_luma_array(array)?
-            .crude_stretched(None, None)
-            .to_u8_image(0)
+        finalize_luma_to_u8(array)
     }
 
     pub fn from_rgb_dataset(dataset: &Dataset) -> Result<Self> {
@@ -198,6 +196,132 @@ impl Image {
 
     pub fn into_pixels(self) -> Vec<u8> {
         self.pixels
+    }
+}
+
+/// Crude-stretch scale/offset matching `FloatImage::crude_stretch_in_place`:
+/// `stretched = value * scale + offset`, with `scale = 1/(max-min)` (or 0 when
+/// the range is empty/non-finite) and `offset = -min*scale` (or 0).
+fn luma_stretch_scale_offset(min: f64, max: f64) -> (f64, f64) {
+    let delta = max - min;
+    let scale = if delta.is_finite() && delta != 0.0 {
+        1.0 / delta
+    } else {
+        0.0
+    };
+    let offset = if scale == 0.0 { 0.0 } else { -min * scale };
+    (scale, offset)
+}
+
+/// Finalize a 2D luma dataset straight to an 8-bit `Image`, bypassing the
+/// `FloatImage<f32>` intermediate. Numerically identical to
+/// `FloatImage::<f32>::from_luma_array(...).crude_stretched(None, None).to_u8_image(0)`:
+/// the source is truncated to f32 on storage, stretched with f64 scale/offset
+/// and truncated back to f32, then scaled by 255. Only one output `Vec<u8>` is
+/// allocated instead of a full float copy.
+fn finalize_luma_to_u8_typed<U: NumericElement>(array: &DataArray<U>) -> Result<Image> {
+    let (height, width) = array.shape_yx()?;
+    let values = array.values();
+    let mask = array.mask();
+
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for (idx, value) in values.iter().enumerate() {
+        if mask.is_some_and(|m| m.is_masked(idx) == Some(true)) {
+            continue;
+        }
+        // Match FloatImage<f32> storage truncation: source -> f32 -> f64.
+        let stored = (value.to_f64() as f32) as f64;
+        if stored.is_finite() {
+            min = min.min(stored);
+            max = max.max(stored);
+        }
+    }
+    let (scale, offset) = luma_stretch_scale_offset(min, max);
+
+    let mut pixels = Vec::with_capacity(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        let masked = mask.is_some_and(|m| m.is_masked(idx) == Some(true));
+        let stored = (value.to_f64() as f32) as f64;
+        if masked || !stored.is_finite() {
+            pixels.push(0u8);
+        } else {
+            // Stretch truncates back to f32 (FloatImage<f32>), then *255.
+            let stretched = (stored * scale + offset) as f32;
+            let sample = (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8;
+            pixels.push(sample);
+        }
+    }
+    Image::from_pixels(ImageMode::Luma, height, width, pixels)
+}
+
+/// Finalize a 2D luma dataset straight to a 16-bit `Image16`, bypassing the
+/// `FloatImage<f64>` intermediate. Numerically identical to
+/// `FloatImage::<f64>::from_luma_array(...).crude_stretched(None, None).to_u16_image(0)`:
+/// values stay in f64 throughout (no f32 truncation) and are scaled by 65535.
+fn finalize_luma_to_u16_typed<U: NumericElement>(array: &DataArray<U>) -> Result<Image16> {
+    let (height, width) = array.shape_yx()?;
+    let values = array.values();
+    let mask = array.mask();
+
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for (idx, value) in values.iter().enumerate() {
+        if mask.is_some_and(|m| m.is_masked(idx) == Some(true)) {
+            continue;
+        }
+        let stored = value.to_f64();
+        if stored.is_finite() {
+            min = min.min(stored);
+            max = max.max(stored);
+        }
+    }
+    let (scale, offset) = luma_stretch_scale_offset(min, max);
+
+    let mut pixels = Vec::with_capacity(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        let masked = mask.is_some_and(|m| m.is_masked(idx) == Some(true));
+        let stored = value.to_f64();
+        if masked || !stored.is_finite() {
+            pixels.push(0u16);
+        } else {
+            let stretched = stored * scale + offset;
+            let sample = (stretched * 65_535.0).clamp(0.0, 65_535.0).round() as u16;
+            pixels.push(sample);
+        }
+    }
+    Image16::from_pixels(ImageMode::Luma, height, width, pixels)
+}
+
+fn finalize_luma_to_u8(array: &AnyDataArray) -> Result<Image> {
+    if array.shape().len() != 2 {
+        return Err(RustySatError::invalid_input(format!(
+            "luma image requires a 2D y/x array, got shape {:?}",
+            array.shape()
+        )));
+    }
+    match array {
+        AnyDataArray::F32(array) => finalize_luma_to_u8_typed(array),
+        AnyDataArray::F64(array) => finalize_luma_to_u8_typed(array),
+        AnyDataArray::U8(array) => finalize_luma_to_u8_typed(array),
+        AnyDataArray::U16(array) => finalize_luma_to_u8_typed(array),
+        AnyDataArray::I16(array) => finalize_luma_to_u8_typed(array),
+    }
+}
+
+fn finalize_luma_to_u16(array: &AnyDataArray) -> Result<Image16> {
+    if array.shape().len() != 2 {
+        return Err(RustySatError::invalid_input(format!(
+            "luma image requires a 2D y/x array, got shape {:?}",
+            array.shape()
+        )));
+    }
+    match array {
+        AnyDataArray::F32(array) => finalize_luma_to_u16_typed(array),
+        AnyDataArray::F64(array) => finalize_luma_to_u16_typed(array),
+        AnyDataArray::U8(array) => finalize_luma_to_u16_typed(array),
+        AnyDataArray::U16(array) => finalize_luma_to_u16_typed(array),
+        AnyDataArray::I16(array) => finalize_luma_to_u16_typed(array),
     }
 }
 
@@ -248,9 +372,7 @@ impl Image16 {
     }
 
     pub fn from_luma_array(array: &AnyDataArray) -> Result<Self> {
-        FloatImage::<f64>::from_luma_array(array)?
-            .crude_stretched(None, None)
-            .to_u16_image(0)
+        finalize_luma_to_u16(array)
     }
 
     pub fn from_rgb_dataset(dataset: &Dataset) -> Result<Self> {
@@ -1197,6 +1319,63 @@ mod tests {
         let result = consuming_img.inverted(true);
 
         assert_pixels_close(result.pixels(), in_place_img.pixels(), 1e-12);
+    }
+
+    #[test]
+    fn luma_finalize_direct_path_matches_floatimage_path() {
+        // The direct finalize path (no FloatImage intermediate) must produce
+        // bit-identical pixels to the legacy FloatImage stretch+finalize chain
+        // for both 8-bit and 16-bit luma output, including masked and NaN
+        // pixels and a non-multiple-of-8 length.
+        let values = vec![-1.0f32, 0.0, 0.5, 1.0, 2.0, f32::NAN, 5.0];
+        let mask =
+            ValidityMask::from_masked_flags([false, false, false, false, true, false, false]);
+        let array = DataArray::<f32>::from_vec_named(vec![1, 7], ["y", "x"], values)
+            .unwrap()
+            .with_mask(mask)
+            .unwrap();
+        let any = AnyDataArray::F32(array);
+
+        let direct_u8 = Image::from_luma_array(&any).unwrap();
+        let legacy_u8 = FloatImage::<f32>::from_luma_array(&any)
+            .unwrap()
+            .crude_stretched(None, None)
+            .to_u8_image(0)
+            .unwrap();
+        assert_eq!(direct_u8.shape(), legacy_u8.shape());
+        assert_eq!(direct_u8.pixels(), legacy_u8.pixels());
+
+        let direct_u16 = Image16::from_luma_array(&any).unwrap();
+        let legacy_u16 = FloatImage::<f64>::from_luma_array(&any)
+            .unwrap()
+            .crude_stretched(None, None)
+            .to_u16_image(0)
+            .unwrap();
+        assert_eq!(direct_u16.shape(), legacy_u16.shape());
+        assert_eq!(direct_u16.pixels(), legacy_u16.pixels());
+    }
+
+    #[test]
+    fn luma_finalize_direct_path_matches_floatimage_path_integer_source() {
+        let values = vec![0u8, 50, 100, 200, 255];
+        let array = DataArray::<u8>::from_vec_named(vec![1, 5], ["y", "x"], values).unwrap();
+        let any = AnyDataArray::U8(array);
+
+        let direct_u8 = Image::from_luma_array(&any).unwrap();
+        let legacy_u8 = FloatImage::<f32>::from_luma_array(&any)
+            .unwrap()
+            .crude_stretched(None, None)
+            .to_u8_image(0)
+            .unwrap();
+        assert_eq!(direct_u8.pixels(), legacy_u8.pixels());
+
+        let direct_u16 = Image16::from_luma_array(&any).unwrap();
+        let legacy_u16 = FloatImage::<f64>::from_luma_array(&any)
+            .unwrap()
+            .crude_stretched(None, None)
+            .to_u16_image(0)
+            .unwrap();
+        assert_eq!(direct_u16.pixels(), legacy_u16.pixels());
     }
 
     fn assert_pixels_close<T: ImageFloat>(left: &[T], right: &[T], tolerance: f64) {

@@ -234,18 +234,70 @@ impl ValidityMask {
         }
     }
 
+    /// Build a packed mask directly from a boolean iterator without allocating
+    /// an intermediate `Vec<bool>`. Bit `0` of byte `0` corresponds to index
+    /// `0`, matching `is_masked`.
     pub fn from_masked_flags(flags: impl IntoIterator<Item = bool>) -> Self {
-        let flags = flags.into_iter().collect::<Vec<_>>();
-        let mut mask = Self::all_valid(flags.len());
-        let mut count = 0;
-        for (idx, masked) in flags.into_iter().enumerate() {
+        let mut bits: Vec<u8> = Vec::new();
+        let mut current = 0u8;
+        let mut bit_in_byte: u8 = 0;
+        let mut len = 0_usize;
+        let mut count = 0_usize;
+        for masked in flags {
             if masked {
-                mask.set_masked(idx, true);
+                current |= 1 << bit_in_byte;
                 count += 1;
             }
+            len += 1;
+            bit_in_byte += 1;
+            if bit_in_byte == 8 {
+                bits.push(current);
+                current = 0;
+                bit_in_byte = 0;
+            }
         }
-        mask.cached_count.store(count, Ordering::Relaxed);
-        mask
+        if bit_in_byte != 0 {
+            bits.push(current);
+        }
+        Self {
+            len,
+            bits,
+            cached_count: AtomicUsize::new(count),
+        }
+    }
+
+    /// An empty mask (length zero, no bits). Use `extend` to grow it.
+    pub fn empty() -> Self {
+        Self {
+            len: 0,
+            bits: Vec::new(),
+            cached_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Append `count` bits taken from the first `count` entries of `other`
+    /// (or all-zero bits when `other` is `None`), growing this mask in place.
+    /// Used by segment assembly to accumulate a packed mask without ever
+    /// materializing a `Vec<bool>`. The cached masked-count is invalidated.
+    pub fn extend(&mut self, other: Option<&ValidityMask>, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let new_len = self
+            .len
+            .checked_add(count)
+            .expect("ValidityMask length overflow");
+        let needed_bytes = new_len.div_ceil(8);
+        self.bits.resize(needed_bytes, 0);
+        for i in 0..count {
+            let masked = other.and_then(|mask| mask.is_masked(i)).unwrap_or(false);
+            if masked {
+                let bit_idx = self.len + i;
+                self.bits[bit_idx / 8] |= 1 << (bit_idx % 8);
+            }
+        }
+        self.len = new_len;
+        self.cached_count.store(UNCACHED_COUNT, Ordering::Relaxed);
     }
 
     pub fn len(&self) -> usize {
@@ -1366,6 +1418,50 @@ mod tests {
         assert_eq!(array.is_masked(1), Some(true));
         assert_eq!(array.is_masked(4), None);
         assert_eq!(array.mask().unwrap().bytes().len(), 1);
+    }
+
+    #[test]
+    fn from_masked_flags_packs_directly_without_bool_buffer() {
+        // Non-multiple-of-8 length exercises the trailing partial byte.
+        let flags = [
+            false, true, false, true, true, false, false, true, true, false, true,
+        ];
+        let mask = ValidityMask::from_masked_flags(flags);
+
+        assert_eq!(mask.len(), flags.len());
+        assert_eq!(mask.masked_count(), flags.iter().filter(|f| **f).count());
+        for (idx, expected) in flags.iter().enumerate() {
+            assert_eq!(mask.is_masked(idx), Some(*expected), "index {idx} mismatch");
+        }
+        assert_eq!(mask.bytes().len(), flags.len().div_ceil(8));
+    }
+
+    #[test]
+    fn empty_mask_extend_accumulates_packed_bits() {
+        // Segment-assembly pattern: append several segments with and without
+        // masks; the result must equal a single from_masked_flags build.
+        let seg_a = [true, false, true]; // has mask
+        let seg_b = [false, false, false, false]; // no mask -> all valid
+        let seg_c = [false, true, true, false, true]; // has mask
+
+        let mut acc = ValidityMask::empty();
+        acc.extend(Some(&ValidityMask::from_masked_flags(seg_a)), seg_a.len());
+        acc.extend(None, seg_b.len());
+        acc.extend(Some(&ValidityMask::from_masked_flags(seg_c)), seg_c.len());
+
+        let expected = ValidityMask::from_masked_flags(
+            seg_a
+                .iter()
+                .chain(seg_b.iter())
+                .chain(seg_c.iter())
+                .copied(),
+        );
+
+        assert_eq!(acc.len(), expected.len());
+        for idx in 0..expected.len() {
+            assert_eq!(acc.is_masked(idx), expected.is_masked(idx), "idx {idx}");
+        }
+        assert_eq!(acc.masked_count(), expected.masked_count());
     }
 
     #[test]

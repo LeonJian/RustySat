@@ -5,7 +5,7 @@
 //! provides an explicit scaled u16 path for HDR display-oriented products.
 
 use crate::Writer;
-use rusty_sat_core::{Dataset, MetadataValue, Result, RustySatError};
+use rusty_sat_core::{AnyDataArray, Dataset, MetadataValue, Result, RustySatError, ValidityMask};
 use rusty_sat_image::Image;
 use rusty_sat_resample::geo_keys::{
     finalize_geo_key_defs, serialize_geo_key_directory, GeoKeyDef, GEO_USER_DEFINED,
@@ -267,16 +267,14 @@ fn write_tiff_dataset_with_policy(
         )));
     }
     let (height, width) = array.shape_yx()?;
-    let values = array.values_as_f64();
-    let mask = array.mask();
-    let sample_data = sample_policy.encode_values(&values, mask)?;
+    let sample_data = sample_policy.encode(array)?;
     let geo_key_defs = geo_key_defs_from_dataset(dataset);
 
     write_tiff_pixels(
         path,
         width,
         height,
-        &sample_data,
+        sample_data,
         geo_info_from_dataset(dataset)?,
         geo_key_defs,
         compression,
@@ -306,22 +304,49 @@ impl TiffSamplePolicy {
         }
     }
 
-    fn encode_values(
-        &self,
-        values: &[f64],
-        mask: Option<&rusty_sat_core::ValidityMask>,
-    ) -> Result<TiffSampleData> {
+    /// Encode the dataset array into TIFF sample bytes directly from the source
+    /// dtype. Same-dtype float policies (f32→Float32, f64→Float64) avoid the
+    /// previous full-array `values_as_f64()` copy; only genuinely necessary
+    /// type conversions allocate an intermediate `Vec<f64>`.
+    fn encode(&self, array: &AnyDataArray) -> Result<TiffSampleData> {
+        let mask = array.mask();
         match self {
-            Self::Float32 { fill_value } => Ok(TiffSampleData {
-                bits_per_sample: 32,
-                sample_format: SAMPLE_FORMAT_IEEE_FLOAT,
-                bytes: encode_f32_samples(values, mask, *fill_value),
-            }),
-            Self::Float64 { fill_value } => Ok(TiffSampleData {
-                bits_per_sample: 64,
-                sample_format: SAMPLE_FORMAT_IEEE_FLOAT,
-                bytes: encode_f64_samples(values, mask, *fill_value),
-            }),
+            Self::Float32 { fill_value } => {
+                let bytes = match array {
+                    AnyDataArray::F32(a) => encode_f32_from_f32(a.values(), mask, *fill_value),
+                    AnyDataArray::F64(a) => {
+                        // F64 source: `a.values()` is already `&[f64]`, no copy.
+                        encode_f32_samples(a.values(), mask, *fill_value)
+                    }
+                    other => {
+                        let values = other.values_as_f64();
+                        encode_f32_samples(&values, mask, *fill_value)
+                    }
+                };
+                Ok(TiffSampleData {
+                    bits_per_sample: 32,
+                    sample_format: SAMPLE_FORMAT_IEEE_FLOAT,
+                    bytes,
+                })
+            }
+            Self::Float64 { fill_value } => {
+                let bytes = match array {
+                    AnyDataArray::F64(a) => {
+                        // F64 source: `a.values()` is already `&[f64]`, no copy.
+                        encode_f64_samples(a.values(), mask, *fill_value)
+                    }
+                    AnyDataArray::F32(a) => encode_f64_from_f32(a.values(), mask, *fill_value),
+                    other => {
+                        let values = other.values_as_f64();
+                        encode_f64_samples(&values, mask, *fill_value)
+                    }
+                };
+                Ok(TiffSampleData {
+                    bits_per_sample: 64,
+                    sample_format: SAMPLE_FORMAT_IEEE_FLOAT,
+                    bytes,
+                })
+            }
             Self::UInt16Scaled {
                 min,
                 max,
@@ -329,7 +354,7 @@ impl TiffSamplePolicy {
             } => {
                 let (scale_min, scale_max) = match (*min, *max) {
                     (Some(min), Some(max)) => (min, max),
-                    (None, None) => finite_min_max(values, mask).ok_or_else(|| {
+                    (None, None) => array_finite_min_max(array, mask).ok_or_else(|| {
                         RustySatError::invalid_input(
                             "u16 scaled TIFF output has no finite unmasked values for autoscale",
                         )
@@ -337,16 +362,32 @@ impl TiffSamplePolicy {
                     _ => unreachable!("sample policy validation rejects partial u16 scale"),
                 };
                 validate_u16_scale(scale_min, scale_max)?;
-                Ok(TiffSampleData {
-                    bits_per_sample: 16,
-                    sample_format: SAMPLE_FORMAT_UNSIGNED_INTEGER,
-                    bytes: encode_u16_scaled_samples(
-                        values,
+                let bytes = match array {
+                    AnyDataArray::F32(a) => encode_u16_scaled_from_iter(
+                        a.values().iter().map(|&v| v as f64),
+                        a.values().len(),
                         mask,
                         scale_min,
                         scale_max,
                         *fill_value,
                     ),
+                    AnyDataArray::F64(a) => encode_u16_scaled_from_iter(
+                        a.values().iter().copied(),
+                        a.values().len(),
+                        mask,
+                        scale_min,
+                        scale_max,
+                        *fill_value,
+                    ),
+                    other => {
+                        let values = other.values_as_f64();
+                        encode_u16_scaled_samples(&values, mask, scale_min, scale_max, *fill_value)
+                    }
+                };
+                Ok(TiffSampleData {
+                    bits_per_sample: 16,
+                    sample_format: SAMPLE_FORMAT_UNSIGNED_INTEGER,
+                    bytes,
                 })
             }
         }
@@ -358,12 +399,19 @@ fn write_tiff_pixels(
     path: &Path,
     width: usize,
     height: usize,
-    sample_data: &TiffSampleData,
+    sample_data: TiffSampleData,
     geo_info: Option<GeoTiffInfo>,
     geo_key_defs: Option<Vec<GeoKeyDef>>,
     compression: TiffCompression,
     tile_options: Option<TiffTileOptions>,
 ) -> Result<()> {
+    // Take ownership so the pixel byte buffer can be written (strip mode) or
+    // consumed (tile mode) without cloning it.
+    let TiffSampleData {
+        bits_per_sample,
+        sample_format,
+        bytes,
+    } = sample_data;
     if width == 0 || height == 0 {
         return Err(RustySatError::invalid_input(
             "float TIFF dimensions must be non-zero",
@@ -372,8 +420,8 @@ fn write_tiff_pixels(
     let pixel_count = width
         .checked_mul(height)
         .ok_or_else(|| RustySatError::invalid_input("float TIFF pixel count overflow"))?;
-    let bytes_per_sample = usize::from(sample_data.bits_per_sample / 8);
-    if !sample_data.bits_per_sample.is_multiple_of(8) || bytes_per_sample == 0 {
+    let bytes_per_sample = usize::from(bits_per_sample / 8);
+    if !bits_per_sample.is_multiple_of(8) || bytes_per_sample == 0 {
         return Err(RustySatError::invalid_input(
             "TIFF bits per sample must be a positive multiple of 8",
         ));
@@ -381,17 +429,17 @@ fn write_tiff_pixels(
     let expected_byte_count = pixel_count
         .checked_mul(bytes_per_sample)
         .ok_or_else(|| RustySatError::invalid_input("float TIFF byte count overflow"))?;
-    if expected_byte_count != sample_data.bytes.len() {
+    if expected_byte_count != bytes.len() {
         return Err(RustySatError::invalid_input(format!(
             "float TIFF has {} sample bytes but shape ({height}, {width}) requires {expected_byte_count}",
-            sample_data.bytes.len()
+            bytes.len()
         )));
     }
     let width_u32 = u32::try_from(width)
         .map_err(|_| RustySatError::invalid_input("float TIFF width does not fit u32"))?;
     let height_u32 = u32::try_from(height)
         .map_err(|_| RustySatError::invalid_input("float TIFF height does not fit u32"))?;
-    let _byte_count = u32::try_from(sample_data.bytes.len())
+    let _byte_count = u32::try_from(bytes.len())
         .map_err(|_| RustySatError::invalid_input("float TIFF byte count overflow"))?;
 
     let geotiff_data = geo_info
@@ -423,29 +471,37 @@ fn write_tiff_pixels(
         TiffCompression::Deflate => COMPRESSION_DEFLATE,
     };
 
-    // Pre-compute pixel blocks (strips or tiles)
-    let bytes_per_pixel = usize::from(sample_data.bits_per_sample / 8);
-    let blocks: Vec<Vec<u8>> = if let Some(tiles) = tile_options {
-        build_tile_blocks(
-            &sample_data.bytes,
+    // Pre-compute pixel blocks (strips or tiles). The strip-uncompressed path
+    // moves `bytes` directly into the block list (no clone). Tile mode and any
+    // compressed mode drop the contiguous `bytes` buffer as soon as the
+    // per-block data is produced, so the raw buffer and the block list do not
+    // coexist for the whole image.
+    let bytes_per_pixel = usize::from(bits_per_sample / 8);
+    let compressed_blocks: Vec<Vec<u8>> = if let Some(tiles) = tile_options {
+        let raw_blocks = build_tile_blocks(
+            &bytes,
             width,
             height,
             tiles.width,
             tiles.height,
             bytes_per_pixel,
-        )
+        );
+        // Tile retiling is done; the contiguous source buffer is no longer needed.
+        drop(bytes);
+        if compression == TiffCompression::Deflate {
+            raw_blocks
+                .iter()
+                .map(|b| compress_deflate(b))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            raw_blocks
+        }
+    } else if compression == TiffCompression::Deflate {
+        let compressed = compress_deflate(&bytes)?;
+        drop(bytes);
+        vec![compressed]
     } else {
-        vec![sample_data.bytes.clone()]
-    };
-
-    // Compress blocks if requested
-    let compressed_blocks: Vec<Vec<u8>> = if compression == TiffCompression::Deflate {
-        blocks
-            .iter()
-            .map(|b| compress_deflate(b))
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        blocks
+        vec![bytes]
     };
 
     // Compute block offsets
@@ -471,11 +527,7 @@ fn write_tiff_pixels(
     write_u16(&mut writer, entry_count)?;
     write_ifd_long(&mut writer, TAG_IMAGE_WIDTH, width_u32)?;
     write_ifd_long(&mut writer, TAG_IMAGE_LENGTH, height_u32)?;
-    write_ifd_short(
-        &mut writer,
-        TAG_BITS_PER_SAMPLE,
-        sample_data.bits_per_sample,
-    )?;
+    write_ifd_short(&mut writer, TAG_BITS_PER_SAMPLE, bits_per_sample)?;
     write_ifd_short(&mut writer, TAG_COMPRESSION, compression_code)?;
     write_ifd_short(
         &mut writer,
@@ -525,7 +577,7 @@ fn write_tiff_pixels(
             counts_data_offset,
         )?;
         write_ifd_short(&mut writer, TAG_SAMPLES_PER_PIXEL, 1)?;
-        write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
+        write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_format)?;
         if let Some(geotiff_data) = geotiff_data.as_ref() {
             geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
         }
@@ -547,7 +599,7 @@ fn write_tiff_pixels(
         let strip_byte_count = u32::try_from(compressed_blocks[0].len())
             .map_err(|_| RustySatError::invalid_input("compressed TIFF byte count overflow"))?;
         write_ifd_long(&mut writer, TAG_STRIP_BYTE_COUNTS, strip_byte_count)?;
-        write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_data.sample_format)?;
+        write_ifd_short(&mut writer, TAG_SAMPLE_FORMAT, sample_format)?;
         if let Some(geotiff_data) = geotiff_data.as_ref() {
             geotiff_data.write_ifd_entries(&mut writer, extra_offset)?;
         }
@@ -562,14 +614,14 @@ fn write_tiff_pixels(
     Ok(())
 }
 
-fn encode_f32_samples(
-    values: &[f64],
-    mask: Option<&rusty_sat_core::ValidityMask>,
-    fill_value: f32,
-) -> Vec<u8> {
+fn is_missing_value(mask: Option<&ValidityMask>, idx: usize, finite: bool) -> bool {
+    mask.is_some_and(|mask| mask.is_masked(idx) == Some(true)) || !finite
+}
+
+fn encode_f32_samples(values: &[f64], mask: Option<&ValidityMask>, fill_value: f32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
     for (idx, value) in values.iter().enumerate() {
-        let sample = if is_missing(mask, idx, *value) {
+        let sample = if is_missing_value(mask, idx, value.is_finite()) {
             fill_value
         } else {
             *value as f32
@@ -579,14 +631,26 @@ fn encode_f32_samples(
     bytes
 }
 
-fn encode_f64_samples(
-    values: &[f64],
-    mask: Option<&rusty_sat_core::ValidityMask>,
-    fill_value: f64,
-) -> Vec<u8> {
+/// Encode an f32 source directly to little-endian f32 sample bytes without an
+/// intermediate `Vec<f64>`. This is the no-conversion fast path for the
+/// Float32 policy over an f32 dataset (the common full-disk AHI case).
+fn encode_f32_from_f32(values: &[f32], mask: Option<&ValidityMask>, fill_value: f32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for (idx, &value) in values.iter().enumerate() {
+        let sample = if is_missing_value(mask, idx, value.is_finite()) {
+            fill_value
+        } else {
+            value
+        };
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn encode_f64_samples(values: &[f64], mask: Option<&ValidityMask>, fill_value: f64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 8);
     for (idx, value) in values.iter().enumerate() {
-        let sample = if is_missing(mask, idx, *value) {
+        let sample = if is_missing_value(mask, idx, value.is_finite()) {
             fill_value
         } else {
             *value
@@ -596,9 +660,24 @@ fn encode_f64_samples(
     bytes
 }
 
+/// Encode an f32 source to little-endian f64 sample bytes, promoting each
+/// element to f64 in place without materializing a full `Vec<f64>`.
+fn encode_f64_from_f32(values: &[f32], mask: Option<&ValidityMask>, fill_value: f64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 8);
+    for (idx, &value) in values.iter().enumerate() {
+        let sample = if is_missing_value(mask, idx, value.is_finite()) {
+            fill_value
+        } else {
+            f64::from(value)
+        };
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
 fn encode_u16_scaled_samples(
     values: &[f64],
-    mask: Option<&rusty_sat_core::ValidityMask>,
+    mask: Option<&ValidityMask>,
     min: f64,
     max: f64,
     fill_value: u16,
@@ -606,7 +685,7 @@ fn encode_u16_scaled_samples(
     let mut bytes = Vec::with_capacity(values.len() * 2);
     let scale = f64::from(u16::MAX) / (max - min);
     for (idx, value) in values.iter().enumerate() {
-        let sample = if is_missing(mask, idx, *value) {
+        let sample = if is_missing_value(mask, idx, value.is_finite()) {
             fill_value
         } else {
             ((*value).clamp(min, max) - min).mul_add(scale, 0.0).round() as u16
@@ -616,24 +695,68 @@ fn encode_u16_scaled_samples(
     bytes
 }
 
-fn finite_min_max(
-    values: &[f64],
-    mask: Option<&rusty_sat_core::ValidityMask>,
-) -> Option<(f64, f64)> {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for (idx, value) in values.iter().enumerate() {
-        if is_missing(mask, idx, *value) {
-            continue;
-        }
-        min = min.min(*value);
-        max = max.max(*value);
+/// Encode a u16-scaled output directly from an f32/f64 value iterator without
+/// collecting a `Vec<f64>` first. `len` reserves the output byte capacity.
+fn encode_u16_scaled_from_iter<I>(
+    values: I,
+    len: usize,
+    mask: Option<&ValidityMask>,
+    min: f64,
+    max: f64,
+    fill_value: u16,
+) -> Vec<u8>
+where
+    I: IntoIterator<Item = f64>,
+{
+    let mut bytes = Vec::with_capacity(len * 2);
+    let scale = f64::from(u16::MAX) / (max - min);
+    for (idx, value) in values.into_iter().enumerate() {
+        let sample = if is_missing_value(mask, idx, value.is_finite()) {
+            fill_value
+        } else {
+            (value.clamp(min, max) - min).mul_add(scale, 0.0).round() as u16
+        };
+        bytes.extend_from_slice(&sample.to_le_bytes());
     }
-    (min.is_finite() && max.is_finite()).then_some((min, max))
+    bytes
 }
 
-fn is_missing(mask: Option<&rusty_sat_core::ValidityMask>, idx: usize, value: f64) -> bool {
-    mask.is_some_and(|mask| mask.is_masked(idx) == Some(true)) || !value.is_finite()
+/// Dtype-aware finite min/max scan over the source array, avoiding a full
+/// `values_as_f64()` allocation for f32/f64 sources.
+fn array_finite_min_max(array: &AnyDataArray, mask: Option<&ValidityMask>) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    match array {
+        AnyDataArray::F32(a) => {
+            for (idx, &value) in a.values().iter().enumerate() {
+                if is_missing_value(mask, idx, value.is_finite()) {
+                    continue;
+                }
+                let value = f64::from(value);
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        AnyDataArray::F64(a) => {
+            for (idx, &value) in a.values().iter().enumerate() {
+                if is_missing_value(mask, idx, value.is_finite()) {
+                    continue;
+                }
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        other => {
+            for (idx, value) in other.values_as_f64().into_iter().enumerate() {
+                if is_missing_value(mask, idx, value.is_finite()) {
+                    continue;
+                }
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+    }
+    (min.is_finite() && max.is_finite()).then_some((min, max))
 }
 
 fn validate_u16_scale(min: f64, max: f64) -> Result<()> {

@@ -650,14 +650,33 @@ impl AhiHsdFileHandler {
             .collect())
     }
 
-    fn radiance_to_brightness_temperature_f32(&self, radiance: Vec<f32>) -> Result<Vec<f32>> {
-        Ok(self
-            .radiance_to_brightness_temperature_f64(
-                radiance.into_iter().map(f64::from).collect::<Vec<_>>(),
-            )?
-            .into_iter()
-            .map(|value| value as f32)
-            .collect())
+    fn radiance_to_brightness_temperature_f32(&self, mut radiance: Vec<f32>) -> Result<Vec<f32>> {
+        // Compute in place on a single f32 buffer. Each value is promoted to
+        // f64 only for the Planck inversion (matching the f64 path) and written
+        // straight back as f32, avoiding the previous f32->f64->f64->f32 chain
+        // of full-array allocations.
+        let (
+            c0_rad_to_tb,
+            c1_rad_to_tb,
+            c2_rad_to_tb,
+            speed_of_light,
+            planck_constant,
+            boltzmann_constant,
+        ) = self.required_infrared_coefficients()?;
+        let cwl = self.header.calibration.central_wavelength * 1.0e-6;
+        let a = (planck_constant * speed_of_light) / (boltzmann_constant * cwl);
+        let b_const = (2.0 * planck_constant * speed_of_light.powi(2)) / (1.0e6 * cwl.powi(5));
+        for value in radiance.iter_mut() {
+            let rad = f64::from(*value);
+            *value = if rad == 0.0 {
+                f32::NAN
+            } else {
+                let b = b_const / rad + 1.0;
+                let te = a / b.ln();
+                ((c0_rad_to_tb + c1_rad_to_tb * te + c2_rad_to_tb * te.powi(2)).max(0.0)) as f32
+            };
+        }
+        Ok(radiance)
     }
 
     fn radiance_to_brightness_temperature_f64(&self, radiance: Vec<f64>) -> Result<Vec<f64>> {
@@ -1361,29 +1380,30 @@ fn concatenate_yx_typed_arrays<T: NumericElement>(
     }
 
     let mut values = Vec::with_capacity(total_len);
-    let mut mask_flags: Option<Vec<bool>> = None;
+    // Accumulate a packed `ValidityMask` across segments instead of a
+    // `Vec<bool>` (1 byte/pixel). Lazily created on the first segment that
+    // carries a mask; earlier already-accumulated pixels are all-valid.
+    let mut acc_mask: Option<ValidityMask> = None;
     for array in arrays {
-        let previous_len = values.len();
         let (segment_values, _, segment_mask) = array.into_parts();
-        if let Some(flags) = &mut mask_flags {
-            extend_mask_flags(flags, segment_mask.as_ref(), segment_values.len());
-        } else if let Some(mask) = segment_mask.as_ref() {
-            let mut flags = vec![false; previous_len];
-            extend_mask_flags(&mut flags, Some(mask), segment_values.len());
-            mask_flags = Some(flags);
+        let segment_len = segment_values.len();
+        match acc_mask.as_mut() {
+            Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
+            None if segment_mask.is_some() => {
+                let mut mask = ValidityMask::all_valid(values.len());
+                mask.extend(segment_mask.as_ref(), segment_len);
+                acc_mask = Some(mask);
+            }
+            None => {}
         }
         values.extend(segment_values);
     }
 
     let mut array = DataArray::<T>::from_vec_named([total_height, width], ["y", "x"], values)?;
-    if let Some(flags) = mask_flags {
-        array.set_mask(ValidityMask::from_masked_flags(flags))?;
+    if let Some(mask) = acc_mask {
+        array.set_mask(mask)?;
     }
     Ok(array)
-}
-
-fn extend_mask_flags(flags: &mut Vec<bool>, mask: Option<&ValidityMask>, len: usize) {
-    flags.extend((0..len).map(|idx| mask.and_then(|mask| mask.is_masked(idx)).unwrap_or(false)));
 }
 
 pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
