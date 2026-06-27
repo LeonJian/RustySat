@@ -967,11 +967,250 @@ impl AhiHsdReader {
 
     fn load_assembled_dataset(&self, handlers: Vec<&AhiHsdFileHandler>) -> Result<Dataset> {
         let sorted_handlers = sorted_complete_segment_handlers(handlers)?;
-        let mut datasets = Vec::with_capacity(sorted_handlers.len());
-        for handler in &sorted_handlers {
-            datasets.push(self.load_handler_dataset(handler)?);
+        let Some(first_handler) = sorted_handlers.first() else {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD segment assembly requires at least one segment",
+            ));
+        };
+
+        let first_dataset = self.load_handler_dataset(first_handler)?;
+        let mut output = Dataset::new(first_dataset.id().clone());
+
+        let first_array = first_dataset.into_array().ok_or_else(|| {
+            RustySatError::invalid_input("AHI HSD segment dataset is missing array data")
+        })?;
+
+        let width = first_array.shape()[1];
+        let mut total_height = first_array.shape()[0];
+        for handler in sorted_handlers.iter().skip(1) {
+            total_height += usize::from(handler.header.data.lines);
         }
-        assemble_segment_datasets(datasets, &sorted_handlers, self.calibration)
+        let total_len = total_height * width;
+
+        let assembled_array = match first_array {
+            AnyDataArray::F32(first_typed) => {
+                let mut values = Vec::with_capacity(total_len);
+                let (first_values, _, mut acc_mask) = first_typed.into_parts();
+                values.extend(first_values);
+
+                for handler in sorted_handlers.iter().skip(1) {
+                    let ds = self.load_handler_dataset(handler)?;
+                    let arr = ds.into_array().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "AHI HSD segment dataset is missing array data",
+                        )
+                    })?;
+                    let AnyDataArray::F32(typed_arr) = arr else {
+                        return Err(RustySatError::invalid_input(
+                            "AHI HSD segment dtype mismatch",
+                        ));
+                    };
+                    let (segment_values, _, segment_mask) = typed_arr.into_parts();
+                    let segment_len = segment_values.len();
+                    match acc_mask.as_mut() {
+                        Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
+                        None if segment_mask.is_some() => {
+                            let mut mask = ValidityMask::all_valid(values.len());
+                            mask.extend(segment_mask.as_ref(), segment_len);
+                            acc_mask = Some(mask);
+                        }
+                        None => {}
+                    }
+                    values.extend(segment_values);
+                }
+                let mut array =
+                    DataArray::<f32>::from_vec_named([total_height, width], ["y", "x"], values)?;
+                if let Some(mask) = acc_mask {
+                    array.set_mask(mask)?;
+                }
+                AnyDataArray::F32(array)
+            }
+            AnyDataArray::F64(first_typed) => {
+                let mut values = Vec::with_capacity(total_len);
+                let (first_values, _, mut acc_mask) = first_typed.into_parts();
+                values.extend(first_values);
+
+                for handler in sorted_handlers.iter().skip(1) {
+                    let ds = self.load_handler_dataset(handler)?;
+                    let arr = ds.into_array().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "AHI HSD segment dataset is missing array data",
+                        )
+                    })?;
+                    let AnyDataArray::F64(typed_arr) = arr else {
+                        return Err(RustySatError::invalid_input(
+                            "AHI HSD segment dtype mismatch",
+                        ));
+                    };
+                    let (segment_values, _, segment_mask) = typed_arr.into_parts();
+                    let segment_len = segment_values.len();
+                    match acc_mask.as_mut() {
+                        Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
+                        None if segment_mask.is_some() => {
+                            let mut mask = ValidityMask::all_valid(values.len());
+                            mask.extend(segment_mask.as_ref(), segment_len);
+                            acc_mask = Some(mask);
+                        }
+                        None => {}
+                    }
+                    values.extend(segment_values);
+                }
+                let mut array =
+                    DataArray::<f64>::from_vec_named([total_height, width], ["y", "x"], values)?;
+                if let Some(mask) = acc_mask {
+                    array.set_mask(mask)?;
+                }
+                AnyDataArray::F64(array)
+            }
+            AnyDataArray::U16(first_typed) => {
+                let mut values = Vec::with_capacity(total_len);
+                let (first_values, _, mut acc_mask) = first_typed.into_parts();
+                values.extend(first_values);
+
+                for handler in sorted_handlers.iter().skip(1) {
+                    let ds = self.load_handler_dataset(handler)?;
+                    let arr = ds.into_array().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "AHI HSD segment dataset is missing array data",
+                        )
+                    })?;
+                    let AnyDataArray::U16(typed_arr) = arr else {
+                        return Err(RustySatError::invalid_input(
+                            "AHI HSD segment dtype mismatch",
+                        ));
+                    };
+                    let (segment_values, _, segment_mask) = typed_arr.into_parts();
+                    let segment_len = segment_values.len();
+                    match acc_mask.as_mut() {
+                        Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
+                        None if segment_mask.is_some() => {
+                            let mut mask = ValidityMask::all_valid(values.len());
+                            mask.extend(segment_mask.as_ref(), segment_len);
+                            acc_mask = Some(mask);
+                        }
+                        None => {}
+                    }
+                    values.extend(segment_values);
+                }
+                let mut array =
+                    DataArray::<u16>::from_vec_named([total_height, width], ["y", "x"], values)?;
+                if let Some(mask) = acc_mask {
+                    array.set_mask(mask)?;
+                }
+                AnyDataArray::U16(array)
+            }
+            AnyDataArray::U8(first_typed) => {
+                let mut values = Vec::with_capacity(total_len);
+                let (first_values, _, mut acc_mask) = first_typed.into_parts();
+                values.extend(first_values);
+
+                for handler in sorted_handlers.iter().skip(1) {
+                    let ds = self.load_handler_dataset(handler)?;
+                    let arr = ds.into_array().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "AHI HSD segment dataset is missing array data",
+                        )
+                    })?;
+                    let AnyDataArray::U8(typed_arr) = arr else {
+                        return Err(RustySatError::invalid_input(
+                            "AHI HSD segment dtype mismatch",
+                        ));
+                    };
+                    let (segment_values, _, segment_mask) = typed_arr.into_parts();
+                    let segment_len = segment_values.len();
+                    match acc_mask.as_mut() {
+                        Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
+                        None if segment_mask.is_some() => {
+                            let mut mask = ValidityMask::all_valid(values.len());
+                            mask.extend(segment_mask.as_ref(), segment_len);
+                            acc_mask = Some(mask);
+                        }
+                        None => {}
+                    }
+                    values.extend(segment_values);
+                }
+                let mut array =
+                    DataArray::<u8>::from_vec_named([total_height, width], ["y", "x"], values)?;
+                if let Some(mask) = acc_mask {
+                    array.set_mask(mask)?;
+                }
+                AnyDataArray::U8(array)
+            }
+            AnyDataArray::I16(first_typed) => {
+                let mut values = Vec::with_capacity(total_len);
+                let (first_values, _, mut acc_mask) = first_typed.into_parts();
+                values.extend(first_values);
+
+                for handler in sorted_handlers.iter().skip(1) {
+                    let ds = self.load_handler_dataset(handler)?;
+                    let arr = ds.into_array().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "AHI HSD segment dataset is missing array data",
+                        )
+                    })?;
+                    let AnyDataArray::I16(typed_arr) = arr else {
+                        return Err(RustySatError::invalid_input(
+                            "AHI HSD segment dtype mismatch",
+                        ));
+                    };
+                    let (segment_values, _, segment_mask) = typed_arr.into_parts();
+                    let segment_len = segment_values.len();
+                    match acc_mask.as_mut() {
+                        Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
+                        None if segment_mask.is_some() => {
+                            let mut mask = ValidityMask::all_valid(values.len());
+                            mask.extend(segment_mask.as_ref(), segment_len);
+                            acc_mask = Some(mask);
+                        }
+                        None => {}
+                    }
+                    values.extend(segment_values);
+                }
+                let mut array =
+                    DataArray::<i16>::from_vec_named([total_height, width], ["y", "x"], values)?;
+                if let Some(mask) = acc_mask {
+                    array.set_mask(mask)?;
+                }
+                AnyDataArray::I16(array)
+            }
+        };
+
+        let array = attach_projection_coordinates_to_any_array(
+            assembled_array,
+            first_handler.area_extent_for(total_height, 0),
+        )?;
+
+        first_handler.attach_common_attrs(&mut output)?;
+        output.insert_attr(
+            "area",
+            ahi_area_metadata_value(
+                first_handler.area_id(),
+                first_handler.area_description(),
+                first_handler.proj_id(),
+                first_handler.geos_projection(),
+                array.shape()[0],
+                array.shape()[1],
+                first_handler.area_extent_for(array.shape()[0], 0),
+            )?,
+        )?;
+        output.insert_attr("calibration", self.calibration.name())?;
+        output.insert_attr(
+            "lines",
+            i64::try_from(array.shape()[0]).map_err(|_| {
+                RustySatError::invalid_input("assembled AHI HSD line count does not fit in i64")
+            })?,
+        )?;
+        output.insert_attr(
+            "assembled_segments",
+            MetadataValue::List(
+                sorted_handlers
+                    .iter()
+                    .map(|h| MetadataValue::Integer(i64::from(h.segment.segment_number)))
+                    .collect(),
+            ),
+        )?;
+        output.set_array(array);
+        Ok(output)
     }
 }
 
@@ -1078,73 +1317,6 @@ fn validate_assembly_compatible(
         ));
     }
     Ok(())
-}
-
-fn assemble_segment_datasets(
-    mut datasets: Vec<Dataset>,
-    handlers: &[&AhiHsdFileHandler],
-    calibration: AhiCalibration,
-) -> Result<Dataset> {
-    let Some(mut output) = datasets
-        .first_mut()
-        .map(|dataset| Dataset::new(dataset.id().clone()))
-    else {
-        return Err(RustySatError::invalid_input(
-            "AHI HSD segment assembly requires at least one dataset",
-        ));
-    };
-    let first_dataset = datasets.remove(0);
-    let mut arrays = vec![first_dataset.into_array().ok_or_else(|| {
-        RustySatError::invalid_input("AHI HSD segment dataset is missing array data")
-    })?];
-    for dataset in datasets {
-        arrays.push(dataset.into_array().ok_or_else(|| {
-            RustySatError::invalid_input("AHI HSD segment dataset is missing array data")
-        })?);
-    }
-    let array = attach_projection_coordinates_to_any_array(
-        concatenate_yx_any_arrays(arrays)?,
-        handlers[0].area_extent_for(array_height_from_handlers(handlers)?, 0),
-    )?;
-    handlers[0].attach_common_attrs(&mut output)?;
-    output.insert_attr(
-        "area",
-        ahi_area_metadata_value(
-            handlers[0].area_id(),
-            handlers[0].area_description(),
-            handlers[0].proj_id(),
-            handlers[0].geos_projection(),
-            array.shape()[0],
-            array.shape()[1],
-            handlers[0].area_extent_for(array.shape()[0], 0),
-        )?,
-    )?;
-    output.insert_attr("calibration", calibration.name())?;
-    output.insert_attr(
-        "lines",
-        i64::try_from(array.shape()[0]).map_err(|_| {
-            RustySatError::invalid_input("assembled AHI HSD line count does not fit in i64")
-        })?,
-    )?;
-    output.insert_attr(
-        "assembled_segments",
-        MetadataValue::List(
-            handlers
-                .iter()
-                .map(|handler| MetadataValue::Integer(i64::from(handler.segment.segment_number)))
-                .collect(),
-        ),
-    )?;
-    output.set_array(array);
-    Ok(output)
-}
-
-fn array_height_from_handlers(handlers: &[&AhiHsdFileHandler]) -> Result<usize> {
-    handlers.iter().try_fold(0_usize, |height, handler| {
-        height
-            .checked_add(usize::from(handler.header.data.lines))
-            .ok_or_else(|| RustySatError::invalid_input("AHI HSD assembled height overflow"))
-    })
 }
 
 fn ahi_area_metadata_value(
@@ -1274,136 +1446,6 @@ fn projection_y_coords(height: usize, area_extent: [f64; 4]) -> Vec<f64> {
     (0..height)
         .map(|y| area_extent[3] - (y as f64 + 0.5) * pixel_size)
         .collect()
-}
-
-fn concatenate_yx_any_arrays(arrays: Vec<AnyDataArray>) -> Result<AnyDataArray> {
-    let Some(first) = arrays.first() else {
-        return Err(RustySatError::invalid_input(
-            "AHI HSD segment assembly requires at least one array",
-        ));
-    };
-    match first {
-        AnyDataArray::F32(_) => concatenate_yx_typed_arrays(
-            arrays
-                .into_iter()
-                .map(|array| match array {
-                    AnyDataArray::F32(array) => Ok(array),
-                    other => Err(RustySatError::invalid_input(format!(
-                        "AHI HSD segment dtype mismatch: expected f32, got {}",
-                        other.dtype().name()
-                    ))),
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map(Into::into),
-        AnyDataArray::F64(_) => concatenate_yx_typed_arrays(
-            arrays
-                .into_iter()
-                .map(|array| match array {
-                    AnyDataArray::F64(array) => Ok(array),
-                    other => Err(RustySatError::invalid_input(format!(
-                        "AHI HSD segment dtype mismatch: expected f64, got {}",
-                        other.dtype().name()
-                    ))),
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map(Into::into),
-        AnyDataArray::U8(_) => concatenate_yx_typed_arrays(
-            arrays
-                .into_iter()
-                .map(|array| match array {
-                    AnyDataArray::U8(array) => Ok(array),
-                    other => Err(RustySatError::invalid_input(format!(
-                        "AHI HSD segment dtype mismatch: expected u8, got {}",
-                        other.dtype().name()
-                    ))),
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map(Into::into),
-        AnyDataArray::U16(_) => concatenate_yx_typed_arrays(
-            arrays
-                .into_iter()
-                .map(|array| match array {
-                    AnyDataArray::U16(array) => Ok(array),
-                    other => Err(RustySatError::invalid_input(format!(
-                        "AHI HSD segment dtype mismatch: expected u16, got {}",
-                        other.dtype().name()
-                    ))),
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map(Into::into),
-        AnyDataArray::I16(_) => concatenate_yx_typed_arrays(
-            arrays
-                .into_iter()
-                .map(|array| match array {
-                    AnyDataArray::I16(array) => Ok(array),
-                    other => Err(RustySatError::invalid_input(format!(
-                        "AHI HSD segment dtype mismatch: expected i16, got {}",
-                        other.dtype().name()
-                    ))),
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map(Into::into),
-    }
-}
-
-fn concatenate_yx_typed_arrays<T: NumericElement>(
-    arrays: Vec<DataArray<T>>,
-) -> Result<DataArray<T>> {
-    let Some(first) = arrays.first() else {
-        return Err(RustySatError::invalid_input(
-            "AHI HSD segment assembly requires at least one typed array",
-        ));
-    };
-    first.require_dims_exact(&["y", "x"])?;
-    let width = first.shape_yx()?.1;
-    let mut total_height = 0_usize;
-    let mut total_len = 0_usize;
-    for array in &arrays {
-        array.require_dims_exact(&["y", "x"])?;
-        let (height, array_width) = array.shape_yx()?;
-        if array_width != width {
-            return Err(RustySatError::invalid_input(format!(
-                "AHI HSD segment width mismatch: expected {width}, got {array_width}"
-            )));
-        }
-        total_height = total_height
-            .checked_add(height)
-            .ok_or_else(|| RustySatError::invalid_input("AHI HSD assembled height overflow"))?;
-        total_len = total_len
-            .checked_add(array.len())
-            .ok_or_else(|| RustySatError::invalid_input("AHI HSD assembled length overflow"))?;
-    }
-
-    let mut values = Vec::with_capacity(total_len);
-    // Accumulate a packed `ValidityMask` across segments instead of a
-    // `Vec<bool>` (1 byte/pixel). Lazily created on the first segment that
-    // carries a mask; earlier already-accumulated pixels are all-valid.
-    let mut acc_mask: Option<ValidityMask> = None;
-    for array in arrays {
-        let (segment_values, _, segment_mask) = array.into_parts();
-        let segment_len = segment_values.len();
-        match acc_mask.as_mut() {
-            Some(mask) => mask.extend(segment_mask.as_ref(), segment_len),
-            None if segment_mask.is_some() => {
-                let mut mask = ValidityMask::all_valid(values.len());
-                mask.extend(segment_mask.as_ref(), segment_len);
-                acc_mask = Some(mask);
-            }
-            None => {}
-        }
-        values.extend(segment_values);
-    }
-
-    let mut array = DataArray::<T>::from_vec_named([total_height, width], ["y", "x"], values)?;
-    if let Some(mask) = acc_mask {
-        array.set_mask(mask)?;
-    }
-    Ok(array)
 }
 
 pub fn parse_initial_hsd_header(bytes: &[u8]) -> Result<AhiHsdHeader> {
