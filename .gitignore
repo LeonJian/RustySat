@@ -6,6 +6,7 @@
 
 **/.DS_Store
 *.pdf
+*.trace
 /.claude
 /.idea
 /.antigravitycli/
