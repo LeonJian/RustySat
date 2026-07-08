@@ -476,3 +476,31 @@ Type alias: `pub type Result<T> = std::result::Result<T, RustySatError>`.
 | Max YAML nesting depth | 96 | `MAX_COMPOSITE_YAML_DEPTH` |
 | Max config YAML file size | 8 MB | config module |
 | Max config YAML nesting | 96 | config module |
+
+## Modifiers Crate (`rusty_sat_modifiers`)
+
+The modifiers crate implements atmospheric and geometric corrections for satellite imagery.
+
+### Modules
+
+- **`astronomy`** — Solar position math (GMST, sun RA/DEC, cos_zen, alt/az) ported from `pyorbital.astronomy`. Provides `UtcInstant` for time representation.
+- **`geos`** — Geostationary projection inverse (x/y meters → lon/lat degrees) using scanning-angle convention.
+- **`orbital`** — Satellite look angles (`get_observer_look`) ported from `pyorbital.orbital`.
+- **`angles`** — Combined angle computation (`AngleSet`) for dataset grids. Computes solar and satellite zenith/azimuth angles in parallel via rayon.
+- **`rayleigh_lut`** — Rayleigh LUT data model and trilinear interpolation ported from `pyspectral.rayleigh`. Supports parallel pixel interpolation.
+- **`rayleigh`** — Full `PSPRayleighReflectance` equivalent with cloud relaxation, high-zenith reduction, and memory-efficient consuming APIs.
+- **`lut_loader`** — HDF5 LUT loading via `hdf5-pure` (pure Rust, no C dependency) and automatic download from Zenodo.
+
+### Memory Strategy
+
+- 4D LUT reflectance buffer is consumed and freed after wavelength selection.
+- Coordinate arrays are cloned before the 4D buffer is consumed.
+- 3D wavelength-adjusted slice is dropped before final subtraction.
+- Correction array is freed immediately after subtraction.
+- All per-pixel operations use rayon parallelism for grids >10k pixels.
+
+### Dependencies
+
+- `rusty_sat_core` — shared data model
+- `rayon` — parallel processing
+- `hdf5-pure` — pure-Rust HDF5 file reading (no C dependency)

@@ -12,3 +12,4 @@
 /.antigravitycli/
 /local_data
 /.cargo
+/pyspectral_atm_correction_luts_marine_clean_aerosol/

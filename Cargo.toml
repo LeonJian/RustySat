@@ -7,6 +7,7 @@ members = [
     "crates/rusty_sat_composites",
     "crates/rusty_sat_image",
     "crates/rusty_sat_writers",
+    "crates/rusty_sat_modifiers",
     "crates/rusty_sat_cli",
 ]
 resolver = "2"

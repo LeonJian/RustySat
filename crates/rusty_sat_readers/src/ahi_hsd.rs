@@ -836,9 +836,21 @@ impl AhiHsdFileHandler {
     fn area_extent_for(&self, lines: usize, segment_offset: usize) -> [f64; 4] {
         let h = self.header.projection.distance_from_earth_center * 1000.0
             - self.header.projection.earth_equatorial_radius * 1000.0;
-        let loff = -f64::from(self.header.projection.loff)
-            + 1.0
-            + segment_offset as f64 * f64::from(self.header.data.lines);
+        // Satpy convention: loff = -LOFF + 1 + segment_number * nlines.
+        // Reference: `satpy/satpy/readers/ahi_hsd.py` lines ~466-480.
+        //
+        // For single-segment calls, `segment_offset` is the 1-based segment
+        // number and `lines` is the per-segment line count.
+        // For full-disk assembly, `segment_offset` is 1 and `lines` is the
+        // total height — we use `lines` as `nlines` so the offset positions
+        // the full-disk grid correctly centered on the sub-satellite point.
+        let nlines = if segment_offset > 0 && lines > usize::from(self.header.data.lines) {
+            lines
+        } else {
+            usize::from(self.header.data.lines)
+        };
+        let loff =
+            -f64::from(self.header.projection.loff) + 1.0 + segment_offset as f64 * nlines as f64;
         geos_area_extent(
             lines,
             usize::from(self.header.data.columns),
@@ -1177,7 +1189,7 @@ impl AhiHsdReader {
 
         let array = attach_projection_coordinates_to_any_array(
             assembled_array,
-            first_handler.area_extent_for(total_height, 0),
+            first_handler.area_extent_for(total_height, 1),
         )?;
 
         first_handler.attach_common_attrs(&mut output)?;
@@ -1190,7 +1202,7 @@ impl AhiHsdReader {
                 first_handler.geos_projection(),
                 array.shape()[0],
                 array.shape()[1],
-                first_handler.area_extent_for(array.shape()[0], 0),
+                first_handler.area_extent_for(array.shape()[0], 1),
             )?,
         )?;
         output.insert_attr("calibration", self.calibration.name())?;
@@ -1369,6 +1381,12 @@ fn geos_area_extent(
     loff: f64,
     h: f64,
 ) -> [f64; 4] {
+    // Reference: `satpy/satpy/readers/core/_geos_area.py` — `get_area_extent`.
+    // For N2S scan (AHI standard), line 0.5 is at the top (north) and
+    // line lines+0.5 is at the bottom (south).  The scanning angle y
+    // decreases from top to bottom when loff > 0.
+    // We compute LL and UR scanning angles, then ensure ll_y < ur_y
+    // by swapping if needed (matching Satpy's area_extent convention).
     let ll = geos_xy_from_line_col(0.5, 0.5, loff, coff, lfac, cfac);
     let ur = geos_xy_from_line_col(
         lines as f64 + 0.5,
@@ -1378,12 +1396,16 @@ fn geos_area_extent(
         lfac,
         cfac,
     );
-    [
-        ll.0.to_radians() * h,
-        ll.1.to_radians() * h,
-        ur.0.to_radians() * h,
-        ur.1.to_radians() * h,
-    ]
+    let ll_x = ll.0.to_radians() * h;
+    let ll_y = ll.1.to_radians() * h;
+    let ur_x = ur.0.to_radians() * h;
+    let ur_y = ur.1.to_radians() * h;
+    // Ensure ll_y < ur_y (Satpy convention: lower-left y < upper-right y).
+    if ll_y < ur_y {
+        [ll_x, ll_y, ur_x, ur_y]
+    } else {
+        [ll_x, ur_y, ur_x, ll_y]
+    }
 }
 
 fn geos_xy_from_line_col(

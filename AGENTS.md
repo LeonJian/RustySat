@@ -319,9 +319,18 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ### M: Modifiers
 
-- `[ ]` M1: Modifier base and spectral modifiers.
-- `[ ]` M2: Atmospheric modifiers: Rayleigh reflectance, atmospheric correction, and CO2 correction.
-- `[ ]` M3: Geometry modifiers: sun-zenith correction/reduction, solar path length, angles, and parallax.
+- `[~]` M1: Modifier base and spectral modifiers.
+  - `[x]` M1-m9d1: Add `rusty_sat_modifiers` crate with astronomy, geos projection inverse, satellite look angles, angle computation, and Rayleigh LUT infrastructure.
+  - `[ ]` M1-next: Spectral modifier base and remaining spectral modifiers.
+- `[~]` M2: Atmospheric modifiers: Rayleigh reflectance, atmospheric correction, and CO2 correction.
+  - `[x]` M2-m9d1: Add full Rayleigh scattering correction (`PSPRayleighReflectance` equivalent) with pyspectral LUT loading, multilinear interpolation, cloud relaxation, high-zenith reduction, multi-threaded parallel processing, and memory-efficient consuming APIs. Reference: `satpy/satpy/modifiers/atmosphere.py`, `deps/pyspectral/pyspectral/rayleigh.py`.
+  - `[x]` M2-m9d2: Add automatic pyspectral LUT download, pure-Rust HDF5 LUT reading via `hdf5-pure`, and integration tests with real AHI HSD data from `local_data/`.
+  - `[ ]` M2-next: Atmospheric correction (IR) and CO2 correction.
+- `[~]` M3: Geometry modifiers: sun-zenith correction/reduction, solar path length, angles, and parallax.
+  - `[x]` M3-m9d1: Add solar astronomy module (cos_zen, sun azimuth/zenith, alt/az) ported from `deps/pyorbital/pyorbital/astronomy.py`.
+  - `[x]` M3-m9d2: Add satellite look-angle computation (`get_observer_look`) ported from `deps/pyorbital/pyorbital/orbital.py`.
+  - `[x]` M3-m9d3: Add combined angle computation (`AngleSet`) for dataset grids with parallel rayon processing.
+  - `[ ]` M3-next: Sun-zenith correction/reduction, solar path length, and parallax modifiers.
 - `[ ]` M4: CREFL algorithms and helpers.
 - `[ ]` M5: Spatial filters: Gaussian, median, sharpen/blur/edge, and morphology.
 
@@ -497,6 +506,7 @@ Before starting or closing a milestone, check this table and update both the mil
 - `rusty_sat_readers`: reader traits, fake/test readers, and later YAML-backed readers.
 - `rusty_sat_resample`: area/swath types and future resampling algorithms.
 - `rusty_sat_composites`: compositor/modifier traits and dependency integration.
+- `rusty_sat_modifiers`: atmospheric and geometric modifiers — Rayleigh scattering correction, solar astronomy, satellite look angles, and pyspectral LUT interpolation. Depends on `rusty_sat_core`, `rayon`, and `hdf5-pure`.
 - `rusty_sat_image`: image model, color maps, and enhancement pipeline.
 - `rusty_sat_writers`: writer traits and later PNG, GeoTIFF, and CF-style output.
 - `rusty_sat_cli`: thin command-line wrapper around the library crates.
