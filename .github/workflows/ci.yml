@@ -79,4 +79,4 @@ jobs:
         with:
           shared-key: ubuntu-stable
 
-      - run: cargo nextest run --workspace --all-features
+      - run: cargo nextest run --workspace --all-features --release
