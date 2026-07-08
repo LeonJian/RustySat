@@ -220,7 +220,7 @@ mod tests {
     fn gmst_is_in_valid_range() {
         let utc = UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0);
         let g = gmst(utc);
-        assert!(g >= 0.0 && g < 2.0 * std::f64::consts::PI);
+        assert!((0.0..2.0 * std::f64::consts::PI).contains(&g));
     }
 
     #[test]
@@ -296,6 +296,6 @@ mod tests {
     fn sun_azimuth_is_in_0_360_range() {
         let utc = UtcInstant::from_ymdhms(2025, 9, 23, 6, 0, 0);
         let az = sun_azimuth_angle(utc, 0.0, 0.0);
-        assert!(az >= 0.0 && az < 360.0, "az={az}");
+        assert!((0.0..360.0).contains(&az), "az={az}");
     }
 }

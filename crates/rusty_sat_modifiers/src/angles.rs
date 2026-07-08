@@ -287,7 +287,7 @@ mod tests {
         let rel = angles.relative_azimuth();
         for &v in &rel {
             if v.is_finite() {
-                assert!(v >= 0.0 && v <= 180.0, "rel_azi={v}");
+                assert!((0.0..=180.0).contains(&v), "rel_azi={v}");
             }
         }
     }

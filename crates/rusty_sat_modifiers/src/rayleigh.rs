@@ -477,9 +477,9 @@ mod tests {
     fn make_vis_ds(values: Vec<f64>) -> Dataset {
         let n = values.len();
         let side = (n as f64).sqrt() as usize;
-        let array =
-            DataArray::<f64>::from_vec_named(vec![side, side], vec!["y", "x"], values).unwrap();
-        Dataset::new(DataId::new("B03").unwrap()).with_array(array)
+        let array = DataArray::<f64>::from_vec_named(vec![side, side], vec!["y", "x"], values)
+            .expect("valid test array");
+        Dataset::new(DataId::new("B03").expect("valid DataId")).with_array(array)
     }
 
     #[test]
@@ -512,8 +512,11 @@ mod tests {
         let angles = make_angles(4);
         let result = corrector
             .apply_correction(vis_ds, None, &angles, 634.0)
-            .unwrap();
-        let vals = result.array().unwrap().values_as_f64();
+            .expect("correction should succeed");
+        let vals = result
+            .array()
+            .expect("result should have array")
+            .values_as_f64();
         assert!(vals.iter().all(|v| *v < 50.0));
         assert!(vals.iter().all(|v| *v >= 0.0));
     }
@@ -523,14 +526,17 @@ mod tests {
         let lut = make_test_lut();
         let corrector = RayleighCorrector::new(lut);
         let vis_ds = make_vis_ds(vec![50.0; 4]);
-        let red_array =
-            DataArray::<f64>::from_vec_named(vec![2, 2], vec!["y", "x"], vec![80.0; 4]).unwrap();
-        let red_ds = Dataset::new(DataId::new("B02").unwrap()).with_array(red_array);
+        let red_array = DataArray::<f64>::from_vec_named(vec![2, 2], vec!["y", "x"], vec![80.0; 4])
+            .expect("valid red array");
+        let red_ds = Dataset::new(DataId::new("B02").expect("valid DataId")).with_array(red_array);
         let angles = make_angles(4);
         let result = corrector
             .apply_correction(vis_ds, Some(&red_ds), &angles, 634.0)
-            .unwrap();
-        let vals = result.array().unwrap().values_as_f64();
+            .expect("correction with red band should succeed");
+        let vals = result
+            .array()
+            .expect("result should have array")
+            .values_as_f64();
         assert!(vals.iter().all(|v| *v > 40.0));
     }
 
@@ -542,8 +548,11 @@ mod tests {
         let angles = make_angles(4);
         let result = corrector
             .apply_correction(vis_ds, None, &angles, 1200.0)
-            .unwrap();
-        let vals = result.array().unwrap().values_as_f64();
+            .expect("correction should succeed");
+        let vals = result
+            .array()
+            .expect("result should have array")
+            .values_as_f64();
         assert!(vals.iter().all(|v| (*v - 50.0).abs() < 1e-10));
     }
 
@@ -562,7 +571,7 @@ mod tests {
     fn parallel_subtract_matches_serial() {
         let n = 20_000;
         let mut vis_par = vec![50.0; n];
-        let mut vis_ser = vec![50.0; n];
+        let vis_ser = vec![50.0; n];
         let corr: Vec<f64> = (0..n).map(|i| (i as f64 % 30.0) + 1.0).collect();
         subtract_correction(&mut vis_par, &corr);
         for i in 0..n {

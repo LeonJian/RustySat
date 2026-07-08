@@ -278,10 +278,13 @@ mod tests {
             AerosolType::MarineCleanAerosol,
             Atmosphere::UsStandard,
         );
-        assert!(path.to_str().unwrap().contains("marine_clean_aerosol"));
         assert!(path
             .to_str()
-            .unwrap()
+            .expect("valid path")
+            .contains("marine_clean_aerosol"));
+        assert!(path
+            .to_str()
+            .expect("valid path")
             .contains("rayleigh_lut_us-standard.h5"));
     }
 
@@ -300,9 +303,9 @@ mod tests {
         // This test verifies the "already exists" path without downloading.
         let tmp = std::env::temp_dir().join("rusty_sat_lut_test");
         let dir = tmp.join("marine_clean_aerosol");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let file = dir.join("rayleigh_lut_us-standard.h5");
-        std::fs::write(&file, b"dummy").unwrap();
+        std::fs::write(&file, b"dummy").expect("write dummy file");
 
         let result = ensure_lut(
             &tmp,
@@ -310,7 +313,7 @@ mod tests {
             Atmosphere::UsStandard,
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), file);
+        assert_eq!(result.expect("ensure_lut should succeed"), file);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

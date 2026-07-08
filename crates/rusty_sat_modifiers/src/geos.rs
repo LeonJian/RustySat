@@ -236,7 +236,7 @@ mod tests {
         m.insert("b".to_string(), "6356752.3".to_string());
         m.insert("h".to_string(), "35785863.0".to_string());
         m.insert("lon_0".to_string(), "140.7".to_string());
-        let g = GeosProjection::from_projection_map(&m).unwrap();
+        let g = GeosProjection::from_projection_map(&m).expect("valid AHI projection map");
         assert!((g.semi_major_axis - 6_378_137.0).abs() < 1.0);
         assert!((g.longitude_of_projection_origin - 140.7).abs() < 1e-10);
         assert!(!g.is_spherical());
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn inverse_at_origin_returns_subsatellite_point() {
         let g = ahi_spherical();
-        let (lon, lat) = g.inverse(0.0, 0.0).unwrap();
+        let (lon, lat) = g.inverse(0.0, 0.0).expect("origin should project");
         assert!((lon - 140.7).abs() < 1e-10, "lon={lon}");
         assert!(lat.abs() < 1e-10, "lat={lat}");
     }
@@ -271,7 +271,7 @@ mod tests {
         // 1° east of sub-satellite point
         let theta_x = 1.0_f64.to_radians();
         let x = h * theta_x;
-        let (lon, lat) = g.inverse(x, 0.0).unwrap();
+        let (lon, lat) = g.inverse(x, 0.0).expect("equator pixel should project");
         assert!((lon - 141.7).abs() < 0.01, "lon={lon}");
         assert!(lat.abs() < 0.01, "lat={lat}");
     }
@@ -283,7 +283,7 @@ mod tests {
         // 1° north of sub-satellite point (line scanning angle)
         let theta_y = 1.0_f64.to_radians();
         let y = h * theta_y;
-        let (lon, lat) = g.inverse(0.0, y).unwrap();
+        let (lon, lat) = g.inverse(0.0, y).expect("north pixel should project");
         assert!((lon - 140.7).abs() < 0.01, "lon={lon}");
         // At x=0, cos(theta_x) = 1, so lat = theta_y = 1°
         assert!((lat - 1.0).abs() < 0.01, "lat={lat}");
@@ -339,7 +339,9 @@ mod tests {
     #[test]
     fn ellipsoidal_inverse_produces_finite_lonlat() {
         let g = ahi_geos();
-        let (lon, lat) = g.inverse(500_000.0, 300_000.0).unwrap();
+        let (lon, lat) = g
+            .inverse(500_000.0, 300_000.0)
+            .expect("interior pixel should project");
         assert!(lon.is_finite());
         assert!(lat.is_finite());
     }

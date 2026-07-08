@@ -439,7 +439,9 @@ mod tests {
     fn wavelength_adjusted_produces_3d_array() {
         let lut = make_test_lut();
         let dims = lut.dims();
-        let lut_3d = lut.into_wavelength_adjusted(634.0).unwrap();
+        let lut_3d = lut
+            .into_wavelength_adjusted(634.0)
+            .expect("valid wavelength");
         assert_eq!(lut_3d.len(), dims.1 * dims.2 * dims.3);
     }
 
@@ -447,7 +449,9 @@ mod tests {
     fn wavelength_outside_range_returns_zeros() {
         let lut = make_test_lut();
         let dims = lut.dims();
-        let lut_3d = lut.into_wavelength_adjusted(1200.0).unwrap();
+        let lut_3d = lut
+            .into_wavelength_adjusted(1200.0)
+            .expect("valid wavelength");
         assert_eq!(lut_3d.len(), dims.1 * dims.2 * dims.3);
         assert!(lut_3d.iter().all(|&v| v == 0.0));
     }
@@ -455,8 +459,9 @@ mod tests {
     #[test]
     fn interpolate_returns_finite_values() {
         let lut = make_test_lut();
-        let lut_3d = lut.into_wavelength_adjusted(634.0).unwrap();
-
+        let lut_3d = lut
+            .into_wavelength_adjusted(634.0)
+            .expect("valid wavelength");
         let sun_zenith_deg = vec![50.0, 30.0];
         let sat_zenith_deg = vec![20.0, 10.0];
         let azidiff_deg = vec![140.0, 130.0];
@@ -479,7 +484,9 @@ mod tests {
     #[test]
     fn interpolate_handles_nan_angles() {
         let lut = make_test_lut();
-        let lut_3d = lut.into_wavelength_adjusted(634.0).unwrap();
+        let lut_3d = lut
+            .into_wavelength_adjusted(634.0)
+            .expect("valid wavelength");
         let lut2 = make_test_lut();
 
         let sun_zenith_deg = vec![f64::NAN, 30.0];
@@ -504,7 +511,10 @@ mod tests {
     #[test]
     fn parallel_matches_serial() {
         let lut = make_test_lut();
-        let lut_3d = lut.clone().into_wavelength_adjusted(634.0).unwrap();
+        let lut_3d = lut
+            .clone()
+            .into_wavelength_adjusted(634.0)
+            .expect("valid wavelength");
         let lut2 = make_test_lut();
 
         // Create enough pixels to trigger parallel path (>10_000)
