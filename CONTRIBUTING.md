@@ -11,8 +11,8 @@
 ### Setup
 
 ```bash
-git clone https://github.com/pytroll/satpy.git
-cd satpy
+git clone https://github.com/pytroll/rusty-sat.git
+cd rusty-sat
 cargo build
 cargo nextest run --workspace
 ```
@@ -116,7 +116,7 @@ Every feature should have:
 ## Project Structure
 
 ```
-satpy/
+rusty-sat/
 ├── AGENTS.md              ← Agent guide + roadmap
 ├── README.md              ← Project overview
 ├── CONTRIBUTING.md        ← This file
@@ -131,6 +131,7 @@ satpy/
 │   ├── rusty_sat_composites/← Compositing and enhancement
 │   ├── rusty_sat_image/   ← Image types and operations
 │   ├── rusty_sat_writers/ ← File output (PNG, GeoTIFF, PGM, JPEG)
+│   ├── rusty_sat_modifiers/← Atmospheric and geometric corrections
 │   └── rusty_sat_cli/     ← CLI entry point
 ├── satpy/                 ← Python Satpy reference (read-only, not compiled)
 ├── deps/                  ← Python dependency references (read-only)
@@ -175,6 +176,16 @@ pub trait Reader {
 
 ---
 
+## Adding a New Modifier
+
+1. Read the corresponding Python reference in `deps/pyspectral/` or `deps/pyorbital/`
+2. Create a new module in `crates/rusty_sat_modifiers/src/`
+3. Implement the correction logic with consuming APIs where possible
+4. Add parallel processing via `rayon` for grids >10k pixels
+5. Write unit tests with synthetic data and integration tests with real data
+
+---
+
 ## Reference Python Code
 
 The `satpy/` directory contains the full Python Satpy source as **read-only design reference**. Key files:
@@ -184,6 +195,8 @@ The `satpy/` directory contains the full Python Satpy source as **read-only desi
 | `satpy/readers/ahi_hsd.py` | `crates/rusty_sat_readers/src/ahi_hsd.rs` |
 | `satpy/readers/ahi_l2_nc.py` | `crates/rusty_sat_readers/src/ahi_l2_nc.rs` |
 | `satpy/etc/readers/ahi_hsd.yaml` | Config parsed by `YamlMetadataReader` |
+| `pyspectral/rayleigh.py` | `crates/rusty_sat_modifiers/src/rayleigh.rs` |
+| `pyorbital/astronomy.py` | `crates/rusty_sat_modifiers/src/astronomy.rs` |
 
 The Python code documents expected behavior (dtype layouts, calibration formulas, segment numbering rules). It is **never** compiled or executed by the Rust build.
 
