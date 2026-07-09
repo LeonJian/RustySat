@@ -12,7 +12,9 @@
 //! the Rayleigh LUT at `pyspectral_atm_correction_luts_marine_clean_aerosol/`.
 //!
 //! Run with:
-//!   cargo test --package rusty_sat_readers --test rayleigh_correction_integration --release -- --nocapture --ignored
+//!   cargo test --package rusty_sat_readers --test rayleigh_correction_integration --release -- --nocapture
+//!
+//! Tests skip gracefully when local data or LUT files are not found.
 
 #![allow(clippy::unwrap_used)]
 
@@ -123,9 +125,11 @@ fn ahi_time_to_utc(observation_start_time_days: f64) -> UtcInstant {
 }
 
 #[test]
-#[ignore = "requires local AHI HSD data and Rayleigh LUT"]
 fn rayleigh_correction_on_ahi_b01() {
-    let dir = data_dir().expect("AHI test data not found");
+    let Some(dir) = data_dir() else {
+        eprintln!("SKIP: AHI test data not found");
+        return;
+    };
     let out = output_dir();
     let lut_base = lut_dir();
 
@@ -201,9 +205,12 @@ fn rayleigh_correction_on_ahi_b01() {
 
     // Step 2: Load the Rayleigh LUT
     let t_lut = Instant::now();
-    let lut =
-        rusty_sat_modifiers::load_lut_from_hdf5(&lut_base.join("rayleigh_lut_us-standard.h5"))
-            .expect("load LUT");
+    let lut_path = lut_base.join("rayleigh_lut_us-standard.h5");
+    if !lut_path.is_file() {
+        eprintln!("SKIP: Rayleigh LUT not found at {}", lut_path.display());
+        return;
+    }
+    let lut = rusty_sat_modifiers::load_lut_from_hdf5(&lut_path).expect("load LUT");
     eprintln!("  LUT loaded: {} reflectance values", lut.reflectance.len());
     eprintln!("  LUT load time: {:.2}s", t_lut.elapsed().as_secs_f64());
 
@@ -308,9 +315,11 @@ fn rayleigh_correction_on_ahi_b01() {
 }
 
 #[test]
-#[ignore = "requires local AHI HSD data and Rayleigh LUT"]
 fn rayleigh_correction_on_ahi_b03_with_red_band() {
-    let dir = data_dir().expect("AHI test data not found");
+    let Some(dir) = data_dir() else {
+        eprintln!("SKIP: AHI test data not found");
+        return;
+    };
     let out = output_dir();
     let lut_base = lut_dir();
 
@@ -383,9 +392,12 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
     };
 
     // Load LUT
-    let lut =
-        rusty_sat_modifiers::load_lut_from_hdf5(&lut_base.join("rayleigh_lut_us-standard.h5"))
-            .expect("load LUT");
+    let lut_path = lut_base.join("rayleigh_lut_us-standard.h5");
+    if !lut_path.is_file() {
+        eprintln!("SKIP: Rayleigh LUT not found at {}", lut_path.display());
+        return;
+    }
+    let lut = rusty_sat_modifiers::load_lut_from_hdf5(&lut_path).expect("load LUT");
 
     // B03 central wavelength: ~0.64 μm = 640 nm
     let wavelength_nm = 640.0;
