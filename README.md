@@ -1,321 +1,226 @@
 # Rusty Sat
 
-**Rust-native, Satpy-compatible satellite data processing library.**
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![CI](https://github.com/pytroll/rusty-sat/actions/workflows/ci.yml/badge.svg)](https://github.com/pytroll/rusty-sat/actions/workflows/ci.yml)
 
-Rusty Sat is a high-performance reimplementation of the Python [Satpy](https://github.com/pytroll/satpy) library in Rust. It reads, calibrates, composites, enhances, resamples, and writes meteorological satellite imagery — with zero Python runtime dependency.
+A Rust-native satellite data processing library designed for Satpy compatibility.
 
-**This project is currently in very early Alpha version, and not use in any professional occasion.**
+## What is Rusty Sat?
 
----
+Rusty Sat is a Rust workspace that implements satellite data reading, calibration, resampling, compositing, and image writing — mirroring the Python Satpy library's functionality with Rust's performance and memory safety guarantees.
 
-## Table of Contents
-
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Architecture](#architecture)
-- [Crates](#crates)
-- [Supported Sensors](#supported-sensors)
-- [Supported Output Formats](#supported-output-formats)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
-## Features
-
-| Area | Status | Description |
-|------|--------|-------------|
-| **AHI HSD Reader** | ✅ | Himawari-8/9 full-disk binary segment files (`.DAT` / `.DAT.bz2`) |
-| **AHI L2 NetCDF Reader** | ✅ | Cloud mask, type, height products from NOAA enterprise data |
-| **Calibration** | ✅ | Counts → Radiance → Reflectance (visible) and BT (infrared), dual f32/f64 paths |
-| **Segment Assembly** | ✅ | Multi-segment concatenation into full-disk with validation |
-| **User Calibration** | ✅ | Radiance correction and digital number modes, per-band |
-| **Resampling** | ✅ | Nearest, bilinear, EWA, native, bucket (avg/sum/count/fraction) |
-| **RGB Compositing** | ✅ | Three-band RGB with common-channel masking |
-| **Spectral Blending** | ✅ | Weighted band blending for corrected-green products |
-| **Arithmetic Compositing** | ✅ | Difference, ratio, sum, normalized-difference |
-| **Image Enhancement** | ✅ | Crude stretch, gamma correction, inversion with history |
-| **Output** | ✅ | PNG (8/16-bit), GeoTIFF (float32/64, uint16 scaled), PGM, JPEG |
-| **YAML Config** | ⚠️ | Reader config parsing done; composites/enhancements config not yet wired |
-| **CLI** | 🚧 | Binary scaffold, not yet functional |
-
----
+**Key Goals:**
+- **Satpy-compatible behavior** — For supported inputs, produce the same datasets, calibration, geometry, and imagery as Satpy
+- **Rust-native APIs** — Idiomatic ownership/borrowing, zero-copy where possible, type-safe generics
+- **Performance-first** — Cache-friendly layouts, in-place operations, parallel processing via Rayon
+- **Incremental adoption** — Small, tested vertical slices that build on each other
 
 ## Quick Start
 
-```bash
-# Build
-cargo build --release
+### Prerequisites
 
-# Generate first AHI image (B03, 0.64 μm visible, full-disk)
-cargo run --release --example ahi_first_figure -- \
-  local_data/ahi_input/data/20250923/07 B03
-# → local_data/ahi_output/B03_reflectance.png (22000×22000, 8-bit grayscale)
+- **Rust 1.70+** — [rustup.rs](https://rustup.rs)
+- **Git** — for version control
+- **AHI HSD test data** (optional) — for running reader integration tests
 
-# Run all integration tests
-cargo test --package rusty_sat_readers \
-  --test ahi_first_figure_integration --release -- --nocapture
-```
-
----
-
-## Installation
-
-**Prerequisites:** Rust 1.70+ ([rustup](https://rustup.rs))
+### Installation
 
 ```bash
-git clone https://github.com/pytroll/satpy.git
-cd satpy
+git clone https://github.com/pytroll/rusty-sat.git
+cd rusty-sat
 cargo build --release
 ```
 
-Binary at `target/release/rusty-sat`.
-
-**As a library** (path dependency, not yet published to crates.io):
-
-```toml
-[dependencies]
-rusty_sat_core = { path = "path/to/satpy/crates/rusty_sat_core" }
-rusty_sat_readers = { path = "path/to/satpy/crates/rusty_sat_readers" }
-rusty_sat_writers = { path = "path/to/satpy/crates/rusty_sat_writers" }
-```
-
-Testing requires AHI HSD data files. Set `AHI_DATA_DIR` if not at the default location.
-
----
-
-## Usage
-
-### Load and Save a Single Band
+### Example: Load and Calibrate AHI Data
 
 ```rust
-use rusty_sat_readers::{
-    AhiHsdFileHandler, AhiHsdReader, AhiCalibration, AhiSegmentInfo, Reader,
-};
+use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, Reader};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
+use std::path::Path;
 
 fn main() -> rusty_sat_core::Result<()> {
-    // Open all 10 segments of B03 (0.64 μm, 0.5 km resolution)
-    let handlers: Vec<_> = (1..=10)
-        .map(|seg| {
-            AhiHsdFileHandler::from_path(
-                format!("data/HS_H09_20250923_0720_B03_FLDK_R05_S{seg:02}10.DAT.bz2"),
-                "hsd_b03",
-                AhiSegmentInfo::new(seg, 10)?,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // Load AHI HSD segment files
+    let handlers: Vec<AhiHsdFileHandler> = vec![
+        AhiHsdFileHandler::from_path("HS_H09_20250923_0720_B03_FLDK_R05_S0110.DAT.bz2", "hsd_b03", seg_info)?,
+        // ... additional segments
+    ];
 
-    // Reader with reflectance calibration (Counts → Radiance → Reflectance %)
+    // Create reader with calibration mode
     let reader = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)?;
-    let id = reader.available_dataset_ids().first().cloned().unwrap();
-    let dataset = reader.load(&id)?; // Assembles 10 segments → [22000, 22000] f32
 
-    // Save as auto-stretched 8-bit PNG
-    SimpleImageWriter::default().save_dataset(&dataset, "B03_reflectance.png")?;
+    // Load dataset
+    let dataset = reader.load(&reader.available_dataset_ids()[0])?;
+
+    // Save as PNG
+    SimpleImageWriter::default().save_dataset(&dataset, "output.png")?;
+
     Ok(())
 }
 ```
 
-### Infrared Calibration
-
-```rust
-let reader = AhiHsdReader::with_calibration(
-    AhiCalibration::BrightnessTemperature,  // Counts → Radiance → BT (Kelvin)
-    handlers,
-)?;
-let bt = reader.load(&id)?; // values in ~200–320 K range
-```
-
-### User Calibration
-
-```rust
-use rusty_sat_readers::{AhiUserCalibration, AhiUserCalibrationCoefficients};
-
-// Radiance correction: (radiance - offset) / slope
-let corrected = handler.with_user_calibration(
-    AhiUserCalibration::radiance_correction([(
-        "B04",
-        AhiUserCalibrationCoefficients { slope: 0.95, offset: -0.1 },
-    )])?,
-);
-
-// Digital Number mode: count × slope + offset
-let dn = handler.with_user_calibration(
-    AhiUserCalibration::digital_number([(
-        "B04",
-        AhiUserCalibrationCoefficients { slope: -0.0032, offset: 15.20 },
-    )])?,
-);
-```
-
-### RGB Compositing
+### Example: RGB Composite
 
 ```rust
 use rusty_sat_composites::RgbCompositor;
+use rusty_sat_core::{Dataset, DataId};
 
-let rgb = RgbCompositor::new("true_color")?
-    .compose_rgb_owned(vec![red_dataset, green_dataset, blue_dataset])?;
-// rgb has shape [3, height, width], mode="RGB"
+// Assume band1, band2, band3 are loaded single-band datasets
+let compositor = RgbCompositor::new("true_color");
+let rgb_dataset = compositor.compose(&[band1, band2, band3])?;
+
+// rgb_dataset is now a [3, y, x] array ready for display
 ```
 
-### Resample to Target Grid
+### Example: Resampling
 
 ```rust
-use rusty_sat_resample::{
-    resample_dataset_from_attrs, ResampleOptions, AreaDefinition,
-};
+use rusty_sat_resample::{resample_dataset, NearestAreaResampler, AreaDefinition};
 
-let target = AreaDefinition::new("euro_1km", 2000, 3000)?;
-let resampled = resample_dataset_from_attrs(
-    &dataset,
-    &target,
-    ResampleOptions::nearest_area().with_radius_of_influence(5000.0)?,
+let target_area = AreaDefinition::from_extent(
+    "target", projection, extent, resolution
 )?;
-```
 
----
+let resampled = resample_dataset(&dataset, &target_area, Default::default())?;
+```
 
 ## Architecture
 
-### Compile-Time Dependency Graph
-
-All crates depend on `rusty_sat_core` as the foundation. `core` has zero internal dependencies.
+Rusty Sat is organized as a Cargo workspace with 8 crates:
 
 ```
-                            ┌─────────┐
-                            │   CLI   │
-                            └────┬────┘
-                                 │ (core only)
-                            ┌────▼────┐
-                            │  core   │  ← DataId, Dataset, Scene, DataArray, error types
-                            └────┬────┘
-         ┌──────────────────────┼──────────────────────┐
-         │                      │                      │
-    ┌────▼────┐           ┌────▼────┐           ┌────▼────┐
-    │ config  │           │resample │           │ readers │
-    │─────────│           │─────────│           │─────────│
-    │core     │           │core     │           │core     │
-    └─────────┘           └───┬─────┘           └─────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        rusty_sat_cli                        │
+│                         (entry point)                       │
+└─────────────────────────────────────────────────────────────┘
                               │
-                        ┌─────▼─────┐
-                        │   image   │
-                        │───────────│
-                        │core       │
-                        └─────┬─────┘
-                   ┌──────────┴──────────┐
-                   │                     │
-              ┌────▼──────┐        ┌─────▼──────┐
-              │composites │        │  writers   │
-              │───────────│        │────────────│
-              │core+image │        │core+image  │
-              └───────────┘        │+resample   │
-                                   └────────────┘
+┌─────────────────────────────┼─────────────────────────────┐
+│                             ▼                             │
+│                      rusty_sat_core                       │
+│              (DataId, Dataset, Scene, Error)               │
+└─────────────────────────────┬─────────────────────────────┘
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       ▼                      ▼                      ▼
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│   readers    │      │   resample   │      │   config     │
+│ (file I/O)   │      │ (geometry)   │      │ (YAML cfg)   │
+└──────────────┘      └──────┬───────┘      └──────────────┘
+                             │
+       ┌─────────────────────┼─────────────────────┐
+       ▼                     ▼                     ▼
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│    image     │      │  composites  │      │   writers    │
+│ (enhance)    │      │ (combine)    │      │ (output)     │
+└──────────────┘      └──────────────┘      └──────────────┘
 ```
 
-### Runtime Data Flow
-
+**Data Flow:**
 ```
-  ┌─────────┐      ┌─────────┐      ┌──────────┐      ┌───────────┐      ┌─────────┐
-  │  Files  │ ───→ │ Readers │ ───→ │  Scene   │ ───→ │Composites │ ───→ │ Writers │
-  │(.DAT,   │      │(ahi_hsd,│      │(core)    │      │/Resample  │      │(PNG,    │
-  │ .nc,    │      │ ahi_l2) │      │Dataset集 │      │           │      │GeoTIFF) │
-  │ .bz2)   │      └─────────┘      │合+依賴圖  │      └─────┬─────┘      └─────────┘
-  └─────────┘                       └──────────┘            │
-                                                      ┌────▼────┐
-                                                      │  Image  │
-                                                      │增强/拉伸 │
-                                                      └─────────┘
+Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image → Writers (PNG, GeoTIFF)
 ```
 
-1. **Readers** parse satellite data files into typed `Dataset` objects (with `DataArray<T>` + coordinates + masks)
-2. **Scene** (in core) holds datasets, manages a dependency graph, and plans what to load/compute
-3. **Composites/Resample** transform datasets (RGB combination, spatial regridding)
-4. **Image** applies enhancement operations (contrast stretch, gamma correction)
-5. **Writers** serialize to disk (PNG, GeoTIFF, PGM, JPEG)
+### Crate Desstractions
 
-For detailed crate-level documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+| Crate | Purpose | Key Types |
+|-------|---------|-----------|
+| `rusty_sat_core` | Foundation types, dataset model, scene orchestration | `DataId`, `Dataset`, `Scene`, `RustySatError` |
+| `rusty_sat_readers` | File format parsers and data loaders | `Reader` trait, `AhiHsdReader`, `NetCdfFileHandler` |
+| `rusty_sat_resample` | Spatial resampling algorithms | `AreaDefinition`, `NearestAreaResampler`, `BilinearAreaResampler` |
+| `rusty_sat_composites` | Image compositing and enhancement | `RgbCompositor`, `ArithmeticCompositor`, `EnhancementExecutor` |
+| `rusty_sat_image` | Image buffer management | `FloatImage`, `ValidityMask` |
+| `rusty_sat_writers` | File output serializers | `SimpleImageWriter`, `FloatTiffWriter`, `PgmWriter` |
+| `rusty_sat_modifiers` | Atmospheric and geometric corrections | `RayleighCorrector`, angle computation |
+| `rusty_sat_config` | YAML configuration loading | `AppConfig`, area definitions |
+| `rusty_sat_cli` | Command-line interface (skeleton) | `main()` |
 
----
+## Current Capabilities
 
-## Crates
+### Readers
 
-| Crate | LOC | Description |
-|-------|-----|-------------|
-| [`rusty_sat_core`](crates/rusty_sat_core/) | ~2,400 | Foundation: `DataId`, `Dataset`, `Scene`, `DataArray<T>`, `AnyDataArray`, `ValidityMask`, dependency graph |
-| [`rusty_sat_config`](crates/rusty_sat_config/) | ~50 | YAML config search path, loading, and deep-merge |
-| [`rusty_sat_readers`](crates/rusty_sat_readers/) | ~5,500 | Satellite data readers: AHI HSD, AHI L2 NC, NetCDF, YAML reader config, filename patterns |
-| [`rusty_sat_resample`](crates/rusty_sat_resample/) | ~3,500 | Spatial resampling: nearest, bilinear, EWA, native, bucket, KD-tree spatial index |
-| [`rusty_sat_composites`](crates/rusty_sat_composites/) | ~2,500 | RGB compositing, spectral blending, arithmetic compositing, YAML config parsing |
-| [`rusty_sat_image`](crates/rusty_sat_image/) | ~1,700 | Image types (`Image`, `Image16`, `FloatImage<T>`), enhancement operations |
-| [`rusty_sat_writers`](crates/rusty_sat_writers/) | ~1,100 | Output: PNG, GeoTIFF (with GeoKeys), PGM, JPEG |
-| [`rusty_sat_cli`](crates/rusty_sat_cli/) | ~10 | CLI binary scaffold |
+- **AHI HSD** — Himawari-8/9 Advanced Himawari Imager (full production reader)
+  - Header parsing, multi-segment assembly, bzip2 decompression
+  - Visible/IR calibration with f32 display and f64 scientific output
+  - Geostationary navigation and area metadata
 
----
+- **AHI NetCDF** — Himawari NetCDF format
+  - Groups, variables, global attrs, scale/offset handling
+  - Valid-range/fill masking
 
-## Supported Sensors
+- **FCI L1C** — Meteosat Third Generation (fixture-backed)
+  - Measured-channel counts loading
+  - Scene load integration
 
-| Sensor | Platform | Reader | Status |
-|--------|----------|--------|--------|
-| AHI (Advanced Himawari Imager) | Himawari-8/9 | `ahi_hsd` | ✅ All 16 bands, 0.5/1/2 km, segment assembly |
-| AHI L2 Cloud Products | Himawari-8/9 | `ahi_l2_nc` | ✅ Cloud mask/type/height, 31 products |
-| FCI (Flexible Combined Imager) | MTG-I1 | `fci_l1c_nc` | 🚧 Measured-channel loading |
+- **Text Grid** — Simple text-based data
+- **YAML Reader** — Metadata-driven configuration
 
----
+### Resampling
 
-## Supported Output Formats
+| Method | Source → Target | Use Case |
+|--------|-----------------|----------|
+| Nearest | Area/Swath → Area | Fast interpolation, categorical data |
+| Bilinear | Area → Area | Smooth interpolation |
+| EWA | Swath → Area | High-quality swath projection |
+| Native | Area → Area | Repeat/aggregate at native resolution |
+| Bucket | Swath → Area | Average/sum/count/fraction aggregation |
 
-| Format | Bit Depth | Channels | Georeferencing |
-|--------|-----------|----------|----------------|
-| PNG | 8-bit | Grayscale | — |
-| PNG | 16-bit | Grayscale | — |
-| GeoTIFF | float32 | Grayscale | ✅ Full GeoKeys |
-| GeoTIFF | float64 | Grayscale | ✅ Full GeoKeys |
-| GeoTIFF | uint16 (scaled) | Grayscale | ✅ Full GeoKeys |
-| PGM | 8/16-bit | Grayscale | — |
-| JPEG | 8-bit | Grayscale | — |
+### Composites
 
----
+- **RGB Compositor** — 3 bands → true/false color
+- **Arithmetic Compositor** — NDVI, difference, ratio, sum
+- **Spectral Blender** — weighted band combination
+- **Band Replacement** — patch corrected channels into composites
 
-## Roadmap
+### Image Processing
 
-Detailed milestones in [AGENTS.md](AGENTS.md). Highlights:
+- **FloatImage<f32/f64>** — precision-aware image buffers
+- **Auto-stretch** — percentile-based normalization
+- **Gamma/Invert** — tone curve adjustments
+- **ValidityMask** — bit-packed missing pixel tracking
 
-- [x] **M3-reader-a**: AHI HSD binary header parsing + calibration
-- [x] **M7-AHI-prod-e1**: AHI L2 NetCDF metadata, Scene integration, PNG/GeoTIFF output
-- [ ] **Composites wiring**: Connect `RgbCompositor` to YAML config + Scene + CLI
-- [ ] **True color**: B01+B02+B03 → RGB with Rayleigh correction
-- [ ] **CLI v0.1**: Functional command-line interface
-- [ ] **More readers**: VIIRS, MODIS, SEVIRI, FCI, OLCI
-- [ ] **COG writer**: Cloud-Optimized GeoTIFF with overview pyramids
+### Modifiers
 
----
+- **Rayleigh Correction** — atmospheric scattering removal
+  - Pyspectral-compatible LUT loading
+  - Parallel pixel interpolation
+  - Cloud relaxation and high-zenith handling
+
+### Writers
+
+| Format | Bit Depth | Features |
+|--------|-----------|----------|
+| PNG | 8-bit, 16-bit grayscale | Auto-stretch from float |
+| JPEG | 8-bit | Lossy compression |
+| GeoTIFF | f32, f64, u16 | GeoKey georeferencing, Deflate, tiling |
+| PGM | 8-bit, 16-bit | Portable GrayMap |
+
+## What's Next
+
+Rusty Sat is under active development. Current focus areas:
+
+- **Broader reader support** — Expanding beyond AHI to ABI, AMI, SEVIRI, VIIRS, MODIS
+- **Advanced compositing** — Mask-aware composites, resolution blending, lookup tables
+- **CLI tool** — Full command-line interface for batch processing
+- **Lazy evaluation** — Chunked arrays for memory-efficient large dataset processing
+
+See [AGENTS.md](AGENTS.md) for the complete roadmap with 337 tracked features.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
-Quick checklist before PR:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
-```
-
-Workspace lint rules:
-- `forbid(unsafe_code)` — no unsafe Rust anywhere
-- `deny(unwrap_used)` — use `?` with proper error types
-- `deny(dbg_macro)` — no debug prints committed
-- `deny(todo)` — no half-finished implementations
-
----
+- Development environment setup
+- Coding standards and lints
+- Pull request workflow
+- Commit message conventions
 
 ## License
 
-GPL-3.0-only.
+This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for details.
 
-This is a ground-up Rust reimplementation inspired by [Satpy](https://github.com/pytroll/satpy) (also GPL). 
+## Acknowledgments
+
+Rusty Sat is a Rust rewrite of the Python [Satpy](https://github.com/pytroll/satpy) library, part of the [PyTroll](https://pytroll.github.io/) ecosystem. We gratefully acknowledge the Satpy maintainers for their excellent reference implementation.
+
+---
+
+**Note:** Rusty Sat is under active development. APIs may change before v1.0. Contributions and feedback are welcome!
