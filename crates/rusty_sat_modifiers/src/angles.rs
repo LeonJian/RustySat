@@ -159,89 +159,121 @@ impl AngleParams {
 
     /// Compute all four angles for this parameter set.
     ///
-    /// This is the main entry point for angle computation. It fuses
-    /// projection inverse, solar, and satellite angle computation into a
-    /// single parallel pass, using precomputed time-dependent constants to
-    /// avoid redundant work per pixel.
-    ///
     /// Consumes `self`, freeing the projection coordinate arrays when done.
     pub fn compute_angles(self) -> AngleSet {
-        let width = self.width;
-        let height = self.height;
-        let n = width * height;
-
-        // Precompute time-dependent constants once for the entire grid.
         let gmst_val = gmst(self.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(self.utc);
         let sat_alt_km = self.sat_alt / 1000.0;
         let (sat_x, sat_y, sat_z) =
             observer_position(self.utc, self.sat_lon, self.sat_lat, sat_alt_km);
 
-        let mut sun_azimuth = vec![f64::NAN; n];
-        let mut sun_zenith = vec![f64::NAN; n];
-        let mut sat_zenith = vec![f64::NAN; n];
-        let mut sat_azimuth = vec![f64::NAN; n];
+        compute_angles_strip(
+            &self.geos,
+            &self.x_coords,
+            &self.y_coords,
+            0,
+            self.height,
+            self.width,
+            gmst_val,
+            sun_ra,
+            sun_dec,
+            sat_x,
+            sat_y,
+            sat_z,
+        )
+    }
+}
 
-        if n > 10_000 {
-            use rayon::prelude::*;
-            sun_zenith
-                .par_chunks_mut(width)
-                .zip(sun_azimuth.par_chunks_mut(width))
-                .zip(sat_zenith.par_chunks_mut(width))
-                .zip(sat_azimuth.par_chunks_mut(width))
-                .enumerate()
-                .for_each(|(row, (((zen_row, azi_row), sz_row), sa_row))| {
-                    let y = self.y_coords[row];
-                    for col in 0..width {
-                        let x = self.x_coords[col];
-                        let Some((lon, lat)) = self.geos.inverse(x, y) else {
-                            zen_row[col] = f64::NAN;
-                            azi_row[col] = f64::NAN;
-                            sz_row[col] = f64::NAN;
-                            sa_row[col] = f64::NAN;
-                            continue;
-                        };
-                        let (sunz, suna) =
-                            solar_zenith_azimuth(lon, lat, sun_ra, sun_dec, gmst_val);
-                        let (satzv, satav) =
-                            satellite_zenith_azimuth(lon, lat, sat_x, sat_y, sat_z, gmst_val);
-                        zen_row[col] = sunz;
-                        azi_row[col] = suna;
-                        sz_row[col] = satzv;
-                        sa_row[col] = satav;
-                    }
-                });
-        } else {
-            for row in 0..height {
-                let y = self.y_coords[row];
-                for col in 0..width {
-                    let x = self.x_coords[col];
-                    let Some((lon, lat)) = self.geos.inverse(x, y) else {
-                        let idx = row * width + col;
-                        sun_zenith[idx] = f64::NAN;
-                        sun_azimuth[idx] = f64::NAN;
-                        sat_zenith[idx] = f64::NAN;
-                        sat_azimuth[idx] = f64::NAN;
+/// Compute angles for a range of rows (y0..y1), returning strip-sized arrays.
+///
+/// This is the workhorse called by both `compute_angles` (full grid) and
+/// by the strip-based correction loop (Phase 2).
+///
+/// `y0` and `y1` define the row range (y1 exclusive).
+/// `width` is the full grid width.
+/// All time-dependent constants (`gmst_val`, `sun_ra`/`sun_dec`, satellite
+/// ECI position) must be precomputed once by the caller.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_angles_strip(
+    geos: &GeosProjection,
+    x_coords: &[f64],
+    y_coords: &[f64],
+    y0: usize,
+    y1: usize,
+    width: usize,
+    gmst_val: f64,
+    sun_ra: f64,
+    sun_dec: f64,
+    sat_x: f64,
+    sat_y: f64,
+    sat_z: f64,
+) -> AngleSet {
+    let strip_h = y1 - y0;
+    let n = strip_h * width;
+
+    let mut sun_azimuth = vec![f64::NAN; n];
+    let mut sun_zenith = vec![f64::NAN; n];
+    let mut sat_zenith = vec![f64::NAN; n];
+    let mut sat_azimuth = vec![f64::NAN; n];
+
+    if n > 10_000 {
+        use rayon::prelude::*;
+        sun_zenith
+            .par_chunks_mut(width)
+            .zip(sun_azimuth.par_chunks_mut(width))
+            .zip(sat_zenith.par_chunks_mut(width))
+            .zip(sat_azimuth.par_chunks_mut(width))
+            .enumerate()
+            .for_each(|(local_row, (((zen_row, azi_row), sz_row), sa_row))| {
+                let row = y0 + local_row;
+                let y = y_coords[row];
+                for (col, &x) in x_coords.iter().enumerate() {
+                    let Some((lon, lat)) = geos.inverse(x, y) else {
+                        zen_row[col] = f64::NAN;
+                        azi_row[col] = f64::NAN;
+                        sz_row[col] = f64::NAN;
+                        sa_row[col] = f64::NAN;
                         continue;
                     };
                     let (sunz, suna) = solar_zenith_azimuth(lon, lat, sun_ra, sun_dec, gmst_val);
                     let (satzv, satav) =
                         satellite_zenith_azimuth(lon, lat, sat_x, sat_y, sat_z, gmst_val);
-                    let idx = row * width + col;
-                    sun_zenith[idx] = sunz;
-                    sun_azimuth[idx] = suna;
-                    sat_zenith[idx] = satzv;
-                    sat_azimuth[idx] = satav;
+                    zen_row[col] = sunz;
+                    azi_row[col] = suna;
+                    sz_row[col] = satzv;
+                    sa_row[col] = satav;
                 }
+            });
+    } else {
+        for local_row in 0..strip_h {
+            let row = y0 + local_row;
+            let y = y_coords[row];
+            for (col, &x) in x_coords.iter().enumerate() {
+                let Some((lon, lat)) = geos.inverse(x, y) else {
+                    let idx = local_row * width + col;
+                    sun_zenith[idx] = f64::NAN;
+                    sun_azimuth[idx] = f64::NAN;
+                    sat_zenith[idx] = f64::NAN;
+                    sat_azimuth[idx] = f64::NAN;
+                    continue;
+                };
+                let (sunz, suna) = solar_zenith_azimuth(lon, lat, sun_ra, sun_dec, gmst_val);
+                let (satzv, satav) =
+                    satellite_zenith_azimuth(lon, lat, sat_x, sat_y, sat_z, gmst_val);
+                let idx = local_row * width + col;
+                sun_zenith[idx] = sunz;
+                sun_azimuth[idx] = suna;
+                sat_zenith[idx] = satzv;
+                sat_azimuth[idx] = satav;
             }
         }
+    }
 
-        AngleSet {
-            sat_azimuth,
-            sat_zenith,
-            sun_azimuth,
-            sun_zenith,
-        }
+    AngleSet {
+        sat_azimuth,
+        sat_zenith,
+        sun_azimuth,
+        sun_zenith,
     }
 }
 

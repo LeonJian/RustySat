@@ -23,15 +23,18 @@
 //!
 //! ## Memory strategy
 //!
-//! - Angle arrays are allocated once and reused.
+//! - Time-dependent astronomical constants are precomputed once per correction.
+//! - Angle computation, LUT interpolation, cloud/high-zenith correction,
+//!   and subtraction are performed in row strips (64 rows by default).
+//!   Strip-sized buffers are allocated and freed per iteration, keeping
+//!   peak memory proportional to ~5 GB for a full-disk AHI B03 image
+//!   (vs ~23 GB for the previous full-array approach).
 //! - The 4D LUT coordinate arrays are extracted (moved out) before the
 //!   reflectance buffer is consumed by wavelength selection.
-//! - The 3D wavelength-adjusted slice is dropped before the final subtraction.
-//! - The correction array is freed immediately after the subtraction.
-//! - Parallel processing via rayon for large grids (>10k pixels).
+//! - Parallel processing via rayon for large grids (>10k pixels per strip).
 
-use crate::angles::AngleSet;
-use crate::astronomy::UtcInstant;
+use crate::angles::compute_angles_strip;
+use crate::astronomy::{gmst, observer_position, sun_ra_dec, UtcInstant};
 use crate::rayleigh_lut::RayleighLut;
 use rusty_sat_core::{DataArray, DataId, Dataset, MetadataValue, Result, RustySatError};
 
@@ -151,99 +154,107 @@ impl RayleighCorrector {
     /// `PSPRayleighReflectance.__call__`.
     ///
     /// Consumes the visible dataset and returns the corrected dataset.
-    /// The correction is computed and subtracted in-place.
+    /// The correction is computed in row strips to keep peak memory low.
     ///
     /// - `vis_dataset`: visible-band reflectance dataset (owned, consumed)
     /// - `red_dataset`: optional red-band reflectance for cloud relaxation
-    /// - `sun_zenith`, `sat_zenith`, `sun_azimuth`, `sat_azimuth`:
-    ///   pre-computed angle arrays (owned, consumed; `sat_zenith`,
-    ///   `sun_azimuth`, `sat_azimuth` are freed early after LUT interpolation
-    ///   to reduce peak memory)
+    /// - `params`: angle computation parameters (projection, coords, time);
+    ///   consumed to compute angles per strip
     /// - `wavelength_nm`: central wavelength of the visible band (nm)
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_correction(
         self,
         vis_dataset: Dataset,
         red_dataset: Option<&Dataset>,
-        sun_zenith: Vec<f64>,
-        sat_zenith: Vec<f64>,
-        sun_azimuth: Vec<f64>,
-        sat_azimuth: Vec<f64>,
+        params: crate::angles::AngleParams,
         wavelength_nm: f64,
     ) -> Result<Dataset> {
         let config = self.config;
 
-        // Extract coordinate arrays from the LUT *before* consuming the
-        // reflectance buffer.  This avoids keeping the full 4D array alive
-        // longer than necessary.
         let sun_zenith_secant = self.lut.sun_zenith_secant.clone();
         let azimuth_difference = self.lut.azimuth_difference.clone();
         let satellite_zenith_secant = self.lut.satellite_zenith_secant.clone();
 
-        // Step 1: Wavelength selection — consumes the 4D reflectance buffer.
         let lut_3d = self.lut.into_wavelength_adjusted(wavelength_nm)?;
-
-        // If LUT is empty (out-of-range wavelength), return the original
-        // values unchanged (matching pyspectral's zero-correction behavior).
         if lut_3d.is_empty() {
             return rebuild_dataset(vis_dataset, "rayleigh_corrected");
         }
 
-        // Extract visible reflectance values as f64 (consuming the array).
         let array = vis_dataset
             .into_array()
             .ok_or_else(|| RustySatError::invalid_input("visible dataset has no array data"))?;
         let (height, width) = array.shape_yx()?;
         let (mut vis_values, mask) = array.into_f64_values_and_mask();
 
-        // Extract red band reflectance if available.
         let red_values: Option<Vec<f64>> =
             red_dataset.map(|ds| ds.array().map(|a| a.values_as_f64()).unwrap_or_default());
 
-        // Step 2: Interpolate the LUT for each pixel (parallel).
-        let mut refl_cor = RayleighLut::interpolate_pixels_parallel(
-            &lut_3d,
-            &sun_zenith_secant,
-            &azimuth_difference,
-            &satellite_zenith_secant,
-            &sun_zenith,
-            &sat_zenith,
-            &sun_azimuth,
-            &sat_azimuth,
-        );
+        // Precompute time-dependent constants once for the entire grid.
+        let gmst_val = gmst(params.utc);
+        let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
+        let sat_alt_km = params.sat_alt / 1000.0;
+        let (sat_x, sat_y, sat_z) =
+            observer_position(params.utc, params.sat_lon, params.sat_lat, sat_alt_km);
 
-        // The 3D LUT is no longer needed — drop it explicitly.
+        const STRIP_HEIGHT: usize = 64;
+
+        for y0 in (0..height).step_by(STRIP_HEIGHT) {
+            let y1 = (y0 + STRIP_HEIGHT).min(height);
+            let strip_n = (y1 - y0) * width;
+
+            // 1. Compute angles for this strip
+            let strip_angles = compute_angles_strip(
+                &params.geos,
+                &params.x_coords,
+                &params.y_coords,
+                y0,
+                y1,
+                width,
+                gmst_val,
+                sun_ra,
+                sun_dec,
+                sat_x,
+                sat_y,
+                sat_z,
+            );
+
+            // 2. LUT interpolation
+            let mut refl_cor = RayleighLut::interpolate_pixels_parallel(
+                &lut_3d,
+                &sun_zenith_secant,
+                &azimuth_difference,
+                &satellite_zenith_secant,
+                &strip_angles.sun_zenith,
+                &strip_angles.sat_zenith,
+                &strip_angles.sun_azimuth,
+                &strip_angles.sat_azimuth,
+            );
+
+            // 3. Cloud relaxation (strip slice)
+            if let Some(ref red) = red_values {
+                let offset = y0 * width;
+                relax_cloudy_correction(&red[offset..offset + strip_n], &mut refl_cor);
+            }
+
+            // 4. High-zenith reduction
+            if config.reduce_strength > 0.0 {
+                reduce_high_zenith(
+                    &strip_angles.sun_zenith,
+                    &mut refl_cor,
+                    config.reduce_lim_low,
+                    config.reduce_lim_high,
+                    config.reduce_strength,
+                );
+            }
+
+            // 5. Subtract correction in-place on vis_values strip
+            let offset = y0 * width;
+            subtract_correction(&mut vis_values[offset..offset + strip_n], &refl_cor);
+
+            // Strip buffers dropped here → memory freed
+        }
+
         drop(lut_3d);
 
-        // Step 3: Optionally relax correction where cloudy.
-        if let Some(ref red_vals) = red_values {
-            relax_cloudy_correction(red_vals, &mut refl_cor);
-        }
-
-        // Free angle arrays no longer needed after LUT interpolation;
-        // only sun_zenith is still required for high-zenith reduction.
-        drop(sat_zenith);
-        drop(sun_azimuth);
-        drop(sat_azimuth);
-
-        // Step 4: Optionally reduce at high zenith.
-        if config.reduce_strength > 0.0 {
-            reduce_high_zenith(
-                &sun_zenith,
-                &mut refl_cor,
-                config.reduce_lim_low,
-                config.reduce_lim_high,
-                config.reduce_strength,
-            );
-        }
-
-        // Step 5: Subtract correction from visible reflectance (in-place, parallel).
-        subtract_correction(&mut vis_values, &refl_cor);
-
-        // The correction array is freed here.
-        drop(refl_cor);
-
-        // Build the output dataset.
         let mut result_array =
             DataArray::<f64>::from_vec_named(vec![height, width], vec!["y", "x"], vis_values)?;
 
@@ -432,28 +443,13 @@ pub fn rayleigh_correct(
 
     let (x_coords, y_coords) = extract_xy_coords(coords)?;
     let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
-    let AngleSet {
-        sun_zenith,
-        sat_zenith,
-        sun_azimuth,
-        sat_azimuth,
-    } = params.compute_angles();
 
-    corrector.apply_correction(
-        vis_dataset,
-        red_dataset,
-        sun_zenith,
-        sat_zenith,
-        sun_azimuth,
-        sat_azimuth,
-        wavelength_nm,
-    )
+    corrector.apply_correction(vis_dataset, red_dataset, params, wavelength_nm)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::angles::AngleSet;
 
     fn make_test_lut() -> RayleighLut {
         let wavelengths = vec![631.0, 636.0];
@@ -489,21 +485,36 @@ mod tests {
         }
     }
 
-    fn make_angles(n: usize) -> AngleSet {
-        AngleSet {
-            sat_azimuth: vec![180.0; n],
-            sat_zenith: vec![10.0; n],
-            sun_azimuth: vec![0.0; n],
-            sun_zenith: vec![40.0; n],
-        }
-    }
-
     fn make_vis_ds(values: Vec<f64>) -> Dataset {
         let n = values.len();
         let side = (n as f64).sqrt() as usize;
         let array = DataArray::<f64>::from_vec_named(vec![side, side], vec!["y", "x"], values)
             .expect("valid test array");
         Dataset::new(DataId::new("B03").expect("valid DataId")).with_array(array)
+    }
+
+    fn make_test_params(side: usize) -> crate::angles::AngleParams {
+        let geos = crate::geos::GeosProjection {
+            semi_major_axis: 6_378_137.0,
+            semi_minor_axis: 6_378_137.0,
+            perspective_point_height: 35_785_863.0,
+            longitude_of_projection_origin: 0.0,
+        };
+        let h = geos.perspective_point_height;
+        let step = h * 1.0_f64.to_radians() / side.max(1) as f64;
+        let x_coords: Vec<f64> = (0..side).map(|i| i as f64 * step).collect();
+        let y_coords: Vec<f64> = (0..side).map(|i| i as f64 * step).collect();
+        crate::angles::AngleParams {
+            sat_lon: 0.0,
+            sat_lat: 0.0,
+            sat_alt: h,
+            utc: crate::astronomy::UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0),
+            width: side,
+            height: side,
+            geos,
+            x_coords,
+            y_coords,
+        }
     }
 
     #[test]
@@ -533,22 +544,9 @@ mod tests {
         let lut = make_test_lut();
         let corrector = RayleighCorrector::new(lut);
         let vis_ds = make_vis_ds(vec![50.0; 4]);
-        let AngleSet {
-            sun_zenith,
-            sat_zenith,
-            sun_azimuth,
-            sat_azimuth,
-        } = make_angles(4);
+        let params = make_test_params(2);
         let result = corrector
-            .apply_correction(
-                vis_ds,
-                None,
-                sun_zenith,
-                sat_zenith,
-                sun_azimuth,
-                sat_azimuth,
-                634.0,
-            )
+            .apply_correction(vis_ds, None, params, 634.0)
             .expect("correction should succeed");
         let vals = result
             .array()
@@ -566,22 +564,9 @@ mod tests {
         let red_array = DataArray::<f64>::from_vec_named(vec![2, 2], vec!["y", "x"], vec![80.0; 4])
             .expect("valid red array");
         let red_ds = Dataset::new(DataId::new("B02").expect("valid DataId")).with_array(red_array);
-        let AngleSet {
-            sun_zenith,
-            sat_zenith,
-            sun_azimuth,
-            sat_azimuth,
-        } = make_angles(4);
+        let params = make_test_params(2);
         let result = corrector
-            .apply_correction(
-                vis_ds,
-                Some(&red_ds),
-                sun_zenith,
-                sat_zenith,
-                sun_azimuth,
-                sat_azimuth,
-                634.0,
-            )
+            .apply_correction(vis_ds, Some(&red_ds), params, 634.0)
             .expect("correction with red band should succeed");
         let vals = result
             .array()
@@ -595,22 +580,9 @@ mod tests {
         let lut = make_test_lut();
         let corrector = RayleighCorrector::new(lut);
         let vis_ds = make_vis_ds(vec![50.0; 4]);
-        let AngleSet {
-            sun_zenith,
-            sat_zenith,
-            sun_azimuth,
-            sat_azimuth,
-        } = make_angles(4);
+        let params = make_test_params(2);
         let result = corrector
-            .apply_correction(
-                vis_ds,
-                None,
-                sun_zenith,
-                sat_zenith,
-                sun_azimuth,
-                sat_azimuth,
-                1200.0,
-            )
+            .apply_correction(vis_ds, None, params, 1200.0)
             .expect("correction should succeed");
         let vals = result
             .array()
