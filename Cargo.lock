@@ -386,6 +386,7 @@ dependencies = [
  "regex",
  "rusty_sat_composites",
  "rusty_sat_core",
+ "rusty_sat_image",
  "rusty_sat_modifiers",
  "rusty_sat_resample",
  "rusty_sat_writers",

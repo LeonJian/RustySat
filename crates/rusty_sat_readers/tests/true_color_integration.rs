@@ -1,11 +1,13 @@
 //! Integration test: Himawari AHI True Color RGB reproduction.
 //!
 //! Validates the full true-color pipeline:
-//! 1. Load B01 (blue), B02 (green), B03 (red) from real HSD data
-//! 2. Calibrate all three to reflectance
-//! 3. Resample B01/B02 from 1km to B03's 0.5km resolution
-//! 4. Compose RGB via `RgbCompositor`
-//! 5. Save 8-bit and 16-bit color PNG
+//! 1. Load B01 (blue), B02, B03 (red), B04 from real HSD data
+//! 2. Calibrate all to reflectance
+//! 3. Create hybrid green: SpectralBlender 0.85×B02 + 0.15×B04
+//! 4. Resample B01 and hybrid_green to B03's 0.5km resolution
+//! 5. Compose RGB via RgbCompositor (R=B03, G=hybrid_green, B=B01)
+//! 6. Apply gamma 2.0 per channel + crude stretch
+//! 7. Save 8-bit and 16-bit color PNG
 //!
 //! Requires HSD data files at `local_data/ahi_input/data/20250923/07/`
 //! (relative to workspace root). Override with `AHI_DATA_DIR` env var.
@@ -15,8 +17,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use rusty_sat_composites::RgbCompositor;
+use rusty_sat_composites::{RgbCompositor, SpectralBlender};
 use rusty_sat_core::{AnyDataArray, MetadataValue};
+use rusty_sat_image::FloatImage;
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader};
 use rusty_sat_resample::{area_from_metadata_value, resample_dataset_from_attrs, ResampleOptions};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
@@ -122,7 +125,7 @@ fn himawari_true_color_reproduction() {
     let out = output_dir();
     let files_by_band = scan_hsd_files(&dir);
 
-    // Require B01, B02, B03
+    // Require B01, B02, B03, B04
     let Some(b01_files) = files_by_band.get("B01").cloned() else {
         eprintln!("SKIP: B01 not in test data");
         return;
@@ -135,14 +138,19 @@ fn himawari_true_color_reproduction() {
         eprintln!("SKIP: B03 not in test data");
         return;
     };
+    let Some(b04_files) = files_by_band.get("B04").cloned() else {
+        eprintln!("SKIP: B04 not in test data");
+        return;
+    };
 
     eprintln!("\n=== Himawari True Color Reproduction ===\n");
 
-    // Step 1: Load bands
+    // Step 1: Load all four bands
     let t_load = Instant::now();
     let (b01, _) = load_band(&b01_files, "hsd_b01");
     let (b02, _) = load_band(&b02_files, "hsd_b02");
     let (b03, _) = load_band(&b03_files, "hsd_b03");
+    let (b04, _) = load_band(&b04_files, "hsd_b04");
     eprintln!("  Load time: {:.2}s", t_load.elapsed().as_secs_f64());
 
     // Step 2: Check shapes
@@ -170,12 +178,24 @@ fn himawari_true_color_reproduction() {
         b02_arr.shape_nd()[0],
         b02_arr.shape_nd()[1]
     );
+    eprintln!("  B04: (1.0 km)" // B04 shape matches B01/B02);
 
-    // Step 3: Get B03's area as the resample target
+    // Step 3: Create hybrid green (0.85×B02 + 0.15×B04)
+    let t_composite = Instant::now();
+    let hybrid_green = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
+        .expect("create blender")
+        .compose_owned(vec![b02, b04])
+        .expect("compose hybrid green");
+    eprintln!(
+        "  Hybrid green time: {:.2}s",
+        t_composite.elapsed().as_secs_f64()
+    );
+
+    // Step 4: Get B03's area as resample target
     let b03_area_attr = b03.attr("area").expect("B03 must have area attr");
     let b03_area = area_from_metadata_value(b03_area_attr).expect("decode area");
 
-    // Step 4: Resample B01 and B02 to B03's 0.5 km area
+    // Step 5: Resample B01 and hybrid_green to B03's 0.5km area
     let t_resample = Instant::now();
 
     let b01_resampled = if b01_arr.shape_nd()[0] == b03_h {
@@ -184,47 +204,43 @@ fn himawari_true_color_reproduction() {
         resample_dataset_from_attrs(&b01, &b03_area, ResampleOptions::native())
             .expect("resample B01")
     };
-    let b02_resampled = if b02_arr.shape_nd()[0] == b03_h {
-        b02
-    } else {
-        resample_dataset_from_attrs(&b02, &b03_area, ResampleOptions::native())
-            .expect("resample B02")
+    let green_resampled = {
+        let gh = hybrid_green.array().expect("hybrid_green array");
+        if gh.shape()[0] == b03_h {
+            hybrid_green
+        } else {
+            resample_dataset_from_attrs(&hybrid_green, &b03_area, ResampleOptions::native())
+                .expect("resample hybrid_green")
+        }
     };
     eprintln!(
         "  Resample time: {:.2}s",
         t_resample.elapsed().as_secs_f64()
     );
 
-    // Verify resampled shapes match B03
+    // Verify resampled shapes
     let r01_arr = b01_resampled.array().expect("b01 resampled array");
-    let r02_arr = b02_resampled.array().expect("b02 resampled array");
+    let rg_arr = green_resampled.array().expect("green resampled array");
     assert_eq!(
         r01_arr.shape(),
         &[b03_h, b03_w],
         "B01 resampled shape mismatch"
     );
     assert_eq!(
-        r02_arr.shape(),
+        rg_arr.shape(),
         &[b03_h, b03_w],
-        "B02 resampled shape mismatch"
-    );
-    eprintln!(
-        "  B01→{}×{}, B02→{}×{}",
-        r01_arr.shape()[0],
-        r01_arr.shape()[1],
-        r02_arr.shape()[0],
-        r02_arr.shape()[1]
+        "hybrid_green resampled shape mismatch"
     );
 
-    // Step 5: Compose RGB (R=B03, G=B02, B=B01)
+    // Step 6: Compose RGB (R=B03, G=hybrid_green, B=B01)
     let t_compose = Instant::now();
     let compositor = RgbCompositor::new("true_color").expect("create compositor");
     let rgb = compositor
-        .compose_rgb_owned(vec![b03, b02_resampled, b01_resampled])
+        .compose_rgb_owned(vec![b03, green_resampled, b01_resampled])
         .expect("compose RGB");
     eprintln!("  Compose time: {:.2}s", t_compose.elapsed().as_secs_f64());
 
-    // Step 6: Assert RGB output structure
+    // Step 7: Assert RGB output structure
     let rgb_arr = rgb.array().expect("RGB array");
     assert_eq!(rgb_arr.shape(), &[3, b03_h, b03_w], "RGB shape mismatch");
     assert_eq!(
@@ -248,11 +264,18 @@ fn himawari_true_color_reproduction() {
         rgb_arr.dtype().name()
     );
 
-    // Step 7: Save 8-bit PNG
+    // Step 8: Enhance — crude stretch + gamma 2.0 per channel, save 8-bit PNG
     let t_save = Instant::now();
+
+    let mut img8 = FloatImage::<f32>::from_rgb_dataset(&rgb).expect("create FloatImage<f32>");
+    img8.crude_stretch_in_place(None, None);
+    img8.gamma_channels_in_place(&[2.0, 2.0, 2.0])
+        .expect("gamma correct");
+    let image8 = img8.to_u8_image(0).expect("convert to u8");
+
     let png8_path = out.join("true_color.png");
     SimpleImageWriter::default()
-        .save_dataset(&rgb, &png8_path)
+        .save_image(&image8, &png8_path)
         .expect("save 8-bit PNG");
     assert!(png8_path.is_file(), "8-bit PNG file must exist");
     let size8 = std::fs::metadata(&png8_path)
@@ -261,11 +284,17 @@ fn himawari_true_color_reproduction() {
     assert!(size8 > 0, "8-bit PNG must be non-empty");
     eprintln!("  {} → {} bytes", png8_path.display(), size8);
 
-    // Step 8: Save 16-bit PNG
+    // Step 9: 16-bit PNG with gamma
+    let mut img16 = FloatImage::<f64>::from_rgb_dataset(&rgb).expect("create FloatImage<f64>");
+    img16.crude_stretch_in_place(None, None);
+    img16
+        .gamma_channels_in_place(&[2.0, 2.0, 2.0])
+        .expect("gamma correct 16-bit");
+    let image16 = img16.to_u16_image(0).expect("convert to u16");
+
     let png16_path = out.join("true_color_16.png");
     SimpleImageWriter::default()
-        .with_16_bit_dataset_output()
-        .save_dataset(&rgb, &png16_path)
+        .save_image16(&image16, &png16_path)
         .expect("save 16-bit PNG");
     assert!(png16_path.is_file(), "16-bit PNG file must exist");
     let size16 = std::fs::metadata(&png16_path)
@@ -276,7 +305,7 @@ fn himawari_true_color_reproduction() {
 
     eprintln!("  Save time: {:.2}s", t_save.elapsed().as_secs_f64());
 
-    // Step 9: Quick sanity — spot-check a few RGB pixel values
+    // Step 10: Sanity — spot-check RGB pixel values
     let vals = rgb_arr.values_as_f64();
     let mask = rgb_arr.mask();
     let mut finite_count = 0u64;
@@ -292,11 +321,14 @@ fn himawari_true_color_reproduction() {
     eprintln!("  RGB pixels: total={total}, finite={finite_count}, masked={masked_count}");
     assert!(finite_count > 0, "expected some finite RGB pixels, got 0");
 
-    let total_elapsed =
-        t_load.elapsed() + t_resample.elapsed() + t_compose.elapsed() + t_save.elapsed();
+    let total_elapsed = t_load.elapsed()
+        + t_composite.elapsed()
+        + t_resample.elapsed()
+        + t_compose.elapsed()
+        + t_save.elapsed();
     eprintln!(
         "\n  Total pipeline time: {:.2}s",
         total_elapsed.as_secs_f64()
     );
-    eprintln!("PASS: Himawari True Color reproduction");
+    eprintln!("PASS: Himawari True Color reproduction (hybrid green + gamma 2.0)");
 }
