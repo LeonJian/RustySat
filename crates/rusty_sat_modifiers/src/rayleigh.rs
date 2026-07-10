@@ -155,13 +155,20 @@ impl RayleighCorrector {
     ///
     /// - `vis_dataset`: visible-band reflectance dataset (owned, consumed)
     /// - `red_dataset`: optional red-band reflectance for cloud relaxation
-    /// - `angles`: pre-computed angle set (avoids recomputation)
+    /// - `sun_zenith`, `sat_zenith`, `sun_azimuth`, `sat_azimuth`:
+    ///   pre-computed angle arrays (owned, consumed; `sat_zenith`,
+    ///   `sun_azimuth`, `sat_azimuth` are freed early after LUT interpolation
+    ///   to reduce peak memory)
     /// - `wavelength_nm`: central wavelength of the visible band (nm)
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_correction(
         self,
         vis_dataset: Dataset,
         red_dataset: Option<&Dataset>,
-        angles: &AngleSet,
+        sun_zenith: Vec<f64>,
+        sat_zenith: Vec<f64>,
+        sun_azimuth: Vec<f64>,
+        sat_azimuth: Vec<f64>,
         wavelength_nm: f64,
     ) -> Result<Dataset> {
         let config = self.config;
@@ -199,10 +206,10 @@ impl RayleighCorrector {
             &sun_zenith_secant,
             &azimuth_difference,
             &satellite_zenith_secant,
-            &angles.sun_zenith,
-            &angles.sat_zenith,
-            &angles.sun_azimuth,
-            &angles.sat_azimuth,
+            &sun_zenith,
+            &sat_zenith,
+            &sun_azimuth,
+            &sat_azimuth,
         );
 
         // The 3D LUT is no longer needed — drop it explicitly.
@@ -213,10 +220,16 @@ impl RayleighCorrector {
             relax_cloudy_correction(red_vals, &mut refl_cor);
         }
 
+        // Free angle arrays no longer needed after LUT interpolation;
+        // only sun_zenith is still required for high-zenith reduction.
+        drop(sat_zenith);
+        drop(sun_azimuth);
+        drop(sat_azimuth);
+
         // Step 4: Optionally reduce at high zenith.
         if config.reduce_strength > 0.0 {
             reduce_high_zenith(
-                &angles.sun_zenith,
+                &sun_zenith,
                 &mut refl_cor,
                 config.reduce_lim_low,
                 config.reduce_lim_high,
@@ -419,9 +432,22 @@ pub fn rayleigh_correct(
 
     let (x_coords, y_coords) = extract_xy_coords(coords)?;
     let params = AngleParams::from_dataset_area(area_attr, &x_coords, &y_coords, utc)?;
-    let angles = params.compute_angles();
+    let AngleSet {
+        sun_zenith,
+        sat_zenith,
+        sun_azimuth,
+        sat_azimuth,
+    } = params.compute_angles();
 
-    corrector.apply_correction(vis_dataset, red_dataset, &angles, wavelength_nm)
+    corrector.apply_correction(
+        vis_dataset,
+        red_dataset,
+        sun_zenith,
+        sat_zenith,
+        sun_azimuth,
+        sat_azimuth,
+        wavelength_nm,
+    )
 }
 
 #[cfg(test)]
@@ -507,9 +533,22 @@ mod tests {
         let lut = make_test_lut();
         let corrector = RayleighCorrector::new(lut);
         let vis_ds = make_vis_ds(vec![50.0; 4]);
-        let angles = make_angles(4);
+        let AngleSet {
+            sun_zenith,
+            sat_zenith,
+            sun_azimuth,
+            sat_azimuth,
+        } = make_angles(4);
         let result = corrector
-            .apply_correction(vis_ds, None, &angles, 634.0)
+            .apply_correction(
+                vis_ds,
+                None,
+                sun_zenith,
+                sat_zenith,
+                sun_azimuth,
+                sat_azimuth,
+                634.0,
+            )
             .expect("correction should succeed");
         let vals = result
             .array()
@@ -527,9 +566,22 @@ mod tests {
         let red_array = DataArray::<f64>::from_vec_named(vec![2, 2], vec!["y", "x"], vec![80.0; 4])
             .expect("valid red array");
         let red_ds = Dataset::new(DataId::new("B02").expect("valid DataId")).with_array(red_array);
-        let angles = make_angles(4);
+        let AngleSet {
+            sun_zenith,
+            sat_zenith,
+            sun_azimuth,
+            sat_azimuth,
+        } = make_angles(4);
         let result = corrector
-            .apply_correction(vis_ds, Some(&red_ds), &angles, 634.0)
+            .apply_correction(
+                vis_ds,
+                Some(&red_ds),
+                sun_zenith,
+                sat_zenith,
+                sun_azimuth,
+                sat_azimuth,
+                634.0,
+            )
             .expect("correction with red band should succeed");
         let vals = result
             .array()
@@ -543,9 +595,22 @@ mod tests {
         let lut = make_test_lut();
         let corrector = RayleighCorrector::new(lut);
         let vis_ds = make_vis_ds(vec![50.0; 4]);
-        let angles = make_angles(4);
+        let AngleSet {
+            sun_zenith,
+            sat_zenith,
+            sun_azimuth,
+            sat_azimuth,
+        } = make_angles(4);
         let result = corrector
-            .apply_correction(vis_ds, None, &angles, 1200.0)
+            .apply_correction(
+                vis_ds,
+                None,
+                sun_zenith,
+                sat_zenith,
+                sun_azimuth,
+                sat_azimuth,
+                1200.0,
+            )
             .expect("correction should succeed");
         let vals = result
             .array()
