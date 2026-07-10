@@ -1,7 +1,6 @@
 # Rusty Sat
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![CI](https://github.com/pytroll/rusty-sat/actions/workflows/ci.yml/badge.svg)](https://github.com/pytroll/rusty-sat/actions/workflows/ci.yml)
 
 A Rust-native satellite data processing library designed for Satpy compatibility.
 
