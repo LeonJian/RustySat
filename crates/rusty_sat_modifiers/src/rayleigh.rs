@@ -193,9 +193,6 @@ impl RayleighCorrector {
         let red_values: Option<Vec<f64>> =
             red_dataset.map(|ds| ds.array().map(|a| a.values_as_f64()).unwrap_or_default());
 
-        // Compute relative azimuth.
-        let azidiff = angles.relative_azimuth();
-
         // Step 2: Interpolate the LUT for each pixel (parallel).
         let mut refl_cor = RayleighLut::interpolate_pixels_parallel(
             &lut_3d,
@@ -204,7 +201,8 @@ impl RayleighCorrector {
             &satellite_zenith_secant,
             &angles.sun_zenith,
             &angles.sat_zenith,
-            &azidiff,
+            &angles.sun_azimuth,
+            &angles.sat_azimuth,
         );
 
         // The 3D LUT is no longer needed — drop it explicitly.

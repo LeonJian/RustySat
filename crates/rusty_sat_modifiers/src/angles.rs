@@ -45,22 +45,16 @@ impl AngleSet {
         self.sat_azimuth.is_empty()
     }
 
-    /// Compute the relative azimuth angle (0–180°).
+    /// Compute the relative azimuth angle for a single pixel (0–180°).
     ///
     /// Ported from `satpy.modifiers.angles._compute_relative_azimuth`.
-    pub fn relative_azimuth(&self) -> Vec<f64> {
-        let n = self.len();
-        let mut ssadiff = vec![f64::NAN; n];
-        for (i, slot) in ssadiff.iter_mut().enumerate().take(n) {
-            let sata = self.sat_azimuth[i];
-            let suna = self.sun_azimuth[i];
-            if !sata.is_finite() || !suna.is_finite() {
-                continue;
-            }
-            let diff = (suna - sata).abs();
-            *slot = diff.min(360.0 - diff);
+    #[inline]
+    pub fn relative_azimuth_single(sat_azimuth_deg: f64, sun_azimuth_deg: f64) -> f64 {
+        if !sat_azimuth_deg.is_finite() || !sun_azimuth_deg.is_finite() {
+            return f64::NAN;
         }
-        ssadiff
+        let diff = (sun_azimuth_deg - sat_azimuth_deg).abs();
+        diff.min(360.0 - diff)
     }
 }
 
@@ -281,11 +275,11 @@ mod tests {
     }
 
     #[test]
-    fn relative_azimuth_is_in_0_180_range() {
+    fn relative_azimuth_single_is_in_0_180_range() {
         let params = make_params(10);
         let angles = params.compute_angles();
-        let rel = angles.relative_azimuth();
-        for &v in &rel {
+        for i in 0..angles.len() {
+            let v = AngleSet::relative_azimuth_single(angles.sat_azimuth[i], angles.sun_azimuth[i]);
             if v.is_finite() {
                 assert!((0.0..=180.0).contains(&v), "rel_azi={v}");
             }

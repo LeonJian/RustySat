@@ -124,6 +124,7 @@ impl RayleighLut {
     /// Returns the reflectance correction (0–100 range) for each pixel.
     ///
     /// Ported from `pyspectral.rayleigh._interp_rayleigh_refl_by_angles`.
+    #[allow(clippy::too_many_arguments)]
     pub fn interpolate_pixels(
         lut_3d: &[f64],
         sun_zenith_secant_coords: &[f64],
@@ -131,7 +132,8 @@ impl RayleighLut {
         satellite_zenith_secant_coords: &[f64],
         sun_zenith_deg: &[f64],
         sat_zenith_deg: &[f64],
-        azidiff_deg: &[f64],
+        sun_azimuth_deg: &[f64],
+        sat_azimuth_deg: &[f64],
     ) -> Vec<f64> {
         let n_sunz = sun_zenith_secant_coords.len();
         let n_azid = azimuth_difference_coords.len();
@@ -140,7 +142,8 @@ impl RayleighLut {
         let n_pixels = sun_zenith_deg
             .len()
             .min(sat_zenith_deg.len())
-            .min(azidiff_deg.len());
+            .min(sun_azimuth_deg.len())
+            .min(sat_azimuth_deg.len());
 
         let mut result = vec![0.0; n_pixels];
 
@@ -162,10 +165,21 @@ impl RayleighLut {
         for i in 0..n_pixels {
             let sunz_raw = sun_zenith_deg[i];
             let satz_raw = sat_zenith_deg[i];
-            let azid_raw = azidiff_deg[i];
+            let suna = sun_azimuth_deg[i];
+            let sata = sat_azimuth_deg[i];
 
             // NaN angles → zero reflectance
-            if !sunz_raw.is_finite() || !satz_raw.is_finite() || !azid_raw.is_finite() {
+            if !sunz_raw.is_finite()
+                || !satz_raw.is_finite()
+                || !suna.is_finite()
+                || !sata.is_finite()
+            {
+                result[i] = 0.0;
+                continue;
+            }
+
+            let azid_raw = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
+            if !azid_raw.is_finite() {
                 result[i] = 0.0;
                 continue;
             }
@@ -222,6 +236,7 @@ impl RayleighLut {
     ///
     /// Splits the pixel arrays into chunks and processes them in parallel.
     /// This is the preferred path for large full-disk images.
+    #[allow(clippy::too_many_arguments)]
     pub fn interpolate_pixels_parallel(
         lut_3d: &[f64],
         sun_zenith_secant_coords: &[f64],
@@ -229,12 +244,14 @@ impl RayleighLut {
         satellite_zenith_secant_coords: &[f64],
         sun_zenith_deg: &[f64],
         sat_zenith_deg: &[f64],
-        azidiff_deg: &[f64],
+        sun_azimuth_deg: &[f64],
+        sat_azimuth_deg: &[f64],
     ) -> Vec<f64> {
         let n_pixels = sun_zenith_deg
             .len()
             .min(sat_zenith_deg.len())
-            .min(azidiff_deg.len());
+            .min(sun_azimuth_deg.len())
+            .min(sat_azimuth_deg.len());
 
         if n_pixels <= 10_000 {
             return Self::interpolate_pixels(
@@ -244,7 +261,8 @@ impl RayleighLut {
                 satellite_zenith_secant_coords,
                 sun_zenith_deg,
                 sat_zenith_deg,
-                azidiff_deg,
+                sun_azimuth_deg,
+                sat_azimuth_deg,
             );
         }
 
@@ -258,9 +276,14 @@ impl RayleighLut {
 
             let sunz_raw = sun_zenith_deg[i];
             let satz_raw = sat_zenith_deg[i];
-            let azid_raw = azidiff_deg[i];
+            let suna = sun_azimuth_deg[i];
+            let sata = sat_azimuth_deg[i];
 
-            if !sunz_raw.is_finite() || !satz_raw.is_finite() || !azid_raw.is_finite() {
+            if !sunz_raw.is_finite()
+                || !satz_raw.is_finite()
+                || !suna.is_finite()
+                || !sata.is_finite()
+            {
                 *slot = 0.0;
                 return;
             }
@@ -282,6 +305,7 @@ impl RayleighLut {
 
             let sunzsec = 1.0 / sunz.to_radians().cos();
             let satzsec = 1.0 / satz.to_radians().cos();
+            let azid_raw = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
             let azid_query = 180.0 - azid_raw;
 
             let sunzsec_q = sunzsec.clamp(sunz_min, sunz_max);
@@ -464,7 +488,8 @@ mod tests {
             .expect("valid wavelength");
         let sun_zenith_deg = vec![50.0, 30.0];
         let sat_zenith_deg = vec![20.0, 10.0];
-        let azidiff_deg = vec![140.0, 130.0];
+        let sun_azimuth_deg = vec![0.0, 0.0];
+        let sat_azimuth_deg = vec![180.0, 180.0];
 
         let result = RayleighLut::interpolate_pixels(
             &lut_3d,
@@ -473,7 +498,8 @@ mod tests {
             &make_test_lut().satellite_zenith_secant,
             &sun_zenith_deg,
             &sat_zenith_deg,
-            &azidiff_deg,
+            &sun_azimuth_deg,
+            &sat_azimuth_deg,
         );
 
         assert_eq!(result.len(), 2);
@@ -491,7 +517,8 @@ mod tests {
 
         let sun_zenith_deg = vec![f64::NAN, 30.0];
         let sat_zenith_deg = vec![20.0, 10.0];
-        let azidiff_deg = vec![140.0, 130.0];
+        let sun_azimuth_deg = vec![70.0, 70.0];
+        let sat_azimuth_deg = vec![200.0, 200.0];
 
         let result = RayleighLut::interpolate_pixels(
             &lut_3d,
@@ -500,7 +527,8 @@ mod tests {
             &lut2.satellite_zenith_secant,
             &sun_zenith_deg,
             &sat_zenith_deg,
-            &azidiff_deg,
+            &sun_azimuth_deg,
+            &sat_azimuth_deg,
         );
 
         assert_eq!(result.len(), 2);
@@ -521,7 +549,8 @@ mod tests {
         let n = 20_000;
         let sun_zenith_deg: Vec<f64> = (0..n).map(|i| 10.0 + (i as f64 % 60.0)).collect();
         let sat_zenith_deg: Vec<f64> = (0..n).map(|i| 5.0 + (i as f64 % 30.0)).collect();
-        let azidiff_deg: Vec<f64> = (0..n).map(|i| 100.0 + (i as f64 % 60.0)).collect();
+        let sun_azimuth_deg: Vec<f64> = vec![0.0; n];
+        let sat_azimuth_deg: Vec<f64> = (0..n).map(|i| 100.0 + (i as f64 % 60.0)).collect();
 
         let serial = RayleighLut::interpolate_pixels(
             &lut_3d,
@@ -530,7 +559,8 @@ mod tests {
             &lut2.satellite_zenith_secant,
             &sun_zenith_deg,
             &sat_zenith_deg,
-            &azidiff_deg,
+            &sun_azimuth_deg,
+            &sat_azimuth_deg,
         );
 
         let parallel = RayleighLut::interpolate_pixels_parallel(
@@ -540,7 +570,8 @@ mod tests {
             &lut2.satellite_zenith_secant,
             &sun_zenith_deg,
             &sat_zenith_deg,
-            &azidiff_deg,
+            &sun_azimuth_deg,
+            &sat_azimuth_deg,
         );
 
         for i in 0..n {
