@@ -12,6 +12,7 @@ rusty_sat_core = { path = "../rusty_sat_core" }
 serde_norway = "0.9"
 
 [dev-dependencies]
+rusty_sat_composites = { path = "../rusty_sat_composites" }
 rusty_sat_resample = { path = "../rusty_sat_resample" }
 rusty_sat_writers = { path = "../rusty_sat_writers" }
 rusty_sat_modifiers = { path = "../rusty_sat_modifiers" }

@@ -384,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "bzip2",
  "regex",
+ "rusty_sat_composites",
  "rusty_sat_core",
  "rusty_sat_modifiers",
  "rusty_sat_resample",
