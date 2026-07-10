@@ -167,7 +167,7 @@ impl AngleParams {
     ///
     /// This is the main entry point for angle computation. It computes
     /// solar and satellite zenith/azimuth angles in parallel.
-    pub fn compute_angles(&self) -> AngleSet {
+    pub fn compute_angles(self) -> AngleSet {
         let n = self.lons.len();
 
         // Solar angles
