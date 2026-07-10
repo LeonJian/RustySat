@@ -21,7 +21,9 @@ use rusty_sat_composites::{RgbCompositor, SpectralBlender};
 use rusty_sat_core::{AnyDataArray, MetadataValue};
 use rusty_sat_image::FloatImage;
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader};
-use rusty_sat_resample::{area_from_metadata_value, resample_dataset_from_attrs, ResampleOptions};
+use rusty_sat_resample::{
+    area_from_metadata_value, resample_dataset_from_attrs, with_area_attr, ResampleOptions,
+};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -178,14 +180,22 @@ fn himawari_true_color_reproduction() {
         b02_arr.shape_nd()[0],
         b02_arr.shape_nd()[1]
     );
-    eprintln!("  B04: (1.0 km)" // B04 shape matches B01/B02);
+    eprintln!("  B04: (1.0 km)"); // B04 shape matches B01/B02);
 
     // Step 3: Create hybrid green (0.85×B02 + 0.15×B04)
+    // Save the 1km area attr from B01 before b02 is consumed (B01/B02 share area).
+    let b01_area_attr = b01.attr("area").expect("B01 must have area attr").clone();
     let t_composite = Instant::now();
     let hybrid_green = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
         .expect("create blender")
         .compose_owned(vec![b02, b04])
         .expect("compose hybrid green");
+    // Attach area metadata so resampler can infer source geometry.
+    let hybrid_green = with_area_attr(
+        hybrid_green,
+        &area_from_metadata_value(&b01_area_attr).expect("decode 1km area"),
+    )
+    .expect("set area on hybrid_green");
     eprintln!(
         "  Hybrid green time: {:.2}s",
         t_composite.elapsed().as_secs_f64()
