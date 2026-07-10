@@ -122,8 +122,30 @@ impl RgbCompositor {
         let mut masks = Vec::with_capacity(3);
 
         for array in input_arrays {
-            let (array_values, mask) = array.into_f64_values_and_mask();
-            values.extend(array_values);
+            let mask = array.mask().cloned();
+            match array {
+                AnyDataArray::F32(da) => {
+                    for v in da.into_values() {
+                        values.push(v as f64);
+                    }
+                }
+                AnyDataArray::F64(da) => values.extend_from_slice(&da.into_values()),
+                AnyDataArray::U8(da) => {
+                    for v in da.into_values() {
+                        values.push(v as f64);
+                    }
+                }
+                AnyDataArray::U16(da) => {
+                    for v in da.into_values() {
+                        values.push(v as f64);
+                    }
+                }
+                AnyDataArray::I16(da) => {
+                    for v in da.into_values() {
+                        values.push(v as f64);
+                    }
+                }
+            }
             masks.push(mask);
         }
 
