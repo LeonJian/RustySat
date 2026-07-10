@@ -237,7 +237,10 @@ fn himawari_true_color_reproduction() {
         Some("RGB"),
         "mode attr must be RGB"
     );
-    assert!(rgb.attr("bands").is_some(), "RGB must have bands attr");
+    assert!(
+        rgb_arr.coord("bands").is_some(),
+        "RGB must have bands coord"
+    );
     eprintln!(
         "  RGB: shape={:?}, dims={:?}, dtype={}",
         rgb_arr.shape(),
