@@ -431,7 +431,7 @@ pub fn rayleigh_correct(
         .coords();
 
     let (x_coords, y_coords) = extract_xy_coords(coords)?;
-    let params = AngleParams::from_dataset_area(area_attr, &x_coords, &y_coords, utc)?;
+    let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
     let AngleSet {
         sun_zenith,
         sat_zenith,
