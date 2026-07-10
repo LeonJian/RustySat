@@ -277,6 +277,118 @@ pub(crate) fn compute_angles_strip(
     }
 }
 
+/// Per-column precomputed trig constants to avoid redundant sin/cos per pixel.
+#[derive(Clone)]
+pub(crate) struct ColumnPrecompute {
+    pub cos_theta_x: f64,
+    pub sin_h_solar: f64,
+    pub cos_h_solar: f64,
+    pub sin_theta_sat: f64,
+    pub cos_theta_sat: f64,
+}
+
+/// Build per-column precomputed trig tables.
+pub(crate) fn precompute_columns(
+    x_coords: &[f64],
+    h_inv: f64,
+    lon_0_rad: f64,
+    gmst_val: f64,
+    sun_ra: f64,
+) -> Vec<ColumnPrecompute> {
+    x_coords
+        .iter()
+        .map(|&x| {
+            let theta_x = x * h_inv;
+            let cos_theta_x = theta_x.cos();
+            let psr = lon_0_rad - sun_ra;
+            let h_solar = (gmst_val + theta_x + psr).rem_euclid(2.0 * std::f64::consts::PI);
+            let theta_sat = (gmst_val + theta_x + lon_0_rad).rem_euclid(2.0 * std::f64::consts::PI);
+            ColumnPrecompute {
+                cos_theta_x,
+                sin_h_solar: h_solar.sin(),
+                cos_h_solar: h_solar.cos(),
+                sin_theta_sat: theta_sat.sin(),
+                cos_theta_sat: theta_sat.cos(),
+            }
+        })
+        .collect()
+}
+
+/// Per-strip row precomputation: `tan(theta_y)` for each row in `y0..y1`.
+pub(crate) fn precompute_rows(y_coords: &[f64], y0: usize, y1: usize, h_inv: f64) -> Vec<f64> {
+    (y0..y1)
+        .map(|row| {
+            let theta_y = y_coords[row] * h_inv;
+            theta_y.tan()
+        })
+        .collect()
+}
+
+/// Solar zenith + azimuth using precomputed column constants.
+#[inline]
+pub(crate) fn solar_single_precomputed(
+    lat_rad: f64,
+    sun_dec: f64,
+    col: &ColumnPrecompute,
+) -> (f64, f64) {
+    let sin_lat = lat_rad.sin();
+    let cos_lat = lat_rad.cos();
+    let sun_dec_sin = sun_dec.sin();
+    let sun_dec_cos = sun_dec.cos();
+
+    let cz = sin_lat * sun_dec_sin + cos_lat * sun_dec_cos * col.cos_h_solar;
+    let sunz = if cz.is_finite() && cz.abs() <= 1.0 {
+        cz.acos().to_degrees()
+    } else if cz > 1.0 {
+        0.0
+    } else {
+        180.0
+    };
+
+    let az = (-col.sin_h_solar).atan2(cos_lat * sun_dec.tan() - sin_lat * col.cos_h_solar);
+    let suna = az.to_degrees().rem_euclid(360.0);
+
+    (sunz, suna)
+}
+
+/// Satellite zenith + azimuth using precomputed column constants.
+#[inline]
+pub(crate) fn satellite_single_precomputed(
+    lat_rad: f64,
+    col: &ColumnPrecompute,
+    sat_x: f64,
+    sat_y: f64,
+    sat_z: f64,
+) -> (f64, f64) {
+    let sin_lat = lat_rad.sin();
+    let cos_lat = lat_rad.cos();
+
+    let f_minus2 = F - 2.0;
+    let c = 1.0 / (1.0 + F * f_minus2 * sin_lat.powi(2)).sqrt();
+    let sq = c * (1.0 - F).powi(2);
+    let achcp = (EARTH_A_KM * c) * cos_lat;
+    let opos_x = achcp * col.cos_theta_sat;
+    let opos_y = achcp * col.sin_theta_sat;
+    let opos_z = EARTH_A_KM * sq * sin_lat;
+
+    let rx = sat_x - opos_x;
+    let ry = sat_y - opos_y;
+    let rz = sat_z - opos_z;
+
+    let top_s = sin_lat * col.cos_theta_sat * rx + sin_lat * col.sin_theta_sat * ry - cos_lat * rz;
+    let top_e = -col.sin_theta_sat * rx + col.cos_theta_sat * ry;
+    let top_z = cos_lat * col.cos_theta_sat * rx + cos_lat * col.sin_theta_sat * ry + sin_lat * rz;
+
+    let az = (-top_e).atan2(top_s) + std::f64::consts::PI;
+    let sata = az.rem_euclid(2.0 * std::f64::consts::PI).to_degrees();
+
+    let rg = (rx * rx + ry * ry + rz * rz).sqrt();
+    let el = (top_z / rg).min(1.0).asin();
+    let satz = (std::f64::consts::FRAC_PI_2 - el).to_degrees();
+
+    (satz, sata)
+}
+
 /// Solar zenith and azimuth angles for a single pixel, using precomputed
 /// solar right-ascension/declination and GMST to avoid redundant work.
 #[inline]

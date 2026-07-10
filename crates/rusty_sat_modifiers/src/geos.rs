@@ -131,6 +131,38 @@ impl GeosProjection {
         Some((normalize_lon(lon_deg), lat_deg))
     }
 
+    /// Inverse transform: geos projection x/y (meters) → lon/lat (radians).
+    ///
+    /// Same geometry as `inverse`, but returns radians to avoid the
+    /// degrees→radians roundtrip in the angle computation hot path.
+    ///
+    /// Returns `(lon_rad, lat_rad)` or `None` if the point is a space pixel.
+    /// `lon_rad` includes the projection-origin longitude offset.
+    pub fn inverse_rad(&self, x_meters: f64, y_meters: f64) -> Option<(f64, f64)> {
+        if !x_meters.is_finite() || !y_meters.is_finite() {
+            return None;
+        }
+
+        let h = self.perspective_point_height;
+        if h <= 0.0 {
+            return None;
+        }
+
+        let theta_x = x_meters / h;
+        let theta_y = y_meters / h;
+
+        let total_angle_sq = theta_x * theta_x + theta_y * theta_y;
+        let max_angle = self.max_scanning_angle();
+        if total_angle_sq.sqrt() >= max_angle {
+            return None;
+        }
+
+        let lat_rad = (theta_y.tan() * theta_x.cos()).atan();
+        let lon_rad = theta_x + self.longitude_of_projection_origin.to_radians();
+
+        Some((lon_rad, lat_rad))
+    }
+
     /// Batch inverse: convert arrays of x/y projection coordinates to
     /// lon/lat arrays. Space pixels get `(f64::NAN, f64::NAN)`.
     pub fn inverse_batch(&self, xs: &[f64], ys: &[f64]) -> (Vec<f64>, Vec<f64>) {

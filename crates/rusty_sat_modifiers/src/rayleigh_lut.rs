@@ -339,6 +339,127 @@ impl RayleighLut {
 
         result
     }
+
+    /// Precompute LUT clipping and range constants once per strip.
+    ///
+    /// These are computed once to avoid redundant work per pixel in the hot
+    /// loop of the fused correction pass.
+    pub(crate) fn lut_interp_constants(
+        sun_zenith_secant_coords: &[f64],
+        azimuth_difference_coords: &[f64],
+        satellite_zenith_secant_coords: &[f64],
+    ) -> LutInterpConstants {
+        let n_sunz = sun_zenith_secant_coords.len();
+        let n_azid = azimuth_difference_coords.len();
+        let n_satz = satellite_zenith_secant_coords.len();
+
+        let sunz_sec_max = sun_zenith_secant_coords[n_sunz - 1];
+        let satz_sec_max = satellite_zenith_secant_coords[n_satz - 1];
+        let sunz_clip_deg = (1.0 / sunz_sec_max).acos().to_degrees();
+        let satz_clip_deg = (1.0 / satz_sec_max).acos().to_degrees();
+        let sunz_min = sun_zenith_secant_coords[0];
+        let sunz_max = sun_zenith_secant_coords[n_sunz - 1];
+        let azid_min = azimuth_difference_coords[0];
+        let azid_max = azimuth_difference_coords[n_azid - 1];
+        let satz_min = satellite_zenith_secant_coords[0];
+        let satz_max = satellite_zenith_secant_coords[n_satz - 1];
+
+        LutInterpConstants {
+            n_azid,
+            n_satz,
+            sunz_clip_deg,
+            satz_clip_deg,
+            sunz_min,
+            sunz_max,
+            azid_min,
+            azid_max,
+            satz_min,
+            satz_max,
+        }
+    }
+}
+
+/// Precomputed LUT interpolation constants (scalars only — coordinate
+/// slices are passed separately to `lut_interpolate_single`).
+///
+/// Computed once per strip to avoid redundant acos/clamp-bounds per pixel.
+pub(crate) struct LutInterpConstants {
+    n_azid: usize,
+    n_satz: usize,
+    sunz_clip_deg: f64,
+    satz_clip_deg: f64,
+    sunz_min: f64,
+    sunz_max: f64,
+    azid_min: f64,
+    azid_max: f64,
+    satz_min: f64,
+    satz_max: f64,
+}
+
+/// Per-pixel trilinear LUT interpolation using precomputed constants.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lut_interpolate_single(
+    lut_3d: &[f64],
+    constants: &LutInterpConstants,
+    sun_zenith_secant_coords: &[f64],
+    azimuth_difference_coords: &[f64],
+    satellite_zenith_secant_coords: &[f64],
+    sun_zenith_deg: f64,
+    sat_zenith_deg: f64,
+    sun_azimuth_deg: f64,
+    sat_azimuth_deg: f64,
+) -> f64 {
+    if !sun_zenith_deg.is_finite()
+        || !sat_zenith_deg.is_finite()
+        || !sun_azimuth_deg.is_finite()
+        || !sat_azimuth_deg.is_finite()
+    {
+        return 0.0;
+    }
+
+    let sunz = sun_zenith_deg.clamp(0.0, constants.sunz_clip_deg);
+    let satz = sat_zenith_deg.clamp(0.0, constants.satz_clip_deg);
+    let sunzsec = 1.0 / sunz.to_radians().cos();
+    let satzsec = 1.0 / satz.to_radians().cos();
+
+    let azid_raw =
+        crate::angles::AngleSet::relative_azimuth_single(sat_azimuth_deg, sun_azimuth_deg);
+    if !azid_raw.is_finite() {
+        return 0.0;
+    }
+    let azid_query = 180.0 - azid_raw;
+
+    let sunzsec_q = sunzsec.clamp(constants.sunz_min, constants.sunz_max);
+    let azid_q = azid_query.clamp(constants.azid_min, constants.azid_max);
+    let satzsec_q = satzsec.clamp(constants.satz_min, constants.satz_max);
+
+    let (s0, s1, sf) = find_interval(sun_zenith_secant_coords, sunzsec_q);
+    let (a0, a1, af) = find_interval(azimuth_difference_coords, azid_q);
+    let (t0, t1, tf) = find_interval(satellite_zenith_secant_coords, satzsec_q);
+
+    let n_azid = constants.n_azid;
+    let n_satz = constants.n_satz;
+
+    let c000 = lut_3d[((s0 * n_azid) + a0) * n_satz + t0];
+    let c001 = lut_3d[((s0 * n_azid) + a0) * n_satz + t1];
+    let c010 = lut_3d[((s0 * n_azid) + a1) * n_satz + t0];
+    let c011 = lut_3d[((s0 * n_azid) + a1) * n_satz + t1];
+    let c100 = lut_3d[((s1 * n_azid) + a0) * n_satz + t0];
+    let c101 = lut_3d[((s1 * n_azid) + a0) * n_satz + t1];
+    let c110 = lut_3d[((s1 * n_azid) + a1) * n_satz + t0];
+    let c111 = lut_3d[((s1 * n_azid) + a1) * n_satz + t1];
+
+    let c00 = c000 * (1.0 - sf) + c100 * sf;
+    let c01 = c001 * (1.0 - sf) + c101 * sf;
+    let c10 = c010 * (1.0 - sf) + c110 * sf;
+    let c11 = c011 * (1.0 - sf) + c111 * sf;
+
+    let c0 = c00 * (1.0 - af) + c10 * af;
+    let c1 = c01 * (1.0 - af) + c11 * af;
+
+    let val = c0 * (1.0 - tf) + c1 * tf;
+    (val * 100.0).clamp(0.0, 100.0)
 }
 
 /// Find the interpolation interval and fractional position for a value

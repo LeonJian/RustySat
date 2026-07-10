@@ -33,9 +33,11 @@
 //!   reflectance buffer is consumed by wavelength selection.
 //! - Parallel processing via rayon for large grids (>10k pixels per strip).
 
-use crate::angles::compute_angles_strip;
+use crate::angles::{
+    precompute_columns, precompute_rows, satellite_single_precomputed, solar_single_precomputed,
+};
 use crate::astronomy::{gmst, observer_position, sun_ra_dec, UtcInstant};
-use crate::rayleigh_lut::RayleighLut;
+use crate::rayleigh_lut::{lut_interpolate_single, RayleighLut};
 use rusty_sat_core::{
     AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError,
 };
@@ -198,62 +200,97 @@ impl RayleighCorrector {
         let (sat_x, sat_y, sat_z) =
             observer_position(params.utc, params.sat_lon, params.sat_lat, sat_alt_km);
 
+        // Precompute column-dependent trig (saves ~5 trig calls per pixel).
+        let h_inv = 1.0 / params.geos.perspective_point_height;
+        let lon_0_rad = params.geos.longitude_of_projection_origin.to_radians();
+        let column_data = precompute_columns(&params.x_coords, h_inv, lon_0_rad, gmst_val, sun_ra);
+
+        // Precompute LUT interpolation constants once (saves ~8 fp ops per pixel).
+        let lut_constants = RayleighLut::lut_interp_constants(
+            &sun_zenith_secant,
+            &azimuth_difference,
+            &satellite_zenith_secant,
+        );
+
         const STRIP_HEIGHT: usize = 64;
 
         for y0 in (0..height).step_by(STRIP_HEIGHT) {
             let y1 = (y0 + STRIP_HEIGHT).min(height);
             let strip_n = (y1 - y0) * width;
 
-            // 1. Compute angles for this strip
-            let strip_angles = compute_angles_strip(
-                &params.geos,
-                &params.x_coords,
-                &params.y_coords,
-                y0,
-                y1,
-                width,
-                gmst_val,
-                sun_ra,
-                sun_dec,
-                sat_x,
-                sat_y,
-                sat_z,
-            );
-
-            // 2. LUT interpolation
-            let mut refl_cor = RayleighLut::interpolate_pixels_parallel(
-                &lut_3d,
-                &sun_zenith_secant,
-                &azimuth_difference,
-                &satellite_zenith_secant,
-                &strip_angles.sun_zenith,
-                &strip_angles.sat_zenith,
-                &strip_angles.sun_azimuth,
-                &strip_angles.sat_azimuth,
-            );
-
-            // 3. Cloud relaxation (strip slice)
-            if let Some(ref red) = red_values {
-                let offset = y0 * width;
-                relax_cloudy_correction(&red[offset..offset + strip_n], &mut refl_cor);
-            }
-
-            // 4. High-zenith reduction
-            if config.reduce_strength > 0.0 {
-                reduce_high_zenith(
-                    &strip_angles.sun_zenith,
-                    &mut refl_cor,
-                    config.reduce_lim_low,
-                    config.reduce_lim_high,
-                    config.reduce_strength,
-                );
-            }
-
-            // 5. Subtract correction in-place on vis_f32 strip
+            // Precompute tan(theta_y) per row in this strip.
+            let tan_theta_y_row = precompute_rows(&params.y_coords, y0, y1, h_inv);
+            let red = red_values.as_ref();
             let offset = y0 * width;
-            subtract_correction_f32(&mut vis_f32[offset..offset + strip_n], &refl_cor);
 
-            // Strip buffers dropped here → memory freed
+            use rayon::prelude::*;
+            vis_f32[offset..offset + strip_n]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(local_i, out)| {
+                    if !out.is_finite() {
+                        return;
+                    }
+                    let row = local_i / width;
+                    let col = local_i % width;
+                    let col_pre = &column_data[col];
+
+                    // 1. Projection inverse → lat_rad (lon is implicit in col precomputation)
+                    let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
+
+                    // 2. Solar zenith + azimuth
+                    let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+
+                    // 3. Satellite zenith + azimuth
+                    let (satz, sata) =
+                        satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
+
+                    // 4. LUT interpolation
+                    let mut correction = lut_interpolate_single(
+                        &lut_3d,
+                        &lut_constants,
+                        &sun_zenith_secant,
+                        &azimuth_difference,
+                        &satellite_zenith_secant,
+                        sunz,
+                        satz,
+                        suna,
+                        sata,
+                    );
+
+                    // 5. Cloud relaxation
+                    if let Some(red_vals) = red {
+                        let r = red_vals[offset + local_i];
+                        if r.is_finite() && r >= 20.0 {
+                            correction *= 1.0 - (r - 20.0) / 80.0;
+                        }
+                    }
+
+                    // 6. High-zenith reduction
+                    if config.reduce_strength > 0.0 && sunz.is_finite() {
+                        let (lo, hi) = if config.reduce_lim_low > config.reduce_lim_high {
+                            (config.reduce_lim_high, config.reduce_lim_low)
+                        } else {
+                            (config.reduce_lim_low, config.reduce_lim_high)
+                        };
+                        let span = hi - lo;
+                        if span > 0.0 {
+                            let t = if sunz < lo {
+                                0.0
+                            } else {
+                                ((sunz - lo) / span).min(1.0)
+                            };
+                            let factor = (1.0 - config.reduce_strength * t).clamp(0.0, 1.0);
+                            correction *= factor;
+                        }
+                    }
+
+                    // 7. Subtract from reflectance (f32 ← f64 correction)
+                    let corrected = (*out as f64 - correction).max(0.0);
+                    *out = corrected as f32;
+                });
+
+            // Strip data dropped here — no intermediate angle/refl_cor buffers
         }
 
         drop(lut_3d);
@@ -285,8 +322,8 @@ impl RayleighCorrector {
 /// Subtract the Rayleigh correction from the visible reflectance in-place.
 ///
 /// Clamps to ≥ 0.0.  NaN pixels are left unchanged.  Uses rayon for large arrays.
+#[cfg(test)]
 #[inline]
-#[allow(dead_code)]
 fn subtract_correction(vis: &mut [f64], correction: &[f64]) {
     use rayon::prelude::*;
     let n = vis.len().min(correction.len());
@@ -306,32 +343,6 @@ fn subtract_correction(vis: &mut [f64], correction: &[f64]) {
                 if vis[i] < 0.0 {
                     vis[i] = 0.0;
                 }
-            }
-        }
-    }
-}
-
-/// Subtract the f64 Rayleigh correction from an f32 reflectance array in-place.
-///
-/// Converts each f32 value to f64 for the subtraction, then stores the
-/// result (clamped to ≥ 0.0) back as f32.  NaN pixels are left unchanged.
-/// Uses rayon for large arrays.
-#[inline]
-fn subtract_correction_f32(vis: &mut [f32], correction: &[f64]) {
-    use rayon::prelude::*;
-    let n = vis.len().min(correction.len());
-    if n > 10_000 {
-        vis.par_iter_mut().take(n).enumerate().for_each(|(i, v)| {
-            if v.is_finite() {
-                let corrected = (*v as f64 - correction[i]).max(0.0);
-                *v = corrected as f32;
-            }
-        });
-    } else {
-        for i in 0..n {
-            if vis[i].is_finite() {
-                let corrected = (vis[i] as f64 - correction[i]).max(0.0);
-                vis[i] = corrected as f32;
             }
         }
     }
@@ -366,6 +377,7 @@ fn rebuild_dataset(mut dataset: Dataset, new_name: &str) -> Result<Dataset> {
 ///
 /// Where the red-band reflectance is > 20%, the correction is gradually
 /// reduced to zero by 100% red reflectance.  Operates in-place.
+#[cfg(test)]
 #[inline]
 fn relax_cloudy_correction(red_band: &[f64], rayleigh_refl: &mut [f64]) {
     use rayon::prelude::*;
@@ -403,6 +415,7 @@ fn relax_cloudy_correction(red_band: &[f64], rayleigh_refl: &mut [f64]) {
 ///
 /// Linearly scales the correction between `thresh_zen` and `maxzen`,
 /// reducing it by `strength` fraction at `maxzen`.  Operates in-place.
+#[cfg(test)]
 #[inline]
 fn reduce_high_zenith(
     zenith: &[f64],
