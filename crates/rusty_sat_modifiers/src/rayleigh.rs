@@ -36,7 +36,9 @@
 use crate::angles::compute_angles_strip;
 use crate::astronomy::{gmst, observer_position, sun_ra_dec, UtcInstant};
 use crate::rayleigh_lut::RayleighLut;
-use rusty_sat_core::{DataArray, DataId, Dataset, MetadataValue, Result, RustySatError};
+use rusty_sat_core::{
+    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError,
+};
 
 /// Aerosol type for the Rayleigh LUT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +185,8 @@ impl RayleighCorrector {
             .into_array()
             .ok_or_else(|| RustySatError::invalid_input("visible dataset has no array data"))?;
         let (height, width) = array.shape_yx()?;
-        let (mut vis_values, mask) = array.into_f64_values_and_mask();
+        let mask = array.mask().cloned();
+        let mut vis_f32 = into_vis_f32(array);
 
         let red_values: Option<Vec<f64>> =
             red_dataset.map(|ds| ds.array().map(|a| a.values_as_f64()).unwrap_or_default());
@@ -246,9 +249,9 @@ impl RayleighCorrector {
                 );
             }
 
-            // 5. Subtract correction in-place on vis_values strip
+            // 5. Subtract correction in-place on vis_f32 strip
             let offset = y0 * width;
-            subtract_correction(&mut vis_values[offset..offset + strip_n], &refl_cor);
+            subtract_correction_f32(&mut vis_f32[offset..offset + strip_n], &refl_cor);
 
             // Strip buffers dropped here → memory freed
         }
@@ -256,7 +259,7 @@ impl RayleighCorrector {
         drop(lut_3d);
 
         let mut result_array =
-            DataArray::<f64>::from_vec_named(vec![height, width], vec!["y", "x"], vis_values)?;
+            DataArray::<f32>::from_vec_named(vec![height, width], vec!["y", "x"], vis_f32)?;
 
         if let Some(m) = mask {
             result_array = result_array.with_mask(m)?;
@@ -283,6 +286,7 @@ impl RayleighCorrector {
 ///
 /// Clamps to ≥ 0.0.  NaN pixels are left unchanged.  Uses rayon for large arrays.
 #[inline]
+#[allow(dead_code)]
 fn subtract_correction(vis: &mut [f64], correction: &[f64]) {
     use rayon::prelude::*;
     let n = vis.len().min(correction.len());
@@ -304,6 +308,46 @@ fn subtract_correction(vis: &mut [f64], correction: &[f64]) {
                 }
             }
         }
+    }
+}
+
+/// Subtract the f64 Rayleigh correction from an f32 reflectance array in-place.
+///
+/// Converts each f32 value to f64 for the subtraction, then stores the
+/// result (clamped to ≥ 0.0) back as f32.  NaN pixels are left unchanged.
+/// Uses rayon for large arrays.
+#[inline]
+fn subtract_correction_f32(vis: &mut [f32], correction: &[f64]) {
+    use rayon::prelude::*;
+    let n = vis.len().min(correction.len());
+    if n > 10_000 {
+        vis.par_iter_mut().take(n).enumerate().for_each(|(i, v)| {
+            if v.is_finite() {
+                let corrected = (*v as f64 - correction[i]).max(0.0);
+                *v = corrected as f32;
+            }
+        });
+    } else {
+        for i in 0..n {
+            if vis[i].is_finite() {
+                let corrected = (vis[i] as f64 - correction[i]).max(0.0);
+                vis[i] = corrected as f32;
+            }
+        }
+    }
+}
+
+/// Extract vis reflectance values as f32 from an AnyDataArray.
+///
+/// For f32 input (AHI reflectance), this is zero-copy via `into_values()`.
+/// Other dtypes are converted element-by-element.
+fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
+    match array {
+        AnyDataArray::F32(da) => da.into_values(),
+        AnyDataArray::F64(da) => da.into_values().into_iter().map(|v| v as f32).collect(),
+        AnyDataArray::U8(da) => da.into_values().into_iter().map(|v| v as f32).collect(),
+        AnyDataArray::U16(da) => da.into_values().into_iter().map(|v| v as f32).collect(),
+        AnyDataArray::I16(da) => da.into_values().into_iter().map(|v| v as f32).collect(),
     }
 }
 
