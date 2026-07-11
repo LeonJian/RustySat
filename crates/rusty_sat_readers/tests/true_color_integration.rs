@@ -23,7 +23,7 @@
 #![allow(clippy::unwrap_used)]
 
 use rusty_sat_composites::{RgbCompositor, SpectralBlender};
-use rusty_sat_core::{AnyDataArray, MetadataValue};
+use rusty_sat_core::{AnyDataArray, DataArray, Dataset, MetadataValue};
 use rusty_sat_image::FloatImage;
 use rusty_sat_modifiers::{
     rayleigh_correct, AerosolType, Atmosphere, RayleighConfig, RayleighCorrector, UtcInstant,
@@ -157,6 +157,66 @@ fn make_corrector(wavelength_nm: f64) -> Option<RayleighCorrector> {
     RayleighCorrector::with_config(&lut_path, config, wavelength_nm).ok()
 }
 
+fn dataset_f64_to_f32(dataset: Dataset) -> Dataset {
+    let area = dataset.attr("area").cloned();
+    let ds_id = dataset.id().clone();
+    let Some(array) = dataset.into_array() else {
+        return Dataset::new(ds_id);
+    };
+    let mask = array.mask().cloned();
+    let coords = array.coords().clone();
+    match array {
+        AnyDataArray::F64(da) => {
+            let (h, w) = {
+                let s = da.shape_nd();
+                (s[0], s[1])
+            };
+            let f32_vals: Vec<f32> = da.into_values().into_iter().map(|v| v as f32).collect();
+            let mut arr = DataArray::<f32>::from_vec_named(vec![h, w], vec!["y", "x"], f32_vals)
+                .expect("valid array");
+            if let Some(m) = mask {
+                arr = arr.with_mask(m).expect("valid mask");
+            }
+            for (name, coord) in &coords {
+                if name == "y" || name == "x" {
+                    let prev = arr.clone();
+                    arr = arr.with_coordinate(name, coord.clone()).unwrap_or(prev);
+                }
+            }
+            let mut ds = Dataset::new(ds_id).with_array(arr);
+            if let Some(a) = area {
+                ds.insert_attr("area", a).ok();
+            }
+            ds
+        }
+        AnyDataArray::F32(_) => {
+            let (h, w) = {
+                let s = array.shape();
+                (s[0], s[1])
+            };
+            let vals = array.values_as_f64();
+            let f32_vals: Vec<f32> = vals.into_iter().map(|v| v as f32).collect();
+            let mut arr = DataArray::<f32>::from_vec_named(vec![h, w], vec!["y", "x"], f32_vals)
+                .expect("valid array");
+            if let Some(m) = mask {
+                arr = arr.with_mask(m).expect("valid mask");
+            }
+            for (name, coord) in &coords {
+                if name == "y" || name == "x" {
+                    let prev = arr.clone();
+                    arr = arr.with_coordinate(name, coord.clone()).unwrap_or(prev);
+                }
+            }
+            let mut ds = Dataset::new(ds_id).with_array(arr);
+            if let Some(a) = area {
+                ds.insert_attr("area", a).ok();
+            }
+            ds
+        }
+        other => Dataset::new(ds_id).with_array(other),
+    }
+}
+
 #[test]
 fn himawari_true_color_reproduction() {
     let Some(dir) = data_dir() else {
@@ -280,6 +340,7 @@ fn himawari_true_color_reproduction() {
         &area_from_metadata_value(&b01_area_attr).expect("decode 1km area"),
     )
     .expect("set area on hybrid_green");
+    let hybrid_green = dataset_f64_to_f32(hybrid_green);
     eprintln!(
         "  Hybrid green time: {:.2}s",
         t_composite.elapsed().as_secs_f64()
@@ -337,34 +398,52 @@ fn himawari_true_color_reproduction() {
         .expect("compose RGB");
     eprintln!("  Compose time: {:.2}s", t_compose.elapsed().as_secs_f64());
 
-    // Step 7: Assert RGB output structure
-    let rgb_arr = rgb.array().expect("RGB array");
-    assert_eq!(rgb_arr.shape(), &[3, b03_h, b03_w], "RGB shape mismatch");
-    assert_eq!(
-        rgb_arr.dims(),
-        &["bands".to_string(), "y".to_string(), "x".to_string()],
-        "RGB dims mismatch"
-    );
-    assert_eq!(
-        rgb.attr("mode").and_then(MetadataValue::as_str),
-        Some("RGB"),
-        "mode attr must be RGB"
-    );
-    assert!(
-        rgb_arr.coord("bands").is_some(),
-        "RGB must have bands coord"
-    );
-    eprintln!(
-        "  RGB: shape={:?}, dims={:?}, dtype={}",
-        rgb_arr.shape(),
-        rgb_arr.dims(),
-        rgb_arr.dtype().name()
-    );
+    // Step 7: Assert RGB output structure & collect stats before consuming
+    {
+        let rgb_arr = rgb.array().expect("RGB array");
+        assert_eq!(rgb_arr.shape(), &[3, b03_h, b03_w], "RGB shape mismatch");
+        assert_eq!(
+            rgb_arr.dims(),
+            &["bands".to_string(), "y".to_string(), "x".to_string()],
+            "RGB dims mismatch"
+        );
+        assert_eq!(
+            rgb.attr("mode").and_then(MetadataValue::as_str),
+            Some("RGB"),
+            "mode attr must be RGB"
+        );
+        assert!(
+            rgb_arr.coord("bands").is_some(),
+            "RGB must have bands coord"
+        );
+        eprintln!(
+            "  RGB: shape={:?}, dims={:?}, dtype={}",
+            rgb_arr.shape(),
+            rgb_arr.dims(),
+            rgb_arr.dtype().name()
+        );
+
+        // Snapshot pixel stats before rgb is consumed
+        let vals = rgb_arr.values_as_f64();
+        let mask = rgb_arr.mask();
+        let mut finite_count = 0u64;
+        let mut masked_count = 0u64;
+        for (i, &v) in vals.iter().enumerate() {
+            if mask.as_ref().is_some_and(|m| m.is_masked(i) == Some(true)) {
+                masked_count += 1;
+            } else if v.is_finite() {
+                finite_count += 1;
+            }
+        }
+        let total = vals.len();
+        eprintln!("  RGB pixels: total={total}, finite={finite_count}, masked={masked_count}");
+        assert!(finite_count > 0, "expected some finite RGB pixels, got 0");
+    }
 
     // Step 8: Enhance — crude stretch + gamma 2.0 per channel, save 8-bit PNG
     let t_save = Instant::now();
 
-    let mut img8 = FloatImage::<f32>::from_rgb_dataset(&rgb).expect("create FloatImage<f32>");
+    let mut img8 = FloatImage::<f32>::from_rgb_dataset_owned(rgb).expect("create FloatImage<f32>");
     img8.crude_stretch_in_place(None, None);
     img8.gamma_channels_in_place(&[2.0, 2.0, 2.0])
         .expect("gamma correct");
@@ -401,22 +480,6 @@ fn himawari_true_color_reproduction() {
     // eprintln!("  {} → {} bytes", png16_path.display(), size16);
 
     eprintln!("  Save time: {:.2}s", t_save.elapsed().as_secs_f64());
-
-    // Step 10: Sanity — spot-check RGB pixel values
-    let vals = rgb_arr.values_as_f64();
-    let mask = rgb_arr.mask();
-    let mut finite_count = 0u64;
-    let mut masked_count = 0u64;
-    for (i, &v) in vals.iter().enumerate() {
-        if mask.as_ref().is_some_and(|m| m.is_masked(i) == Some(true)) {
-            masked_count += 1;
-        } else if v.is_finite() {
-            finite_count += 1;
-        }
-    }
-    let total = vals.len();
-    eprintln!("  RGB pixels: total={total}, finite={finite_count}, masked={masked_count}");
-    assert!(finite_count > 0, "expected some finite RGB pixels, got 0");
 
     let total_elapsed = t_load.elapsed()
         + t_rayleigh.elapsed()

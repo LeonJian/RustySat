@@ -497,6 +497,31 @@ impl<T: ImageFloat> FloatImage<T> {
         Ok(image)
     }
 
+    pub fn from_rgb_dataset_owned(dataset: Dataset) -> Result<Self> {
+        let array = dataset
+            .into_array()
+            .ok_or_else(|| RustySatError::invalid_input("dataset has no array data"))?;
+        Self::from_rgb_array_owned(array)
+    }
+
+    fn from_rgb_array_owned(array: AnyDataArray) -> Result<Self> {
+        let (height, width, pixel_count) = require_band_major_rgb_shape(&array)?;
+        let mask = array.mask().cloned();
+        let image = match &array {
+            AnyDataArray::F32(arr) => Self::from_numeric_rgb_array(arr, height, width)?,
+            AnyDataArray::F64(arr) => Self::from_numeric_rgb_array(arr, height, width)?,
+            AnyDataArray::U8(arr) => Self::from_numeric_rgb_array(arr, height, width)?,
+            AnyDataArray::U16(arr) => Self::from_numeric_rgb_array(arr, height, width)?,
+            AnyDataArray::I16(arr) => Self::from_numeric_rgb_array(arr, height, width)?,
+        };
+        drop(array);
+        let mut image = image;
+        if let Some(m) = mask {
+            image.mask = Some(pixel_mask_from_band_major_rgb_mask(&m, pixel_count)?);
+        }
+        Ok(image)
+    }
+
     fn from_numeric_luma_array<U: NumericElement>(
         array: &DataArray<U>,
         height: usize,

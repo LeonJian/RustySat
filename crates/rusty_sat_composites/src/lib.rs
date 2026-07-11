@@ -96,11 +96,11 @@ impl RgbCompositor {
             .ok_or_else(|| RustySatError::invalid_input("RGB composite shape is too large"))?;
         let mut values = Vec::with_capacity(pixel_count * 3);
         for array in &input_arrays {
-            extend_values_as_f64(array, &mut values);
+            extend_values_as_f32(array, &mut values);
         }
 
         let mut array =
-            DataArray::<f64>::from_vec_named(vec![3, height, width], ["bands", "y", "x"], values)?
+            DataArray::<f32>::from_vec_named(vec![3, height, width], ["bands", "y", "x"], values)?
                 .with_coordinate("bands", Coordinate::axis("bands", vec![0.0, 1.0, 2.0])?)?;
         if let Some(mask) = build_rgb_mask(&input_arrays, pixel_count, self.common_channel_mask) {
             array.set_mask(mask)?;
@@ -124,25 +124,25 @@ impl RgbCompositor {
         for array in input_arrays {
             let mask = array.mask().cloned();
             match array {
-                AnyDataArray::F32(da) => {
+                AnyDataArray::F32(da) => values.extend_from_slice(&da.into_values()),
+                AnyDataArray::F64(da) => {
                     for v in da.into_values() {
-                        values.push(v as f64);
+                        values.push(v as f32);
                     }
                 }
-                AnyDataArray::F64(da) => values.extend_from_slice(&da.into_values()),
                 AnyDataArray::U8(da) => {
                     for v in da.into_values() {
-                        values.push(v as f64);
+                        values.push(v as f32);
                     }
                 }
                 AnyDataArray::U16(da) => {
                     for v in da.into_values() {
-                        values.push(v as f64);
+                        values.push(v as f32);
                     }
                 }
                 AnyDataArray::I16(da) => {
                     for v in da.into_values() {
-                        values.push(v as f64);
+                        values.push(v as f32);
                     }
                 }
             }
@@ -150,7 +150,7 @@ impl RgbCompositor {
         }
 
         let mut array =
-            DataArray::<f64>::from_vec_named(vec![3, height, width], ["bands", "y", "x"], values)?
+            DataArray::<f32>::from_vec_named(vec![3, height, width], ["bands", "y", "x"], values)?
                 .with_coordinate("bands", Coordinate::axis("bands", vec![0.0, 1.0, 2.0])?)?;
         if let Some(mask) =
             build_rgb_mask_from_owned_masks(&masks, pixel_count, self.common_channel_mask)
@@ -254,18 +254,18 @@ fn require_single_band_yx(array: &AnyDataArray) -> Result<(usize, usize)> {
     array.shape_yx()
 }
 
-fn extend_values_as_f64(array: &AnyDataArray, values: &mut Vec<f64>) {
+fn extend_values_as_f32(array: &AnyDataArray, values: &mut Vec<f32>) {
     match array {
-        AnyDataArray::F32(array) => extend_numeric_values(array, values),
-        AnyDataArray::F64(array) => values.extend_from_slice(array.values()),
-        AnyDataArray::U8(array) => extend_numeric_values(array, values),
-        AnyDataArray::U16(array) => extend_numeric_values(array, values),
-        AnyDataArray::I16(array) => extend_numeric_values(array, values),
+        AnyDataArray::F32(array) => values.extend_from_slice(array.values()),
+        AnyDataArray::F64(array) => extend_numeric_to_f32(array, values),
+        AnyDataArray::U8(array) => extend_numeric_to_f32(array, values),
+        AnyDataArray::U16(array) => extend_numeric_to_f32(array, values),
+        AnyDataArray::I16(array) => extend_numeric_to_f32(array, values),
     }
 }
 
-fn extend_numeric_values<T: NumericElement>(array: &DataArray<T>, values: &mut Vec<f64>) {
-    values.extend(array.values().iter().map(|value| value.to_f64()));
+fn extend_numeric_to_f32<T: NumericElement>(array: &DataArray<T>, values: &mut Vec<f32>) {
+    values.extend(array.values().iter().map(|value| value.to_f64() as f32));
 }
 
 fn build_rgb_mask(
@@ -387,7 +387,7 @@ mod tests {
         let array = output.array().expect("RGB compositor output array");
 
         assert_eq!(output.id().name(), "true_color");
-        assert_eq!(array.dtype(), DataType::F64);
+        assert_eq!(array.dtype(), DataType::F32);
         assert_eq!(array.shape(), &[3, 2, 2]);
         assert_eq!(array.dims(), &["bands", "y", "x"]);
         assert_eq!(
