@@ -284,9 +284,7 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 - `geos` — geostationary projection inverse (x/y meters → lon/lat degrees)
 - `orbital` — satellite look angles (azimuth, elevation, zenith) ported from pyorbital
 - `angles` — combined angle computation for dataset grids
-- `rayleigh_lut` — Rayleigh LUT data model and multilinear interpolation
-- `rayleigh` — full Rayleigh scattering correction modifier
-- `lut_loader` — HDF5 LUT loading via hdf5-pure
+- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate)
 
 **Design Patterns**:
 - `UtcInstant` for time representation (dependency-free)

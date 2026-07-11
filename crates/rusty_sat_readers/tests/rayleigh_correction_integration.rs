@@ -1,12 +1,7 @@
 //! Integration test: Rayleigh scattering correction on real AHI HSD data.
 //!
-//! Validates the full Rayleigh correction pipeline:
-//! 1. Load AHI HSD reflectance data from local_data
-//! 2. Compute sun/satellite angles from the dataset's area metadata
-//! 3. Load the pyspectral Rayleigh LUT (from local cache or download)
-//! 4. Apply Rayleigh correction
-//! 5. Verify the corrected reflectance is lower than the original
-//! 6. Save before/after comparison images
+//! Validates the full Rayleigh correction pipeline using the `rustyspectral`
+//! crate for LUT I/O, wavelength adjustment, and trilinear interpolation.
 //!
 //! Requires HSD data at `local_data/ahi_input/data/20250923/07/` and
 //! the Rayleigh LUT at `pyspectral_atm_correction_luts_marine_clean_aerosol/`.
@@ -116,10 +111,6 @@ fn try_files_for_band(dir: &Path, band: &str) -> Option<Vec<(PathBuf, AhiSegment
 /// Convert AHI HSD observation_start_time_days (days since 1858-11-17,
 /// the Modified Julian Day epoch) to a UtcInstant.
 fn ahi_time_to_utc(observation_start_time_days: f64) -> UtcInstant {
-    // AHI stores time as Modified Julian Day (MJD): days since 1858-11-17.
-    // MJD epoch in Unix seconds: 1858-11-17T00:00:00 = -3506716800
-    // J2000 epoch: 2000-01-01T12:00:00 = Unix 946728000
-    // MJD to Unix: unix = (mjd - 40587) * 86400
     let unix_secs = (observation_start_time_days - 40587.0) * 86400.0;
     UtcInstant::from_unix(unix_secs as i64)
 }
@@ -149,7 +140,6 @@ fn rayleigh_correction_on_ahi_b01() {
         })
         .collect();
 
-    // Get observation time from the first handler's header.
     let obs_time = ahi_time_to_utc(handlers[0].header().basic.observation_start_time_days);
     eprintln!(
         "  Observation time: {} days since J2000",
@@ -169,7 +159,6 @@ fn rayleigh_correction_on_ahi_b01() {
     eprintln!("  Loaded B01: {}x{}", height, width);
     eprintln!("  Load time: {:.2}s", load_time.as_secs_f64());
 
-    // Verify the dataset has area metadata and x/y coordinates.
     assert!(
         dataset.attr("area").is_some(),
         "dataset must have area attr"
@@ -177,7 +166,6 @@ fn rayleigh_correction_on_ahi_b01() {
     assert!(arr.coord("x").is_some(), "dataset must have x coordinate");
     assert!(arr.coord("y").is_some(), "dataset must have y coordinate");
 
-    // Compute some stats on the original reflectance.
     let original_vals = arr.values();
     let mask = arr.mask();
     let mut orig_min = f64::INFINITY;
@@ -203,32 +191,34 @@ fn rayleigh_correction_on_ahi_b01() {
         orig_min, orig_max, orig_mean, count
     );
 
-    // Step 2: Load the Rayleigh LUT
+    // Step 2: Load the Rayleigh LUT (rustyspectral handles LUT I/O internally)
     let t_lut = Instant::now();
     let lut_path = lut_base.join("rayleigh_lut_us-standard.h5");
     if !lut_path.is_file() {
         eprintln!("SKIP: Rayleigh LUT not found at {}", lut_path.display());
         return;
     }
-    let lut = rusty_sat_modifiers::load_lut_from_hdf5(&lut_path).expect("load LUT");
-    eprintln!("  LUT loaded: {} reflectance values", lut.reflectance.len());
-    eprintln!("  LUT load time: {:.2}s", t_lut.elapsed().as_secs_f64());
-
-    // B01 central wavelength: ~0.47 μm = 470 nm
     let wavelength_nm = 470.0;
+    let corrector = RayleighCorrector::with_config(
+        &lut_path,
+        RayleighConfig {
+            platform_name: "Himawari-8".into(),
+            sensor: "ahi".into(),
+            atmosphere: Atmosphere::UsStandard,
+            aerosol_type: AerosolType::MarineCleanAerosol,
+            reduce_lim_low: 70.0,
+            reduce_lim_high: 105.0,
+            reduce_strength: 0.6,
+        },
+        wavelength_nm,
+    )
+    .expect("create corrector");
+    eprintln!("  LUT load time: {:.2}s", t_lut.elapsed().as_secs_f64());
 
     // Step 3: Apply Rayleigh correction
     let t_corr = Instant::now();
-    let config = RayleighConfig {
-        atmosphere: Atmosphere::UsStandard,
-        aerosol_type: AerosolType::MarineCleanAerosol,
-        reduce_lim_low: 70.0,
-        reduce_lim_high: 105.0,
-        reduce_strength: 0.6,
-    };
-    let corrector = RayleighCorrector::with_config(lut, config);
-    let corrected = rayleigh_correct(corrector, dataset, None, obs_time, wavelength_nm)
-        .expect("rayleigh correction");
+    let corrected =
+        rayleigh_correct(corrector, dataset, None, obs_time).expect("rayleigh correction");
     let corr_time = t_corr.elapsed();
     eprintln!("  Correction time: {:.2}s", corr_time.as_secs_f64());
 
@@ -259,7 +249,6 @@ fn rayleigh_correction_on_ahi_b01() {
         corr_min, corr_max, corr_mean, corr_count
     );
 
-    // The corrected mean should be lower than the original (Rayleigh subtracts).
     assert!(
         corr_mean < orig_mean,
         "corrected mean ({corr_mean:.4}) should be < original mean ({orig_mean:.4})"
@@ -283,7 +272,6 @@ fn rayleigh_correction_on_ahi_b01() {
     // Step 5: Save before/after PNG comparison
     let t_save = Instant::now();
 
-    // Save original — need to reload since dataset was consumed.
     let handlers2: Vec<_> = files
         .iter()
         .map(|(path, seg)| {
@@ -323,8 +311,6 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
     let out = output_dir();
     let lut_base = lut_dir();
 
-    // B03 is the 0.64 μm visible band — the primary Rayleigh correction target.
-    // B02 (0.51 μm) serves as the "red band" for cloud relaxation.
     let Some(files_b03) = try_files_for_band(&dir, "B03") else {
         eprintln!("SKIP: B03 not in test data");
         return;
@@ -336,7 +322,6 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
 
     eprintln!("\n=== Rayleigh Correction Integration Test: B03 with red band B02 ===\n");
 
-    // Load B03 (visible, 0.5km resolution)
     let handlers_b03: Vec<_> = files_b03
         .iter()
         .map(|(path, seg)| {
@@ -355,7 +340,6 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
     };
     eprintln!("  B03: {}x{}", b03_arr.shape_nd()[0], b03_arr.shape_nd()[1]);
 
-    // Load B02 (red band for cloud relaxation)
     let handlers_b02: Vec<_> = files_b02
         .iter()
         .map(|(path, seg)| {
@@ -376,9 +360,6 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
         b02_arr.shape_nd()[1]
     );
 
-    // B03 is 0.5km, B02 is 1km — different resolutions.
-    // For the red band, we can't directly use it unless shapes match.
-    // Skip cloud relaxation if shapes differ.
     let red_ref = if b03_arr.shape_nd() == b02_arr.shape_nd() {
         eprintln!("  B03 and B02 shapes match — using cloud relaxation");
         Some(&b02_dataset)
@@ -391,22 +372,18 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
         None
     };
 
-    // Load LUT
     let lut_path = lut_base.join("rayleigh_lut_us-standard.h5");
     if !lut_path.is_file() {
         eprintln!("SKIP: Rayleigh LUT not found at {}", lut_path.display());
         return;
     }
-    let lut = rusty_sat_modifiers::load_lut_from_hdf5(&lut_path).expect("load LUT");
-
-    // B03 central wavelength: ~0.64 μm = 640 nm
     let wavelength_nm = 640.0;
+    let corrector =
+        RayleighCorrector::with_config(&lut_path, RayleighConfig::default(), wavelength_nm)
+            .expect("create corrector");
 
-    // Apply correction
-    let config = RayleighConfig::default();
-    let corrector = RayleighCorrector::with_config(lut, config);
-    let corrected = rayleigh_correct(corrector, b03_dataset, red_ref, obs_time, wavelength_nm)
-        .expect("rayleigh correction");
+    let corrected =
+        rayleigh_correct(corrector, b03_dataset, red_ref, obs_time).expect("rayleigh correction");
 
     let corr_arr = corrected.array().expect("corrected array");
     eprintln!(
@@ -415,7 +392,6 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
         corr_arr.dtype().name()
     );
 
-    // Save result
     let corr_png = out.join("B03_rayleigh_corrected.png");
     SimpleImageWriter::default()
         .save_dataset(&corrected, &corr_png)

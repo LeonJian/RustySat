@@ -195,7 +195,7 @@ The `satpy/` directory contains the full Python Satpy source as **read-only desi
 | `satpy/readers/ahi_hsd.py` | `crates/rusty_sat_readers/src/ahi_hsd.rs` |
 | `satpy/readers/ahi_l2_nc.py` | `crates/rusty_sat_readers/src/ahi_l2_nc.rs` |
 | `satpy/etc/readers/ahi_hsd.yaml` | Config parsed by `YamlMetadataReader` |
-| `pyspectral/rayleigh.py` | `crates/rusty_sat_modifiers/src/rayleigh.rs` |
+| `pyspectral/rayleigh.py` | `crates/rusty_sat_modifiers/src/rayleigh.rs` (delegates to `rustyspectral` crate) |
 | `pyorbital/astronomy.py` | `crates/rusty_sat_modifiers/src/astronomy.rs` |
 
 The Python code documents expected behavior (dtype layouts, calibration formulas, segment numbering rules). It is **never** compiled or executed by the Rust build.
