@@ -160,6 +160,7 @@ pub struct RayleighCorrector {
 
 impl RayleighCorrector {
     /// Create a corrector from a LUT file path and default config.
+    /// Does NOT auto-download; use `with_config_auto` for that.
     pub fn new(lut_path: impl Into<PathBuf>, wavelength_nm: f64) -> Result<Self> {
         let config = RayleighConfig::default();
         let lut_data = load_lut_data(&lut_path.into(), wavelength_nm)?;
@@ -167,12 +168,32 @@ impl RayleighCorrector {
     }
 
     /// Create a corrector from a LUT file path and custom config.
+    /// Does NOT auto-download; use `with_config_auto` for that.
     pub fn with_config(
         lut_path: impl Into<PathBuf>,
         config: RayleighConfig,
         wavelength_nm: f64,
     ) -> Result<Self> {
         let lut_data = load_lut_data(&lut_path.into(), wavelength_nm)?;
+        Ok(Self { config, lut_data })
+    }
+
+    /// Create a corrector with custom config, auto-downloading the LUT
+    /// via rustyspectral if not already cached locally.
+    ///
+    /// Uses rustyspectral's default LUT directory
+    /// (`~/Library/Application Support/pyspectral/` on macOS,
+    /// `~/.local/share/pyspectral/` on Linux). Override via the
+    /// `PSP_CONFIG_FILE` environment variable.
+    pub fn with_config_auto(config: RayleighConfig, wavelength_nm: f64) -> Result<Self> {
+        let rayleigh = rustyspectral::rayleigh::Rayleigh::new(
+            &config.platform_name,
+            &config.sensor,
+            Some(config.atmosphere.file_suffix()),
+            Some(config.aerosol_type.dir_name()),
+        );
+        let lut_path = rayleigh.reflectance_lut_filename;
+        let lut_data = load_lut_data(&lut_path, wavelength_nm)?;
         Ok(Self { config, lut_data })
     }
 

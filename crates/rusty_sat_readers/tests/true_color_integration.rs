@@ -69,14 +69,6 @@ fn output_dir() -> PathBuf {
     dir
 }
 
-fn lut_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .join("pyspectral_atm_correction_luts_marine_clean_aerosol")
-}
-
 fn scan_hsd_files(dir: &Path) -> BTreeMap<String, Vec<(PathBuf, AhiSegmentInfo)>> {
     let mut by_band: BTreeMap<String, Vec<(PathBuf, AhiSegmentInfo)>> = BTreeMap::new();
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -140,11 +132,6 @@ fn ahi_time_to_utc(observation_start_time_days: f64) -> UtcInstant {
 }
 
 fn make_corrector(wavelength_nm: f64) -> Option<RayleighCorrector> {
-    let lut_path = lut_dir().join("rayleigh_lut_us-standard.h5");
-    if !lut_path.is_file() {
-        eprintln!("SKIP: Rayleigh LUT not found at {}", lut_path.display());
-        return None;
-    }
     let config = RayleighConfig {
         platform_name: "Himawari-8".into(),
         sensor: "ahi".into(),
@@ -154,7 +141,13 @@ fn make_corrector(wavelength_nm: f64) -> Option<RayleighCorrector> {
         reduce_lim_high: 105.0,
         reduce_strength: 0.6,
     };
-    RayleighCorrector::with_config(&lut_path, config, wavelength_nm).ok()
+    match RayleighCorrector::with_config_auto(config, wavelength_nm) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("SKIP: Rayleigh LUT not available: {e}");
+            None
+        }
+    }
 }
 
 fn dataset_f64_to_f32(dataset: Dataset) -> Dataset {
@@ -303,14 +296,12 @@ fn himawari_true_color_reproduction() {
                 let reload = load_band(&b01_files, "hsd_b01").0;
                 let ba = reload.array().expect("b01 reload");
                 let orig_vals = ba.values_as_f64();
-                let orig_mean =
-                    orig_vals.iter().filter(|v| v.is_finite()).sum::<f64>()
-                        / orig_vals.iter().filter(|v| v.is_finite()).count().max(1) as f64;
+                let orig_mean = orig_vals.iter().filter(|v| v.is_finite()).sum::<f64>()
+                    / orig_vals.iter().filter(|v| v.is_finite()).count().max(1) as f64;
                 let ca = b01_corrected.array().expect("b01 corrected");
                 let corr_vals = ca.values_as_f64();
-                let corr_mean =
-                    corr_vals.iter().filter(|v| v.is_finite()).sum::<f64>()
-                        / corr_vals.iter().filter(|v| v.is_finite()).count().max(1) as f64;
+                let corr_mean = corr_vals.iter().filter(|v| v.is_finite()).sum::<f64>()
+                    / corr_vals.iter().filter(|v| v.is_finite()).count().max(1) as f64;
                 eprintln!(
                     "  B01: orig_mean={orig_mean:.4}, corr_mean={corr_mean:.4}, delta={:.4} ({:.1}%)",
                     orig_mean - corr_mean,
@@ -464,8 +455,7 @@ fn himawari_true_color_reproduction() {
 
     // Step 8: Enhance — crude stretch + gamma 2.0 per channel, save 8-bit PNG
     let t_save = Instant::now();
-    let mut img8 =
-        FloatImage::<f32>::from_rgb_dataset_owned(rgb).expect("create FloatImage<f32>");
+    let mut img8 = FloatImage::<f32>::from_rgb_dataset_owned(rgb).expect("create FloatImage<f32>");
     // Use fixed [0,100] range (reflectance %) so Rayleigh-corrected image
     // can be compared against an uncorrected version with the same scale.
     img8.crude_stretch_in_place(Some(0.0), Some(100.0));
