@@ -287,6 +287,8 @@ fn himawari_true_color_reproduction() {
             let b01_utc = ahi_time_to_utc(b01_obs);
             let b03_utc = ahi_time_to_utc(b03_obs);
 
+            eprintln!("  Applying Rayleigh correction to B01 (470 nm) and B03 (640 nm)...");
+
             b01_corrected =
                 rayleigh_correct(b01_corr, b01, None, b01_utc).expect("B01 Rayleigh correction");
             b03_corrected =
@@ -295,6 +297,26 @@ fn himawari_true_color_reproduction() {
                 "  Rayleigh correction time: {:.2}s",
                 t_rayleigh.elapsed().as_secs_f64()
             );
+
+            // Diagnostic: mean before/after for B01
+            {
+                let reload = load_band(&b01_files, "hsd_b01").0;
+                let ba = reload.array().expect("b01 reload");
+                let orig_vals = ba.values_as_f64();
+                let orig_mean =
+                    orig_vals.iter().filter(|v| v.is_finite()).sum::<f64>()
+                        / orig_vals.iter().filter(|v| v.is_finite()).count().max(1) as f64;
+                let ca = b01_corrected.array().expect("b01 corrected");
+                let corr_vals = ca.values_as_f64();
+                let corr_mean =
+                    corr_vals.iter().filter(|v| v.is_finite()).sum::<f64>()
+                        / corr_vals.iter().filter(|v| v.is_finite()).count().max(1) as f64;
+                eprintln!(
+                    "  B01: orig_mean={orig_mean:.4}, corr_mean={corr_mean:.4}, delta={:.4} ({:.1}%)",
+                    orig_mean - corr_mean,
+                    (orig_mean - corr_mean) / orig_mean * 100.0
+                );
+            }
 
             // Verify area metadata preserved
             assert!(
@@ -442,9 +464,11 @@ fn himawari_true_color_reproduction() {
 
     // Step 8: Enhance — crude stretch + gamma 2.0 per channel, save 8-bit PNG
     let t_save = Instant::now();
-
-    let mut img8 = FloatImage::<f32>::from_rgb_dataset_owned(rgb).expect("create FloatImage<f32>");
-    img8.crude_stretch_in_place(None, None);
+    let mut img8 =
+        FloatImage::<f32>::from_rgb_dataset_owned(rgb).expect("create FloatImage<f32>");
+    // Use fixed [0,100] range (reflectance %) so Rayleigh-corrected image
+    // can be compared against an uncorrected version with the same scale.
+    img8.crude_stretch_in_place(Some(0.0), Some(100.0));
     img8.gamma_channels_in_place(&[2.0, 2.0, 2.0])
         .expect("gamma correct");
     let image8 = img8.to_u8_image(0).expect("convert to u8");
