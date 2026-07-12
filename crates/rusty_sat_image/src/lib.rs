@@ -602,6 +602,37 @@ impl<T: ImageFloat> FloatImage<T> {
         Ok(self)
     }
 
+    /// CIRA logarithmic stretch adapted to human vision.
+    ///
+    /// Maps reflectance data (0–100%) via:
+    /// ```text
+    /// scaled = clip(data * 0.01, EPS)
+    /// stretched = (log10(scaled) - log10(0.0223)) /
+    ///             ((1 - log10(0.0223)) * 0.75)
+    /// ```
+    /// Skips masked and non-finite pixels in-place. No allocations.
+    ///
+    /// Reference: `satpy/satpy/enhancements/contrast.py` — `_cira_stretch`.
+    pub fn cira_stretch_in_place(&mut self) {
+        const SCALE: f64 = 0.01;
+        const LOG_CUTOFF: f64 = -1.651695136952194; // log10(0.0223)
+        const DENOM: f64 = 1.9887713527141455; // (1 - LOG_CUTOFF) * 0.75
+        let channels = self.mode.channels();
+        for idx in 0..self.pixels.len() {
+            if self.is_masked_pixel(idx / channels) {
+                continue;
+            }
+            let v = self.pixels[idx];
+            if !v.is_finite() {
+                continue;
+            }
+            let f = v.to_f64();
+            let scaled = (f * SCALE).max(f64::EPSILON);
+            let stretched = (scaled.log10() - LOG_CUTOFF) / DENOM;
+            self.pixels[idx] = T::from_f64(stretched);
+        }
+    }
+
     pub fn gamma_in_place(&mut self, gamma: T) -> Result<()> {
         let gamma_values = vec![gamma; self.mode.channels()];
         self.gamma_channels_in_place(&gamma_values)

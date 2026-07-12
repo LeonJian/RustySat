@@ -132,7 +132,7 @@ fn build_corrector(nm: f64) -> Option<RayleighCorrector> {
         platform_name: "Himawari-8".into(),
         sensor: "ahi".into(),
         atmosphere: Atmosphere::UsStandard,
-        aerosol_type: rusty_sat_modifiers::AerosolType::MarineCleanAerosol,
+        aerosol_type: rusty_sat_modifiers::AerosolType::RayleighOnly,
         reduce_lim_low: 70.0,
         reduce_lim_high: 105.0,
         reduce_strength: 0.6,
@@ -236,38 +236,32 @@ fn true_color_reproduction() {
     let (h05, w05) = d02_05.array().expect("arr").shape_yx().expect("2D");
     eprintln!("  0.5 km shape: {h05}×{w05}");
 
-    // Step 2: B03 (red, 0.5 km) — load first copy for hybrid green blend
-    eprintln!("--- B03: correct (for hybrid blend) ---");
-    let (d03_h, t03_h, (h03, w03)) = load_band(&f03, "hsd_b03");
-    eprintln!("  0.5 km shape: {h03}×{w03}");
-    assert_eq!((h03, w03), (h05, w05), "B03 shape mismatch");
-    let d03_hybrid = correct_and_upsample(d03_h, t03_h, 640.0, None, min_cos);
-
-    // Step 3: B04 (NIR, 860 nm, 1 km) → correct → up-sample
+    // Step 2: B04 (NIR, 860 nm, 1 km) → correct(sunz only, Rayleigh no-op) → up-sample
     eprintln!("--- B04: correct + up-sample to 0.5 km ---");
     let (d04, t04, _) = load_band(&f04, "hsd_b04");
     let d04_05 = correct_and_upsample(d04, t04, 860.0, None, min_cos);
 
-    // Step 4: Hybrid green = 0.6321×G + 0.2928×R + 0.0751×N
-    // G=B02(green), R=B03(red), N=B04(NIR) — Satpy AHI true_color recipe
-    eprintln!("--- Hybrid green (3-band: B02+B03+B04) ---");
-    let hybrid = SpectralBlender::new("hybrid_green", vec![0.6321, 0.2928, 0.0751])
+    // Step 3: Hybrid green = 0.85×B02 + 0.15×B04  (Satpy HybridGreen / Miller et al.)
+    eprintln!("--- Hybrid green (B02 + B04) ---");
+    let hybrid = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
         .expect("blender")
-        .compose_owned(vec![d02_05, d03_hybrid, d04_05])
+        .compose_owned(vec![d02_05, d04_05])
         .expect("hybrid");
     assert!(hybrid.array().is_some());
 
-    // Step 5: B03 (red) — reload second copy for red channel
-    eprintln!("--- B03: reload for red channel ---");
-    let (d03_r, t03_r, _) = load_band(&f03, "hsd_b03");
-    let d03_red = correct_and_upsample(d03_r, t03_r, 640.0, None, min_cos);
+    // Step 4: B03 (red, 0.5 km native) → correct
+    eprintln!("--- B03: correct (0.5 km, red channel) ---");
+    let (d03, t03, (h03, w03)) = load_band(&f03, "hsd_b03");
+    eprintln!("  0.5 km shape: {h03}×{w03}");
+    assert_eq!((h03, w03), (h05, w05), "B03 shape mismatch");
+    let d03_red = correct_and_upsample(d03, t03, 640.0, None, min_cos);
 
-    // Step 6: B01 (blue) → correct → up-sample
+    // Step 5: B01 (blue) → correct → up-sample
     eprintln!("--- B01: correct + up-sample to 0.5 km ---");
     let (d01, t01, _) = load_band(&f01, "hsd_b01");
     let d01_05 = correct_and_upsample(d01, t01, 470.0, None, min_cos);
 
-    // Step 7: RGB composite R=B03, G=hybrid, B=B01
+    // Step 6: RGB composite R=B03, G=hybrid, B=B01
     eprintln!("--- RGB composite ---");
     let rgb = RgbCompositor::new("true_color")
         .expect("rgb")
@@ -285,16 +279,16 @@ fn true_color_reproduction() {
         eprintln!("  RGB shape: [{}, {}, {}]", s[0], s[1], s[2]);
     };
 
-    // Step 8: Gamma 2.2 → save 8-bit PNG
-    // Memory: band-major f32[rgb] released when rgb drops after from_rgb_array
-    eprintln!("--- Gamma 2.2 + save ---");
+    // Step 7: cira_stretch → save 8-bit PNG (Satpy true_color_default)
+    // Memory: drop band-major f32 after from_rgb_array, keep interleaved only
+    eprintln!("--- cira_stretch + save ---");
     use rusty_sat_image::FloatImage;
-    let rgb_arr = rgb.array().expect("arr");
-    let mut img = FloatImage::<f32>::from_rgb_array(rgb_arr).expect("float image");
-    drop(rgb_arr);
+    let mut img = {
+        let rgb_arr = rgb.array().expect("arr");
+        FloatImage::<f32>::from_rgb_array(rgb_arr).expect("float image")
+    };
     drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
-    img.crude_stretch_in_place(None, None);
-    img.gamma_in_place(2.2).expect("gamma");
+    img.cira_stretch_in_place();
     let u8 = img.to_u8_image(0).expect("u8");
     drop(img); // free f32 interleaved (~5.8 GB)
     let png = out.join("true_color_05km.png");

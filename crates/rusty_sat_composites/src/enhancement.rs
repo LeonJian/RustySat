@@ -49,6 +49,7 @@ impl EnhancementExecutor {
             Some("stretch") => apply_stretch(image, operation),
             Some("gamma") => apply_gamma(image, operation),
             Some("invert") => apply_invert(image, operation),
+            Some("cira_stretch") => apply_cira_stretch(image),
             Some(_) | None if self.strict => Err(RustySatError::unsupported(format!(
                 "enhancement operation '{}'",
                 operation.method()
@@ -111,6 +112,11 @@ fn apply_gamma<T: ImageFloat>(
         let gamma = gamma.into_iter().map(T::from_f64).collect::<Vec<_>>();
         image.gamma_channels_in_place(&gamma)
     }
+}
+
+fn apply_cira_stretch<T: ImageFloat>(image: &mut FloatImage<T>) -> Result<()> {
+    image.cira_stretch_in_place();
+    Ok(())
 }
 
 fn apply_invert<T: ImageFloat>(
@@ -285,6 +291,37 @@ enhancements:
         EnhancementExecutor::permissive().apply_operation(&mut image, operation)?;
 
         assert_eq!(image.pixels(), &[0.5]);
+        Ok(())
+    }
+
+    #[test]
+    fn cira_stretch_maps_typical_reflectance() -> Result<()> {
+        let config = CompositeRegistryConfig::from_yaml_str(
+            r#"
+enhancements:
+  test:
+    operations:
+      - name: cira
+        method: !!python/name:satpy.enhancements.contrast.cira_stretch
+"#,
+        )?;
+        let operation = &config.enhancements()["test"].operations()[0];
+
+        // Test with a typical Luma image, reflectance values 0–100%
+        let mut image = FloatImage::<f32>::from_pixels(
+            ImageMode::Luma,
+            1,
+            4,
+            vec![2.23_f32, 22.3, 50.0, 100.0],
+        )?;
+        EnhancementExecutor::new().apply_operation(&mut image, operation)?;
+
+        let p = image.pixels();
+        // 2.23% → 0.0,  22.3% → 0.503,  50% → 0.679,  100% → 0.831
+        assert!((p[0] - 0.0).abs() < 0.05, "2.23% cutoff → {}", p[0]);
+        assert!((p[1] - 0.503).abs() < 0.05, "22.3% → {}", p[1]);
+        assert!((p[2] - 0.679).abs() < 0.05, "50% → {}", p[2]);
+        assert!((p[3] - 0.831).abs() < 0.05, "100% → {}", p[3]);
         Ok(())
     }
 }
