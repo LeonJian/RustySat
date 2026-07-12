@@ -38,7 +38,7 @@ fn data_dir() -> Option<PathBuf> {
         .parent()
         .and_then(Path::parent)
         .expect("root");
-    let d = root.join("local_data/ahi_input/data/20250923/07");
+    let d = root.join("local_data/ahi_input/data/20260712/02");
     if d.is_dir() {
         Some(d)
     } else {
@@ -170,9 +170,9 @@ fn correct_band(
     ds: rusty_sat_core::Dataset,
     t: UtcInstant,
     nm: f64,
-    min_cos: f64,
+    max_sza: f64,
 ) -> rusty_sat_core::Dataset {
-    rayleigh_correct_with_sun_zenith(lut!(build_corrector(nm)), ds, None, t, min_cos)
+    rayleigh_correct_with_sun_zenith(lut!(build_corrector(nm)), ds, None, t, max_sza)
         .expect("combined")
 }
 
@@ -204,18 +204,18 @@ fn true_color_reproduction() {
         return;
     };
 
-    let min_cos = SunZenithCorrector::default().min_cos_zenith();
+    let max_sza = 95.0; // Satpy SunZenithCorrector default
     eprintln!("\n========== True-Color 0.5 km Pipeline ==========\n");
 
     // Step 1-2: B02(green), B04(NIR) → correct at native 1 km
     eprintln!("--- B02: correct (1 km) ---");
     let (d02, t02, _) = load_band(&f02, "hsd_b02");
-    let d02_corr = correct_band(d02, t02, 510.0, min_cos);
+    let d02_corr = correct_band(d02, t02, 510.0, max_sza);
     eprintln!("  done");
 
     eprintln!("--- B04: correct (1 km) ---");
     let (d04, t04, _) = load_band(&f04, "hsd_b04");
-    let d04_corr = correct_band(d04, t04, 860.0, min_cos);
+    let d04_corr = correct_band(d04, t04, 860.0, max_sza);
 
     // Step 3: Hybrid green at 1 km (SelfSharpenedRgb up-samples internally)
     eprintln!("--- Hybrid green (1 km) ---");
@@ -228,12 +228,12 @@ fn true_color_reproduction() {
     // Step 4: B03(red, 0.5 km native) → correct
     eprintln!("--- B03: correct (0.5 km) ---");
     let (d03, t03, _) = load_band(&f03, "hsd_b03");
-    let d03_corr = correct_band(d03, t03, 640.0, min_cos);
+    let d03_corr = correct_band(d03, t03, 640.0, max_sza);
 
     // Step 5: B01(blue, 1 km) → correct
     eprintln!("--- B01: correct (1 km) ---");
     let (d01, t01, _) = load_band(&f01, "hsd_b01");
-    let d01_corr = correct_band(d01, t01, 470.0, min_cos);
+    let d01_corr = correct_band(d01, t01, 470.0, max_sza);
 
     // Step 6: SelfSharpenedRgb(R_05, G_1km, B_1km) → up-samples + sharpens
     eprintln!("--- SelfSharpenedRgb composite ---");
@@ -283,7 +283,7 @@ fn true_color_reproduction() {
     let orig_mean = orig_v.iter().filter(|v| v.is_finite()).sum::<f64>()
         / orig_v.iter().filter(|v| v.is_finite()).count().max(1) as f64;
     let d02comb =
-        rayleigh_correct_with_sun_zenith(lut!(build_corrector(510.0)), d02c, None, t02c, min_cos)
+        rayleigh_correct_with_sun_zenith(lut!(build_corrector(510.0)), d02c, None, t02c, max_sza)
             .expect("comb");
     let cv = d02comb.array().expect("arr").values_as_f64();
     let corr_mean = cv.iter().filter(|v| v.is_finite()).sum::<f64>()

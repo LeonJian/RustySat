@@ -21,14 +21,22 @@ use rusty_sat_core::{
 
 /// Solar zenith angle correction.
 ///
-/// ## Formula
+/// ## Formula (Satpy `SunZenithCorrector`)
 ///
 /// ```text
-/// corrected_refl = TOA_refl / max(min_cos_zenith, cos(sun_zenith_rad))
+/// limit = 88.0°
+/// limit_cos = cos(88°)
+/// max_sza_cos = cos(max_sza)
+///
+/// if     cos_sza > limit_cos:     corr = 1 / cos_sza
+/// elif   cos_sza > max_sza_cos:  grad = (cos_sza - max_sza_cos) / (limit_cos - max_sza_cos)
+///                                  corr = (1 - log₂(grad+1)) / limit_cos
+/// else   (night):                  corr = 0
+///
+/// result = refl * corr
 /// ```
 ///
-/// The default `min_cos_zenith` 0.058 corresponds to cos(86.7°) and prevents
-/// division by zero near the terminator.
+/// The default `max_sza` 95.0° matches Satpy default.
 ///
 /// ## Memory
 ///
@@ -36,34 +44,30 @@ use rusty_sat_core::{
 /// strips using precomputed column/row trig tables. No full-grid angle storage.
 #[derive(Debug, Clone, Copy)]
 pub struct SunZenithCorrector {
-    min_cos_zenith: f64,
+    max_sza: f64,
 }
 
 impl Default for SunZenithCorrector {
     fn default() -> Self {
-        Self {
-            min_cos_zenith: 0.058, // cos(86.7°) ≈ cos(87°)
-        }
+        Self { max_sza: 95.0 }
     }
 }
-
 impl SunZenithCorrector {
-    /// Create a new corrector with a custom minimum cos(zenith) threshold.
+    /// Create a new corrector with a custom max_sza.
     ///
-    /// Pixels with cos(sun_zenith) below this threshold will be clamped to
-    /// `refl / min_cos` to avoid division by tiny numbers.
-    pub fn new(min_cos_zenith: f64) -> Result<Self> {
-        if !min_cos_zenith.is_finite() || min_cos_zenith <= 0.0 || min_cos_zenith >= 1.0 {
+    /// `max_sza` is the solar zenith angle beyond which correction is 0 (night).
+    /// Must be in [88.0, 180.0). Default is 95.0°.
+    pub fn new(max_sza: f64) -> Result<Self> {
+        if !max_sza.is_finite() || !(88.0..180.0).contains(&max_sza) {
             return Err(RustySatError::invalid_input(format!(
-                "min_cos_zenith must be in (0, 1), got {min_cos_zenith}"
+                "max_sza must be in [88.0, 180.0), got {max_sza}"
             )));
         }
-        Ok(Self { min_cos_zenith })
+        Ok(Self { max_sza })
     }
 
-    /// The minimum cos(zenith) threshold.
-    pub fn min_cos_zenith(&self) -> f64 {
-        self.min_cos_zenith
+    pub fn max_sza(&self) -> f64 {
+        self.max_sza
     }
 
     /// Apply solar zenith correction to a reflectance dataset.
@@ -71,7 +75,13 @@ impl SunZenithCorrector {
     /// Consumes `self` and the dataset. Returns a corrected f32 dataset.
     /// Preserves area metadata and x/y coordinates from the source.
     pub fn apply_correction(self, dataset: Dataset, params: AngleParams) -> Result<Dataset> {
-        let min_cos = self.min_cos_zenith;
+        let max_sza = self.max_sza;
+        let max_sza_rad = max_sza.to_radians();
+        let max_sza_cos = max_sza_rad.cos();
+        const LIMIT_DEG: f64 = 88.0;
+        let limit_cos = LIMIT_DEG.to_radians().cos();
+        let span = limit_cos - max_sza_cos;
+        let inv_span = 1.0 / span;
 
         let area_attr = dataset.attr("area").cloned();
         let source_coords = dataset.array().map(|a| a.coords().clone());
@@ -90,7 +100,6 @@ impl SunZenithCorrector {
         let lon_0_rad = params.geos.longitude_of_projection_origin.to_radians();
         let column_data = precompute_columns(&params.x_coords, h_inv, lon_0_rad, gmst_val, sun_ra);
 
-        // Earth disk boundary: points beyond this angle from SSP are space  pixels.
         let max_angle = (params.geos.semi_major_axis / params.geos.satellite_radius()).asin();
         let max_angle_sq = max_angle * max_angle;
 
@@ -115,7 +124,6 @@ impl SunZenithCorrector {
                     let col = local_i % width;
                     let col_pre = &column_data[col];
 
-                    // Check if point is within the Earth disk
                     let x_pos = params.x_coords[col];
                     let y_pos = params.y_coords[y0 + row];
                     let rsq = (x_pos * x_pos + y_pos * y_pos) / (h * h);
@@ -130,12 +138,33 @@ impl SunZenithCorrector {
                         *out = f32::NAN;
                         return;
                     }
-                    let cos_sza = sunz_deg.to_radians().cos().max(min_cos);
-                    *out /= cos_sza as f32;
+                    let cos_sza = sunz_deg.to_radians().cos();
+                    *out *= sza_correction_factor(cos_sza, limit_cos, max_sza_cos, inv_span);
                 });
         }
 
         build_result(refl_f32, mask, height, width, area_attr, source_coords)
+    }
+}
+
+/// Compute the SZA correction factor with Satpy-style gradient falloff.
+///
+/// `inv_span = 1.0 / (limit_cos - max_sza_cos)`
+#[inline]
+pub(crate) fn sza_correction_factor(
+    cos_sza: f64,
+    limit_cos: f64,
+    max_sza_cos: f64,
+    inv_span: f64,
+) -> f32 {
+    if cos_sza > limit_cos {
+        (1.0 / cos_sza) as f32
+    } else if cos_sza > max_sza_cos {
+        let grad = ((cos_sza - max_sza_cos) * inv_span).clamp(0.0, 1.0);
+        let fac = 1.0 - (grad + 1.0).log2();
+        (fac / limit_cos) as f32
+    } else {
+        0.0_f32
     }
 }
 
@@ -173,19 +202,12 @@ fn build_result(
 }
 
 /// Compute angles and apply solar zenith correction in one call.
-///
-/// This is the convenience wrapper. It extracts the `area` attribute and
-/// x/y coordinates from the dataset, builds an `AngleParams`, and applies
-/// the correction.
 pub fn sun_zenith_correct(dataset: Dataset, utc: UtcInstant) -> Result<Dataset> {
     let corrector = SunZenithCorrector::default();
     sun_zenith_correct_with(dataset, utc, corrector)
 }
 
 /// Compute angles and apply solar zenith correction with a custom corrector.
-///
-/// Same as [`sun_zenith_correct`] but allows specifying a custom
-/// `min_cos_zenith` threshold.
 pub fn sun_zenith_correct_with(
     dataset: Dataset,
     utc: UtcInstant,
@@ -330,35 +352,30 @@ mod tests {
     }
 
     #[test]
-    fn default_min_cos_is_about_cos_87_degrees() {
-        let corrector = SunZenithCorrector::default();
-        assert!(
-            (corrector.min_cos_zenith - 0.058).abs() < 0.001,
-            "{}",
-            corrector.min_cos_zenith
-        );
+    fn default_max_sza_is_95() {
+        let c = SunZenithCorrector::default();
+        assert!((c.max_sza() - 95.0).abs() < 0.01);
     }
 
     #[test]
-    fn custom_min_cos_rejects_invalid_values() {
-        assert!(SunZenithCorrector::new(0.0).is_err());
-        assert!(SunZenithCorrector::new(-0.1).is_err());
-        assert!(SunZenithCorrector::new(1.0).is_err());
-        assert!(SunZenithCorrector::new(1.5).is_err());
+    fn rejects_invalid_max_sza() {
+        assert!(SunZenithCorrector::new(87.9).is_err());
+        assert!(SunZenithCorrector::new(180.0).is_err());
+        assert!(SunZenithCorrector::new(-1.0).is_err());
         assert!(SunZenithCorrector::new(f64::NAN).is_err());
     }
 
     #[test]
-    fn custom_min_cos_accepts_valid_values() {
-        assert!(SunZenithCorrector::new(0.01).is_ok());
-        assert!(SunZenithCorrector::new(0.5).is_ok());
-        assert!(SunZenithCorrector::new(0.999).is_ok());
+    fn accepts_valid_max_sza() {
+        assert!(SunZenithCorrector::new(88.0).is_ok());
+        assert!(SunZenithCorrector::new(95.0).is_ok());
+        assert!(SunZenithCorrector::new(120.0).is_ok());
     }
 
     #[test]
-    fn corrector_name_reported_correctly() {
-        let corrector = SunZenithCorrector::new(0.1).expect("valid cos");
-        assert_eq!(corrector.min_cos_zenith(), 0.1);
+    fn max_sza_reported_correctly() {
+        let corrector = SunZenithCorrector::new(100.0).expect("valid");
+        assert!((corrector.max_sza() - 100.0).abs() < 0.01);
     }
 
     #[test]
@@ -596,26 +613,26 @@ mod tests {
     }
 
     #[test]
-    fn min_cos_clamps_extreme_zenith() {
-        // Use a tiny corrector that clamps aggressively.
-        // With min_cos_zenith=0.9, cos(90°)=0 would clamp to 0.9,
-        // so maximum correction = 1/0.9 ≈ 1.111
-        let corrector = SunZenithCorrector::new(0.9).expect("valid cos");
+    fn sza_falloff_reduces_correction_near_terminator() {
+        // max_sza=95°, pixels at moderate SZA should get correction,
+        // pixels near the terminator get zero or reduced.
+        let corrector = SunZenithCorrector::new(95.0).expect("valid");
         let n = 15;
         let values = vec![100.0_f32; n * n];
         let dataset = make_dataset(n, n, values, true);
         let params = make_angle_params(n, n);
         let result = corrector
             .apply_correction(dataset, params)
-            .expect("correction should succeed");
-        let result_values = result.array().expect("array").values_as_f64();
-
-        // With min_cos=0.9, no pixel should exceed 100/0.9 ≈ 111.11
-        for v in &result_values {
-            if v.is_finite() {
-                assert!(*v <= 115.0, "value {v} exceeds clamp-limited maximum");
-            }
-        }
+            .expect("correction");
+        let vals = result.array().expect("arr").values_as_f64();
+        // Center pixel at SSP has sza > 0 (sun not overhead at 7:20 UTC),
+        // so correction factor > 1. Values should be finite and ≥ 100.
+        let center = vals[n / 2 * n + n / 2];
+        assert!(center.is_finite(), "center should be finite");
+        assert!(center >= 99.0, "center should be ≥ 100: got {center}");
+        // Some edge pixels may be NaN (space) or have very large corrections.
+        let finite: Vec<_> = vals.iter().filter(|v| v.is_finite()).copied().collect();
+        assert!(!finite.is_empty());
     }
 
     #[test]

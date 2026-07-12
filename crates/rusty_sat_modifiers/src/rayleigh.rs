@@ -342,7 +342,7 @@ impl RayleighCorrector {
     /// computed once per pixel and both corrections are applied inline:
     ///
     /// ```text
-    /// refl /= max(min_cos_zenith, cos(sun_zenith_rad))   // sun zenith
+    /// refl *= sza_factor      // sun zenith (88°→max_sza gradient falloff)
     /// refl  = max(0, refl - LUT_correction)                // Rayleigh
     /// ```
     ///
@@ -353,8 +353,14 @@ impl RayleighCorrector {
         vis_dataset: Dataset,
         red_dataset: Option<&Dataset>,
         params: crate::angles::AngleParams,
-        min_cos_zenith: f64,
+        max_sza: f64,
     ) -> Result<Dataset> {
+        let max_sza_rad = max_sza.to_radians();
+        let max_sza_cos = max_sza_rad.cos();
+        const LIMIT_DEG: f64 = 88.0;
+        let limit_cos = LIMIT_DEG.to_radians().cos();
+        let span = limit_cos - max_sza_cos;
+        let inv_span = 1.0 / span;
         let config = self.config;
         let lut = self.lut_data;
 
@@ -446,8 +452,13 @@ impl RayleighCorrector {
                         return;
                     }
 
-                    let cos_sza = sunz.to_radians().cos().max(min_cos_zenith);
-                    *out /= cos_sza as f32;
+                    let cos_sza = sunz.to_radians().cos();
+                    *out *= crate::sun_zenith::sza_correction_factor(
+                        cos_sza,
+                        limit_cos,
+                        max_sza_cos,
+                        inv_span,
+                    );
 
                     let (satz, sata) =
                         satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
@@ -629,14 +640,14 @@ pub fn rayleigh_correct(
 /// Compute angles and apply both sun zenith and Rayleigh correction
 /// in a single pass.
 ///
-/// Use `min_cos_zenith` to control the sun zenith clamping threshold.
-/// Pass `SunZenithCorrector::default().min_cos_zenith()` for the default.
+/// `max_sza` controls where the sun-zenith correction reaches zero at
+/// the terminator (default 95.0°, matching Satpy).
 pub fn rayleigh_correct_with_sun_zenith(
     corrector: RayleighCorrector,
     vis_dataset: Dataset,
     red_dataset: Option<&Dataset>,
     utc: UtcInstant,
-    min_cos_zenith: f64,
+    max_sza: f64,
 ) -> Result<Dataset> {
     use crate::angles::{extract_xy_coords, AngleParams};
 
@@ -652,7 +663,7 @@ pub fn rayleigh_correct_with_sun_zenith(
     let (x_coords, y_coords) = extract_xy_coords(coords)?;
     let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
 
-    corrector.apply_correction_with_sun_zenith(vis_dataset, red_dataset, params, min_cos_zenith)
+    corrector.apply_correction_with_sun_zenith(vis_dataset, red_dataset, params, max_sza)
 }
 
 #[cfg(test)]
@@ -754,7 +765,7 @@ mod tests {
         drop(tmp);
         match RayleighCorrector::new(&p, 1.0) {
             Ok(c) => {
-                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 0.058);
+                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 95.0);
                 assert!(r.is_err());
             }
             Err(_) => { /* can't test — no LUT available */ }
@@ -771,7 +782,7 @@ mod tests {
         drop(tmp);
         match RayleighCorrector::new(&p, 1.0) {
             Ok(c) => {
-                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 0.058);
+                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 95.0);
                 assert!(r.is_err());
             }
             Err(_) => { /* can't test — no LUT available */ }
@@ -779,10 +790,9 @@ mod tests {
     }
 
     #[test]
-    fn combined_default_min_cos_matches_sun_zenith_corrector() {
+    fn combined_default_max_sza_is_95() {
         let sz = SunZenithCorrector::default();
-        let min_cos = sz.min_cos_zenith();
-        assert!((min_cos - 0.058).abs() < 0.001);
+        assert!((sz.max_sza() - 95.0).abs() < 0.01);
     }
 
     #[test]
@@ -797,7 +807,7 @@ mod tests {
         drop(tmp);
         match RayleighCorrector::new(&p, 1.0) {
             Ok(c) => {
-                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 0.058);
+                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 95.0);
                 // With grid_3d=None (wavelength out of range), this is a
                 // no-op pass-through but should still produce a Dataset.
                 assert!(r.is_ok());
