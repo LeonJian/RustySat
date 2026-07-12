@@ -45,5 +45,8 @@ pub use angles::{extract_xy_coords, AngleParams, AngleSet};
 pub use astronomy::UtcInstant;
 pub use geos::GeosProjection;
 pub use orbital::{get_observer_look, satellite_angles_grid};
-pub use rayleigh::{rayleigh_correct, AerosolType, Atmosphere, RayleighConfig, RayleighCorrector};
+pub use rayleigh::{
+    rayleigh_correct, rayleigh_correct_with_sun_zenith, AerosolType, Atmosphere, RayleighConfig,
+    RayleighCorrector,
+};
 pub use sun_zenith::{sun_zenith_correct, sun_zenith_correct_with, SunZenithCorrector};

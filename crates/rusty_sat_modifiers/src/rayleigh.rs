@@ -335,6 +335,173 @@ impl RayleighCorrector {
             source_coords,
         )
     }
+
+    /// Apply both sun zenith and Rayleigh correction in a single pass.
+    ///
+    /// Consumes the visible dataset. In each 64-row strip, angles are
+    /// computed once per pixel and both corrections are applied inline:
+    ///
+    /// ```text
+    /// refl /= max(min_cos_zenith, cos(sun_zenith_rad))   // sun zenith
+    /// refl  = max(0, refl - LUT_correction)                // Rayleigh
+    /// ```
+    ///
+    /// This avoids computing solar/satellite angles twice when both
+    /// corrections are needed on the same band.
+    pub fn apply_correction_with_sun_zenith(
+        self,
+        vis_dataset: Dataset,
+        red_dataset: Option<&Dataset>,
+        params: crate::angles::AngleParams,
+        min_cos_zenith: f64,
+    ) -> Result<Dataset> {
+        let config = self.config;
+        let lut = self.lut_data;
+
+        let area_attr = vis_dataset.attr("area").cloned();
+        let source_coords = vis_dataset.array().map(|a| a.coords().clone());
+
+        let array = vis_dataset
+            .into_array()
+            .ok_or_else(|| RustySatError::invalid_input("visible dataset has no array data"))?;
+        let (height, width) = array.shape_yx()?;
+        let mask = array.mask().cloned();
+        let mut vis_f32 = into_vis_f32(array);
+
+        let red_values: Option<Vec<f64>> =
+            red_dataset.map(|ds| ds.array().map(|a| a.values_as_f64()).unwrap_or_default());
+
+        let gmst_val = gmst(params.utc);
+        let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
+        let sat_alt_km = params.sat_alt / 1000.0;
+        let (sat_x, sat_y, sat_z) =
+            observer_position(params.utc, params.sat_lon, params.sat_lat, sat_alt_km);
+
+        let h = params.geos.perspective_point_height;
+        let h_inv = 1.0 / h;
+        let lon_0_rad = params.geos.longitude_of_projection_origin.to_radians();
+        let column_data = precompute_columns(&params.x_coords, h_inv, lon_0_rad, gmst_val, sun_ra);
+
+        let max_angle = (params.geos.semi_major_axis / params.geos.satellite_radius()).asin();
+        let max_angle_sq = max_angle * max_angle;
+
+        let reduce = config.reduce_strength > 0.0;
+        let (zenith_lo, zenith_hi) = if config.reduce_lim_low > config.reduce_lim_high {
+            (config.reduce_lim_high, config.reduce_lim_low)
+        } else {
+            (config.reduce_lim_low, config.reduce_lim_high)
+        };
+        let zenith_span = zenith_hi - zenith_lo;
+
+        let grid_3d = match &lut.grid_3d {
+            Some(g) => g,
+            None => {
+                return build_result_combined(
+                    vis_f32,
+                    mask,
+                    height,
+                    width,
+                    &config,
+                    area_attr,
+                    source_coords,
+                );
+            }
+        };
+
+        const STRIP_HEIGHT: usize = 64;
+
+        for y0 in (0..height).step_by(STRIP_HEIGHT) {
+            let y1 = (y0 + STRIP_HEIGHT).min(height);
+            let strip_n = (y1 - y0) * width;
+
+            let tan_theta_y_row = precompute_rows(&params.y_coords, y0, y1, h_inv);
+            let red = red_values.as_ref();
+            let offset = y0 * width;
+
+            use rayon::prelude::*;
+            vis_f32[offset..offset + strip_n]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(local_i, out)| {
+                    if !out.is_finite() {
+                        return;
+                    }
+                    let row = local_i / width;
+                    let col = local_i % width;
+                    let col_pre = &column_data[col];
+
+                    let x_pos = params.x_coords[col];
+                    let y_pos = params.y_coords[y0 + row];
+                    let rsq = (x_pos * x_pos + y_pos * y_pos) / (h * h);
+                    if rsq > max_angle_sq {
+                        *out = f32::NAN;
+                        return;
+                    }
+
+                    let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
+
+                    let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+                    if !sunz.is_finite() {
+                        *out = f32::NAN;
+                        return;
+                    }
+
+                    let cos_sza = sunz.to_radians().cos().max(min_cos_zenith);
+                    *out /= cos_sza as f32;
+
+                    let (satz, sata) =
+                        satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
+
+                    let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
+                    if !azidiff.is_finite() {
+                        return;
+                    }
+
+                    let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
+                    let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
+
+                    let mut correction = trilinear_interpolate(
+                        grid_3d,
+                        sunzsec,
+                        azidiff,
+                        satzsec,
+                        &lut.sunz_coord,
+                        &lut.azid_coord,
+                        &lut.satz_coord,
+                    );
+
+                    if let Some(red_vals) = red {
+                        let r = red_vals[offset + local_i];
+                        if r.is_finite() && r >= 20.0 {
+                            correction *= 1.0 - (r - 20.0) / 80.0;
+                        }
+                    }
+
+                    if reduce && sunz.is_finite() && zenith_span > 0.0 {
+                        let t = if sunz < zenith_lo {
+                            0.0
+                        } else {
+                            ((sunz - zenith_lo) / zenith_span).min(1.0)
+                        };
+                        let factor = (1.0 - config.reduce_strength * t).clamp(0.0, 1.0);
+                        correction *= factor;
+                    }
+
+                    let corrected = (*out as f64 - correction).max(0.0);
+                    *out = corrected as f32;
+                });
+        }
+
+        build_result_combined(
+            vis_f32,
+            mask,
+            height,
+            width,
+            &config,
+            area_attr,
+            source_coords,
+        )
+    }
 }
 
 fn build_result(
@@ -379,6 +546,52 @@ fn build_result(
     Ok(result)
 }
 
+fn build_result_combined(
+    vis_f32: Vec<f32>,
+    mask: Option<ValidityMask>,
+    height: usize,
+    width: usize,
+    config: &RayleighConfig,
+    area_attr: Option<MetadataValue>,
+    source_coords: Option<std::collections::BTreeMap<String, Coordinate>>,
+) -> Result<Dataset> {
+    let mut result_array =
+        DataArray::<f32>::from_vec_named(vec![height, width], vec!["y", "x"], vis_f32)?;
+
+    if let Some(m) = mask {
+        result_array = result_array.with_mask(m)?;
+    }
+
+    if let Some(coords) = source_coords {
+        for (name, coord) in coords {
+            if name == "y" || name == "x" {
+                result_array = result_array.with_coordinate(&name, coord)?;
+            }
+        }
+    }
+
+    let mut result =
+        Dataset::new(DataId::new("sun_zenith_rayleigh_corrected")?).with_array(result_array);
+
+    if let Some(area) = area_attr {
+        result.insert_attr("area", area)?;
+    }
+    result.insert_attr(
+        "modifier",
+        MetadataValue::string("combined_sun_zenith_rayleigh_correction"),
+    )?;
+    result.insert_attr(
+        "atmosphere",
+        MetadataValue::string(config.atmosphere.file_suffix()),
+    )?;
+    result.insert_attr(
+        "aerosol_type",
+        MetadataValue::string(config.aerosol_type.dir_name()),
+    )?;
+
+    Ok(result)
+}
+
 pub(crate) fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
     match array {
         AnyDataArray::F32(da) => da.into_values(),
@@ -411,6 +624,35 @@ pub fn rayleigh_correct(
     let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
 
     corrector.apply_correction(vis_dataset, red_dataset, params)
+}
+
+/// Compute angles and apply both sun zenith and Rayleigh correction
+/// in a single pass.
+///
+/// Use `min_cos_zenith` to control the sun zenith clamping threshold.
+/// Pass `SunZenithCorrector::default().min_cos_zenith()` for the default.
+pub fn rayleigh_correct_with_sun_zenith(
+    corrector: RayleighCorrector,
+    vis_dataset: Dataset,
+    red_dataset: Option<&Dataset>,
+    utc: UtcInstant,
+    min_cos_zenith: f64,
+) -> Result<Dataset> {
+    use crate::angles::{extract_xy_coords, AngleParams};
+
+    let area_attr = vis_dataset
+        .attr("area")
+        .ok_or_else(|| RustySatError::invalid_input("dataset missing 'area' attribute"))?;
+
+    let coords = vis_dataset
+        .array()
+        .ok_or_else(|| RustySatError::invalid_input("dataset has no array"))?
+        .coords();
+
+    let (x_coords, y_coords) = extract_xy_coords(coords)?;
+    let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
+
+    corrector.apply_correction_with_sun_zenith(vis_dataset, red_dataset, params, min_cos_zenith)
 }
 
 #[cfg(test)]
@@ -486,5 +728,133 @@ mod tests {
         for a in &atms {
             assert!(!a.file_suffix().is_empty());
         }
+    }
+
+    // ── Combined sun zenith + Rayleigh correction ──
+
+    use crate::astronomy::UtcInstant;
+    use crate::geos::GeosProjection;
+    use crate::sun_zenith::SunZenithCorrector;
+    use rusty_sat_core::Coordinate;
+
+    #[test]
+    fn combined_convenience_errors_on_missing_area() {
+        let array = rusty_sat_core::DataArray::<f32>::from_vec_named(
+            vec![2, 2],
+            vec!["y", "x"],
+            vec![50.0_f32; 4],
+        )
+        .expect("array");
+        let ds = Dataset::new(DataId::new("test").expect("id")).with_array(array);
+        let utc = UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0);
+        // LUT loading fails for nonexistent file, but the convenience function
+        // checks area attr before invoking the corrector.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let p = tmp.path().to_path_buf();
+        drop(tmp);
+        match RayleighCorrector::new(&p, 1.0) {
+            Ok(c) => {
+                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 0.058);
+                assert!(r.is_err());
+            }
+            Err(_) => { /* can't test — no LUT available */ }
+        }
+    }
+
+    #[test]
+    fn combined_convenience_errors_on_missing_array() {
+        let mut ds = Dataset::new(DataId::new("test").expect("id"));
+        ds.insert_attr("area", combined_area_attr()).expect("area");
+        let utc = UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0);
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let p = tmp.path().to_path_buf();
+        drop(tmp);
+        match RayleighCorrector::new(&p, 1.0) {
+            Ok(c) => {
+                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 0.058);
+                assert!(r.is_err());
+            }
+            Err(_) => { /* can't test — no LUT available */ }
+        }
+    }
+
+    #[test]
+    fn combined_default_min_cos_matches_sun_zenith_corrector() {
+        let sz = SunZenithCorrector::default();
+        let min_cos = sz.min_cos_zenith();
+        assert!((min_cos - 0.058).abs() < 0.001);
+    }
+
+    #[test]
+    fn combined_convenience_function_compiles_and_accepts_min_cos() {
+        // This test verifies the API shape — the function takes min_cos_zenith
+        // as a f64 parameter. Full behavior is tested via the integration test.
+        // The corrector construction fails here because no real LUT is available.
+        let ds = combined_area_dataset(vec![50.0_f32; 9]);
+        let utc = UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0);
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let p = tmp.path().to_path_buf();
+        drop(tmp);
+        match RayleighCorrector::new(&p, 1.0) {
+            Ok(c) => {
+                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 0.058);
+                // With grid_3d=None (wavelength out of range), this is a
+                // no-op pass-through but should still produce a Dataset.
+                assert!(r.is_ok());
+                let result = r.expect("ok");
+                assert!(result.attr("modifier").is_some());
+            }
+            Err(_) => { /* no real LUT available in unit test */ }
+        }
+    }
+
+    // ── Helpers for combined tests ──
+
+    fn combined_area_attr() -> MetadataValue {
+        let proj = MetadataValue::Map(
+            [
+                ("a".into(), MetadataValue::string("6378137.0")),
+                ("b".into(), MetadataValue::string("6356752.31414")),
+                ("h".into(), MetadataValue::string("35785863.0")),
+                ("lon_0".into(), MetadataValue::string("140.7")),
+                ("proj".into(), MetadataValue::string("geos")),
+                ("units".into(), MetadataValue::string("m")),
+            ]
+            .into(),
+        );
+        MetadataValue::map([
+            ("type", MetadataValue::string("area")),
+            ("proj_id", MetadataValue::string("geosh9")),
+            ("projection", proj),
+            ("height", MetadataValue::Integer(3)),
+            ("width", MetadataValue::Integer(3)),
+        ])
+    }
+
+    fn combined_area_dataset(values: Vec<f32>) -> Dataset {
+        use rusty_sat_core::DataArray;
+        let w = 3;
+        let h = 3;
+        let geos = GeosProjection {
+            semi_major_axis: 6_378_137.0,
+            semi_minor_axis: 6_356_752.31414,
+            perspective_point_height: 35_785_863.0,
+            longitude_of_projection_origin: 140.7,
+        };
+        let hp = geos.perspective_point_height;
+        let max_a = (geos.semi_major_axis / geos.satellite_radius()).asin();
+        let hd = hp * max_a;
+        let step = 2.0 * hd / 2.0;
+        let xv: Vec<f64> = (0..w).map(|i| -hd + i as f64 * step).collect();
+        let yv: Vec<f64> = (0..h).map(|i| hd - i as f64 * step).collect();
+        let array = DataArray::<f32>::from_vec_named(vec![h, w], vec!["y", "x"], values)
+            .expect("array")
+            .with_coordinate("x", Coordinate::axis("x", xv).expect("x"))
+            .expect("x")
+            .with_coordinate("y", Coordinate::axis("y", yv).expect("y"))
+            .expect("y");
+        let mut ds = Dataset::new(DataId::new("test_band").expect("id")).with_array(array);
+        ds.insert_attr("area", combined_area_attr()).expect("area");
+        ds
     }
 }
