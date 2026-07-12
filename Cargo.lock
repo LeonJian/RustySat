@@ -875,9 +875,9 @@ dependencies = [
 
 [[package]]
 name = "rustyspectral"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f118a73e191a0e251aee79147a16b7bd9d88249b402e9432e231018abdc48abb"
+checksum = "2a578e026f36a2d56a03aca6ef4c4497aee895c9cc156848629707935a2eb3b1"
 dependencies = [
  "dirs",
  "env_logger",
