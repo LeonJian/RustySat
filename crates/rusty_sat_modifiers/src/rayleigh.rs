@@ -379,7 +379,7 @@ fn build_result(
     Ok(result)
 }
 
-fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
+pub(crate) fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
     match array {
         AnyDataArray::F32(da) => da.into_values(),
         AnyDataArray::F64(da) => da.into_values().into_iter().map(|v| v as f32).collect(),

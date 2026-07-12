@@ -330,6 +330,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[x]` M3-m9d1: Add solar astronomy module (cos_zen, sun azimuth/zenith, alt/az) ported from `deps/pyorbital/pyorbital/astronomy.py`.
   - `[x]` M3-m9d2: Add satellite look-angle computation (`get_observer_look`) ported from `deps/pyorbital/pyorbital/orbital.py`.
   - `[x]` M3-m9d3: Add combined angle computation (`AngleSet`) for dataset grids with parallel rayon processing.
+  - `[x]` M3-next-a: Add standalone `SunZenithCorrector` modifier that normalizes TOA reflectance to overhead-sun equivalent using strip-based per-pixel angle computation, consuming dataset API, and Earth-disk boundary detection.
   - `[ ]` M3-next: Sun-zenith correction/reduction, solar path length, and parallax modifiers.
 - `[ ]` M4: CREFL algorithms and helpers.
 - `[ ]` M5: Spatial filters: Gaussian, median, sharpen/blur/edge, and morphology.
@@ -647,6 +648,16 @@ After every implementation step that adds, removes, or changes public API, featu
 | Parse Satpy-style composite/enhancement YAML sections into inert typed registry definitions, including `!!python/name:` tags as non-executable strings and inline composite dependencies; execute allow-listed `stretch`/`gamma`/`invert` enhancement operations against `FloatImage<f32/f64>` | Instantiate compositors from YAML, execute unsupported enhancement operations such as colormaps/palettes/piecewise stretches, merge sensor/default configs, or run composites/enhancements through `Scene` |
 | Define `CompositeRecipe` and `ModifierRecipe` in `rusty_sat_core` | Execute registered composite/modifier recipes through `Scene` |
 
+### rusty_sat_modifiers
+
+| Can | Cannot |
+|-----|--------|
+| `RayleighCorrector`: full Rayleigh scattering correction with pyspectral LUT loading, trilinear interpolation, cloud relaxation, high-zenith reduction, and 64-row strip-based parallel execution consuming the dataset | Full GSICS inter-calibration parity beyond user-supplied RAD coefficients; real multi-sensor production fixture tests |
+| `SunZenithCorrector`: normalizes TOA reflectance to overhead-sun equivalent via `refl / max(min_cos, cos(sza))` in 64-row strips with Earth-disk boundary detection and consuming dataset API | Solar path-length / airmass variants beyond simple cos(sza); production full-disk fixture parity tests |
+| Compute solar/satellite azimuth/zenith angles via `AngleSet` (full-grid) or on-the-fly per-pixel in strips; `AngleParams` extracts projection geometry from dataset area attrs | Angle computation for non-geostationary sensors; ECI/ECEF satellite position beyond geos |
+| `cos_zen`, `sun_zenith_angle`, `sun_azimuth_angle`, `sun_earth_distance_correction`, `observer_position`, `gmst` ported from pyorbital | Full pyorbital TLE/orbit propagation, moon/target tracking, scan geolocation |
+| `get_observer_look`, `satellite_angles_grid` ported from pyorbital orbital | |
+
 ### rusty_sat_image
 
 | Can | Cannot |
@@ -690,3 +701,4 @@ After every implementation step that adds, removes, or changes public API, featu
 - PNG compression level is not exposed to callers — `save_buffer_with_format` uses the `image`/`png` crate defaults. Expose a compression preset (Fast/Default/Best) on `SimpleImageWriter` when PNG metadata parity is addressed in W2-next.
 - `FloatTiffWriter` still materializes a full encoded byte buffer before writing pixels. The dtype-aware encode (e3182c1) removed the `values_as_f64()` intermediate and the strip-mode `bytes.clone()`, and tile/deflate paths now drop the contiguous source as soon as blocks are produced. Remaining work: row/strip/tile streaming to avoid the output byte buffer entirely for large AHI products.
 - `ValidityMask::extend` uses per-bit iteration with `is_masked()` calls for each appended bit. For a B03 full-disk assembly (484M px across 10 segments) this is ~7.3B CPU instructions for mask accumulation alone — but it only accounts for an estimated ~5% of load+cal time (~0.8s out of 16s). Future work: byte-level copy with shift/OR for boundary bytes (~60× fewer instructions). Not urgent; the critical memory benefit (packed instead of Vec<bool>) is already achieved.
+- `SunZenithCorrector` and `RayleighCorrector` each compute solar/satellite angles independently in 64-row strips. When both are applied to the same band (e.g. in a true-color pipeline), angles are computed twice for the same pixels. A combined pass that computes angles once and applies both corrections inline would roughly halve the angle-computation CPU cost while keeping strip-level memory.

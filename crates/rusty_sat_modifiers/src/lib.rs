@@ -13,6 +13,8 @@
 //! - [`angles`] — combined angle computation for a dataset grid.
 //! - [`rayleigh`] — Rayleigh scattering correction modifier wrapping
 //!   `rustyspectral::rayleigh`.
+//! - [`sun_zenith`] — solar zenith angle correction normalizing TOA
+//!   reflectance to overhead-sun equivalent.
 //!
 //! # Quick Start
 //!
@@ -37,9 +39,11 @@ pub mod astronomy;
 pub mod geos;
 pub mod orbital;
 pub mod rayleigh;
+pub mod sun_zenith;
 
 pub use angles::{extract_xy_coords, AngleParams, AngleSet};
 pub use astronomy::UtcInstant;
 pub use geos::GeosProjection;
 pub use orbital::{get_observer_look, satellite_angles_grid};
 pub use rayleigh::{rayleigh_correct, AerosolType, Atmosphere, RayleighConfig, RayleighCorrector};
+pub use sun_zenith::{sun_zenith_correct, sun_zenith_correct_with, SunZenithCorrector};
