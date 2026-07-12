@@ -14,14 +14,13 @@
 
 #![allow(clippy::unwrap_used)]
 
-use rusty_sat_composites::{RgbCompositor, SpectralBlender};
+use rusty_sat_composites::{SelfSharpenedRgb, SpectralBlender};
 use rusty_sat_core::MetadataValue;
 use rusty_sat_modifiers::{
     rayleigh_correct_with_sun_zenith, Atmosphere, RayleighConfig, RayleighCorrector,
     SunZenithCorrector, UtcInstant,
 };
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader};
-use rusty_sat_resample::{area_from_metadata_value, AreaDefinition, NativeResampler, Resampler};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -166,35 +165,15 @@ macro_rules! lut {
     };
 }
 
-/// Correct a band and upsample to 0.5 km (repeat 2× if source is 1 km).
-fn correct_and_upsample(
+/// Correct a band with combined sunz+rayleigh (no resampling).
+fn correct_band(
     ds: rusty_sat_core::Dataset,
     t: UtcInstant,
     nm: f64,
-    red: Option<&rusty_sat_core::Dataset>,
     min_cos: f64,
 ) -> rusty_sat_core::Dataset {
-    let c = lut!(build_corrector(nm));
-    let corr = rayleigh_correct_with_sun_zenith(c, ds, red, t, min_cos).expect("combined");
-    let area = area_from_metadata_value(corr.attr("area").expect("area")).expect("parse area");
-    let (src_h, src_w) = (area.height(), area.width());
-    let is_05km = src_h >= 20000; // B03 0.5 km is ~22000, B01/B02/B04 1 km is ~11000
-    if is_05km {
-        return corr;
-    }
-    let dest = AreaDefinition::from_parts(
-        format!("{}_05", area.id()),
-        area.description(),
-        area.proj_id(),
-        area.projection().clone(),
-        src_h * 2,
-        src_w * 2,
-        area.area_extent(),
-    )
-    .expect("dest area");
-    NativeResampler::new(area)
-        .resample_owned(corr, &dest)
-        .expect("upsample")
+    rayleigh_correct_with_sun_zenith(lut!(build_corrector(nm)), ds, None, t, min_cos)
+        .expect("combined")
 }
 
 // ── Test ─────────────────────────────────────────────────────────────────
@@ -228,44 +207,39 @@ fn true_color_reproduction() {
     let min_cos = SunZenithCorrector::default().min_cos_zenith();
     eprintln!("\n========== True-Color 0.5 km Pipeline ==========\n");
 
-    // Step 1: B02 (green) → correct → up-sample to 0.5 km
-    eprintln!("--- B02: correct + up-sample to 0.5 km ---");
-    let (d02, t02, (h02, w02)) = load_band(&f02, "hsd_b02");
-    eprintln!("  1 km shape: {h02}×{w02}");
-    let d02_05 = correct_and_upsample(d02, t02, 510.0, None, min_cos);
-    let (h05, w05) = d02_05.array().expect("arr").shape_yx().expect("2D");
-    eprintln!("  0.5 km shape: {h05}×{w05}");
+    // Step 1-2: B02(green), B04(NIR) → correct at native 1 km
+    eprintln!("--- B02: correct (1 km) ---");
+    let (d02, t02, _) = load_band(&f02, "hsd_b02");
+    let d02_corr = correct_band(d02, t02, 510.0, min_cos);
+    eprintln!("  done");
 
-    // Step 2: B04 (NIR, 860 nm, 1 km) → correct(sunz only, Rayleigh no-op) → up-sample
-    eprintln!("--- B04: correct + up-sample to 0.5 km ---");
+    eprintln!("--- B04: correct (1 km) ---");
     let (d04, t04, _) = load_band(&f04, "hsd_b04");
-    let d04_05 = correct_and_upsample(d04, t04, 860.0, None, min_cos);
+    let d04_corr = correct_band(d04, t04, 860.0, min_cos);
 
-    // Step 3: Hybrid green = 0.85×B02 + 0.15×B04  (Satpy HybridGreen / Miller et al.)
-    eprintln!("--- Hybrid green (B02 + B04) ---");
+    // Step 3: Hybrid green at 1 km (SelfSharpenedRgb up-samples internally)
+    eprintln!("--- Hybrid green (1 km) ---");
     let hybrid = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
         .expect("blender")
-        .compose_owned(vec![d02_05, d04_05])
+        .compose_owned(vec![d02_corr, d04_corr])
         .expect("hybrid");
     assert!(hybrid.array().is_some());
 
-    // Step 4: B03 (red, 0.5 km native) → correct
-    eprintln!("--- B03: correct (0.5 km, red channel) ---");
-    let (d03, t03, (h03, w03)) = load_band(&f03, "hsd_b03");
-    eprintln!("  0.5 km shape: {h03}×{w03}");
-    assert_eq!((h03, w03), (h05, w05), "B03 shape mismatch");
-    let d03_red = correct_and_upsample(d03, t03, 640.0, None, min_cos);
+    // Step 4: B03(red, 0.5 km native) → correct
+    eprintln!("--- B03: correct (0.5 km) ---");
+    let (d03, t03, _) = load_band(&f03, "hsd_b03");
+    let d03_corr = correct_band(d03, t03, 640.0, min_cos);
 
-    // Step 5: B01 (blue) → correct → up-sample
-    eprintln!("--- B01: correct + up-sample to 0.5 km ---");
+    // Step 5: B01(blue, 1 km) → correct
+    eprintln!("--- B01: correct (1 km) ---");
     let (d01, t01, _) = load_band(&f01, "hsd_b01");
-    let d01_05 = correct_and_upsample(d01, t01, 470.0, None, min_cos);
+    let d01_corr = correct_band(d01, t01, 470.0, min_cos);
 
-    // Step 6: RGB composite R=B03, G=hybrid, B=B01
-    eprintln!("--- RGB composite ---");
-    let rgb = RgbCompositor::new("true_color")
-        .expect("rgb")
-        .compose_rgb_owned(vec![d03_red, hybrid, d01_05])
+    // Step 6: SelfSharpenedRgb(R_05, G_1km, B_1km) → up-samples + sharpens
+    eprintln!("--- SelfSharpenedRgb composite ---");
+    let rgb = SelfSharpenedRgb::new("true_color")
+        .expect("compositor")
+        .compose_rgb_owned(vec![d03_corr, hybrid, d01_corr])
         .expect("compose");
     {
         let a = rgb.array().expect("arr");

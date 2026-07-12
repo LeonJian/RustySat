@@ -803,6 +803,7 @@ dependencies = [
 name = "rusty_sat_composites"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "rusty_sat_core",
  "rusty_sat_image",
  "serde_norway",
