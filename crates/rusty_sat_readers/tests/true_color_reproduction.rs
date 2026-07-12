@@ -134,7 +134,7 @@ fn build_corrector(nm: f64) -> Option<RayleighCorrector> {
         aerosol_type: rusty_sat_modifiers::AerosolType::RayleighOnly,
         reduce_lim_low: 70.0,
         reduce_lim_high: 105.0,
-        reduce_strength: 0.6,
+        reduce_strength: 0.0,
     };
     match RayleighCorrector::with_config_auto(cfg.clone(), nm) {
         Ok(c) => Some(c),
