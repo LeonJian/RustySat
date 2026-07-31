@@ -11,7 +11,7 @@
 //! Run with:
 //!   cargo test --package rusty_sat_readers --test ahi_first_figure_integration --release -- --nocapture
 
-use rusty_sat_core::{AnyDataArray, MetadataValue};
+use rusty_sat_core::{AnyDataArray, MetadataValue, Scene};
 use rusty_sat_readers::{
     AhiCalibration, AhiCalibrationMode, AhiCalibrationOutput, AhiHsdFileHandler, AhiHsdReader,
     AhiSegmentInfo, AhiUserCalibration, AhiUserCalibrationCoefficients, Reader,
@@ -1171,4 +1171,59 @@ fn reader_can_select_scientific_f64_output_mode() {
     ));
 
     eprintln!("PASS: DisplayF32 / ScientificF64 reader output mode validated");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Test 12: Scene lifecycle — load full-disk B04 through Scene, save via Scene
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn scene_lifecycle_loads_assembled_band_and_saves_via_scene() {
+    let dir = require_data!();
+    let out = output_dir();
+
+    let Some(files) = try_files_for_band(&dir, "B04") else {
+        eprintln!("SKIP: B04 not in test data");
+        return;
+    };
+    let handlers: Vec<AhiHsdFileHandler> = files
+        .iter()
+        .map(|(path, seg)| {
+            AhiHsdFileHandler::from_path(path, "hsd_b04", *seg).expect("open segment")
+        })
+        .collect();
+    let reader = AhiHsdReader::with_calibration(AhiCalibration::Counts, handlers).expect("reader");
+    let mut scene = Scene::with_loader(reader);
+
+    assert_eq!(scene.available_dataset_names(), vec!["B04".to_string()]);
+
+    scene
+        .load([rusty_sat_core::DataQuery::named("B04").unwrap()])
+        .expect("load B04 through Scene");
+
+    assert_eq!(scene.len(), 1);
+    assert!(scene.missing_datasets().is_empty());
+    let id = &scene.available_dataset_ids()[0];
+    let dataset = scene.get(id).expect("loaded B04");
+    assert_eq!(dataset.array().unwrap().shape(), &[11000, 11000]);
+    assert!(dataset.attr("area").is_some(), "area attr must be present");
+    assert_eq!(
+        dataset.attr("sensor").and_then(MetadataValue::as_str),
+        Some("ahi")
+    );
+    assert_eq!(scene.sensor_names(), vec!["ahi".to_string()]);
+
+    let png_path = out.join("B04_full_disk_scene_lifecycle.png");
+    scene
+        .save_dataset(id, &SimpleImageWriter::default(), &png_path)
+        .expect("save through Scene");
+    assert!(png_path.is_file());
+    assert!(
+        std::fs::metadata(&png_path).map(|m| m.len()).unwrap_or(0) > 1_000_000,
+        "full-disk PNG must be > 1 MB"
+    );
+    eprintln!(
+        "PASS: Scene lifecycle loaded and saved {}",
+        png_path.display()
+    );
 }

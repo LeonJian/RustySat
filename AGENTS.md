@@ -374,7 +374,8 @@ Highest priority. Complete these before major reader/composite/writer expansion.
 
 ### SC: Scene Integration
 
-- `[ ]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
+- `[x]` SC1: Scene construction/lifecycle: from readers/files, load, available datasets, start/end time, sensors, and missing datasets.
+  - `[x]` SC1-a: Add an owned multi-reader Scene lifecycle with query-based loading, batched loader calls, metadata discovery, and missing-dataset tracking while preserving the existing inventory planning API.
 - `[ ]` SC2: Scene spatial operations: finest/coarsest area, crop, aggregate, slice, copy, same-area/proj checks, and area iteration.
 - `[~]` SC3: Scene resampling pipeline and integration with all resamplers.
   - `[x]` SC3-m4e: Add `SceneResampleExt` in `rusty_sat_resample` so callers can resample all currently loaded datasets through a Rust-native Scene-level workflow without making `rusty_sat_core` depend on resampling crates.
@@ -594,6 +595,7 @@ After every implementation step that adds, removes, or changes public API, featu
 | `Dataset` dual metadata (flat `BTreeMap<String,String>` + nested `MetadataValue` attrs), borrowed/consuming/take array access, and array replacement | Single-source metadata; `insert_metadata()` still writes to BOTH maps (transitional) |
 | `Dataset` typed ancillary variable links by `DataId`, with find/replace helpers modeled after Satpy `anc_vars.py` | Embedding full ancillary arrays inside attrs; only typed links are stored |
 | `Scene` insert/remove datasets, borrowed dataset iteration, plan reader loads, register composites/modifiers, and save a dataset through the `DatasetWriter` contract | Actual composite/modifier execution, resampling delegation, show/to-xarray |
+| `Scene` owns multiple `SceneLoader` sources (`with_loader`/`with_loaders`/`add_loader`), loads datasets by `DataQuery` with best-match resolution, per-loader batched loading, wishlist/dependency-graph updates, and transactional per-loader insertion; discovers `available_dataset_ids`/`available_dataset_names`, reports `missing_datasets`, and derives `start_time`/`end_time`/`sensor_names` from dataset attrs with loader-metadata fallback | Composite/modifier dependency execution through `Scene::load`, resampling delegation, show/to-xarray |
 
 ### rusty_sat_config
 
@@ -608,6 +610,7 @@ After every implementation step that adds, removes, or changes public API, featu
 | Can | Cannot |
 |-----|--------|
 | Parse filename patterns with `FilenamePattern` (trollsift-compatible: keys, parse, compose, globify, typed datetimes) | Full trollsift parity (every custom compose/conversion edge case) |
+| Every `Reader` bridges to the core `SceneLoader` contract (discovery, load, batched load, start/end time, sensor names) through explicit forwarding impls, so any reader can be attached to a `Scene` for the load lifecycle | Blanket `impl<T: Reader> SceneLoader` is impossible (orphan rule); new readers must be added to the forwarding macro in `rusty_sat_readers/src/lib.rs` |
 | Parse Satpy reader YAML metadata via `YamlMetadataReader` (`reader`/`file_types`/`datasets` sections, Python tags as `MetadataValue`) with byte-size/depth guardrails | Safe YAML tag deserialization into typed structs; tags are currently stored as metadata values |
 | `FakeReader` in-memory inventory + dataset loading for Scene planning tests | Real satellite file I/O (NetCDF/HDF/GeoTIFF/etc.) |
 | `TextGridReader` reads plain text numeric grids + YAML metadata; provides `TextGridChunkSource` lazy fixture that caches the parsed fixture grid instead of rereading per chunk | Production file handlers; `yaml_reader` can inventory datasets but cannot load array data |

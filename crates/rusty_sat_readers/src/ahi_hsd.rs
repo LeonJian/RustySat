@@ -2185,6 +2185,47 @@ mod tests {
     }
 
     #[test]
+    fn ahi_hsd_scene_lifecycle_loads_discovery_and_save() {
+        let hsd_path = temp_path("ahi_hsd_scene_lifecycle", "DAT");
+        let png_path = temp_path("ahi_hsd_scene_lifecycle", "png");
+        fs::write(
+            &hsd_path,
+            synthetic_full_hsd_file_with_visible_calibration(),
+        )
+        .unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let reader =
+            AhiHsdReader::with_calibration(AhiCalibration::Reflectance, [handler]).unwrap();
+        let mut scene = Scene::with_loader(reader);
+
+        assert_eq!(scene.available_dataset_names(), vec!["B03".to_string()]);
+
+        scene.load([DataQuery::named("B03").unwrap()]).unwrap();
+
+        assert_eq!(scene.len(), 1);
+        assert!(scene.missing_datasets().is_empty());
+        let id = &scene.available_dataset_ids()[0];
+        let dataset = scene.get(id).expect("loaded B03");
+        assert!(dataset.attr("area").is_some());
+        assert!(dataset.array().unwrap().coord("x").is_some());
+        assert_eq!(
+            dataset.attr("calibration").and_then(MetadataValue::as_str),
+            Some("reflectance")
+        );
+        assert_eq!(scene.sensor_names(), vec!["ahi".to_string()]);
+
+        scene
+            .save_dataset(id, &SimpleImageWriter::default(), &png_path)
+            .unwrap();
+        assert_png_luma_dimensions_and_bit_depth(&png_path, 3, 2, 8);
+        fs::remove_file(hsd_path).ok();
+        fs::remove_file(png_path).ok();
+    }
+
+    #[test]
     fn file_handler_requires_segment_filename_fields() {
         let reader = YamlMetadataReader::from_yaml_str(
             r#"

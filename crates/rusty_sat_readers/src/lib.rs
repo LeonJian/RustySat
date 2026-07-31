@@ -31,7 +31,7 @@ pub use yaml_reader::{
     YamlMetadataReader, YamlReaderConfig,
 };
 
-use rusty_sat_core::{DataId, Dataset, ReaderInventory, Result, RustySatError};
+use rusty_sat_core::{DataId, Dataset, ReaderInventory, Result, RustySatError, SceneLoader};
 use std::collections::BTreeMap;
 
 pub trait Reader {
@@ -42,6 +42,71 @@ pub trait Reader {
     }
 
     fn load(&self, _id: &DataId) -> Result<Dataset>;
+
+    /// Earliest observation time this reader can provide, as an ISO-8601
+    /// string. Mirrors the `start_time` attribute of Satpy readers.
+    fn start_time(&self) -> Option<String> {
+        None
+    }
+
+    /// Latest observation time this reader can provide, as an ISO-8601 string.
+    /// Mirrors the `end_time` attribute of Satpy readers.
+    fn end_time(&self) -> Option<String> {
+        None
+    }
+
+    /// Sensor names this reader provides data for. Mirrors the
+    /// `sensor_names` attribute of Satpy readers.
+    fn sensor_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Bridges every concrete `Reader` to the [`SceneLoader`] contract used by
+/// [`Scene`].
+///
+/// A blanket implementation is not possible here because `SceneLoader` is a
+/// foreign trait (from `rusty_sat_core`), so each reader gets an explicit
+/// forwarding implementation via this macro.
+macro_rules! impl_scene_loader_for_reader {
+    ($($reader:ty),+ $(,)?) => {
+        $(
+            impl SceneLoader for $reader {
+                fn name(&self) -> &str {
+                    <Self as Reader>::name(self)
+                }
+
+                fn available_dataset_ids(&self) -> Vec<DataId> {
+                    <Self as Reader>::available_dataset_ids(self)
+                }
+
+                fn load(&self, id: &DataId) -> Result<Dataset> {
+                    <Self as Reader>::load(self, id)
+                }
+
+                fn start_time(&self) -> Option<String> {
+                    <Self as Reader>::start_time(self)
+                }
+
+                fn end_time(&self) -> Option<String> {
+                    <Self as Reader>::end_time(self)
+                }
+
+                fn sensor_names(&self) -> Vec<String> {
+                    <Self as Reader>::sensor_names(self)
+                }
+            }
+        )+
+    };
+}
+
+impl_scene_loader_for_reader! {
+    FakeReader,
+    TextGridReader,
+    YamlMetadataReader,
+    AhiHsdReader,
+    AhiL2NcFixtureReader,
+    FciL1cFixtureReader,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +139,7 @@ impl FakeReader {
     }
 
     pub fn inventory(&self) -> Result<ReaderInventory> {
-        ReaderInventory::new(self.name.clone(), self.available_dataset_ids())
+        ReaderInventory::new(self.name.clone(), Reader::available_dataset_ids(self))
     }
 }
 
@@ -128,10 +193,13 @@ mod tests {
             .unwrap()
             .with_dataset(dataset.clone());
 
-        assert_eq!(reader.name(), "fake");
-        assert_eq!(reader.available_dataset_ids(), vec![data_id.clone()]);
+        assert_eq!(Reader::name(&reader), "fake");
+        assert_eq!(
+            Reader::available_dataset_ids(&reader),
+            vec![data_id.clone()]
+        );
         assert_eq!(reader.inventory().unwrap().name(), "fake");
-        assert_eq!(reader.load(&data_id).unwrap(), dataset);
+        assert_eq!(Reader::load(&reader, &data_id).unwrap(), dataset);
     }
 
     #[test]
@@ -156,10 +224,37 @@ mod tests {
         let planned_ids = plan.reader_datasets().get("fake").unwrap();
 
         for id in planned_ids {
-            scene.insert_dataset(reader.load(id).unwrap());
+            scene.insert_dataset(Reader::load(&reader, id).unwrap());
         }
 
         assert!(scene.get(&high_res).is_some());
         assert_eq!(scene.len(), 1);
+    }
+
+    #[test]
+    fn fake_reader_drives_scene_load_lifecycle() {
+        let low_res = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("resolution", 3000.0)
+            .unwrap();
+        let high_res = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap();
+        let reader = FakeReader::new("fake")
+            .unwrap()
+            .with_dataset(Dataset::new(low_res))
+            .with_dataset(Dataset::new(high_res.clone()));
+        let mut scene = Scene::with_loader(reader);
+
+        scene.load([DataQuery::named("VIS006").unwrap()]).unwrap();
+
+        assert_eq!(scene.len(), 1);
+        assert!(scene.get(&high_res).is_some());
+        assert_eq!(
+            scene.dependency_graph().get(&high_res).unwrap().source(),
+            &rusty_sat_core::DependencySource::Reader("fake".to_string())
+        );
+        assert!(scene.missing_datasets().is_empty());
     }
 }

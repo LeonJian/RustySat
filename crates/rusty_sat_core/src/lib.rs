@@ -26,7 +26,10 @@
 //! ## Scene Management
 //!
 //! - [`Scene`] — main container: holds datasets, tracks a wishlist, manages a
-//!   dependency graph, and plans reader loads.
+//!   dependency graph, plans reader loads, and loads datasets through attached
+//!   [`SceneLoader`] sources.
+//! - [`SceneLoader`] — dataset discovery/loading contract that readers bridge
+//!   to, so a `Scene` can orchestrate loading without knowing reader details.
 //! - [`DependencyGraph`] — directed graph tracking what each dataset depends on
 //!   and which readers/compositors/modifiers produce them.
 //!
@@ -1397,16 +1400,106 @@ impl SceneLoadPlan {
     }
 }
 
+/// Minimal dataset-loading capability used by [`Scene`] to discover and load
+/// datasets without depending on reader implementation details.
+///
+/// Mirrors the reader-facing parts of Satpy's `Scene` lifecycle: dataset
+/// discovery, batched loading, and reader-level time/sensor metadata hooks.
+/// `rusty_sat_readers::Reader` is bridged to this trait with a blanket
+/// implementation, so every reader can be attached to a `Scene` directly.
+pub trait SceneLoader: fmt::Debug {
+    /// Unique loader name (e.g. `"ahi_hsd"`).
+    fn name(&self) -> &str;
+
+    /// `DataId`s this loader can produce with its currently attached files.
+    fn available_dataset_ids(&self) -> Vec<DataId>;
+
+    /// Load one dataset by its exact [`DataId`].
+    fn load(&self, id: &DataId) -> Result<Dataset>;
+
+    /// Load several datasets in one call, delegating to [`SceneLoader::load`]
+    /// by default.
+    ///
+    /// Loaders that can read multiple datasets from the same file more
+    /// efficiently in a single pass should override this method.
+    fn load_batch(&self, ids: &[DataId]) -> Result<Vec<Dataset>> {
+        ids.iter().map(|id| self.load(id)).collect()
+    }
+
+    /// Earliest observation time available from this loader, as an ISO-8601
+    /// string (Satpy stores these in `start_time` attrs).
+    fn start_time(&self) -> Option<String> {
+        None
+    }
+
+    /// Latest observation time available from this loader, as an ISO-8601
+    /// string (Satpy stores these in `end_time` attrs).
+    fn end_time(&self) -> Option<String> {
+        None
+    }
+
+    /// Sensor names this loader provides data for.
+    fn sensor_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Scene {
     datasets: BTreeMap<DataId, Dataset>,
     wishlist: BTreeSet<DataId>,
     dependency_graph: DependencyGraph,
+    loaders: Vec<Box<dyn SceneLoader>>,
 }
 
 impl Scene {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a Scene that loads datasets through the given loader.
+    ///
+    /// Mirrors `Scene(filenames, reader)` in Satpy: the Scene owns its data
+    /// sources and resolves [`Scene::load`] queries against them.
+    pub fn with_loader<L>(loader: L) -> Self
+    where
+        L: SceneLoader + 'static,
+    {
+        Self {
+            loaders: vec![Box::new(loader)],
+            ..Self::default()
+        }
+    }
+
+    /// Create a Scene that loads datasets through several loaders.
+    ///
+    /// Mirrors Satpy's multi-reader `Scene(filenames={reader: [...]})`:
+    /// dataset queries are matched against the union of all loader
+    /// inventories, and each dataset is loaded by the loader that provides it.
+    pub fn with_loaders<L>(loaders: impl IntoIterator<Item = L>) -> Self
+    where
+        L: SceneLoader + 'static,
+    {
+        Self {
+            loaders: loaders
+                .into_iter()
+                .map(|loader| Box::new(loader) as Box<dyn SceneLoader>)
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Attach an additional dataset loader to this Scene.
+    pub fn add_loader<L>(&mut self, loader: L)
+    where
+        L: SceneLoader + 'static,
+    {
+        self.loaders.push(Box::new(loader));
+    }
+
+    /// Loaded dataset loaders attached to this Scene.
+    pub fn loaders(&self) -> &[Box<dyn SceneLoader>] {
+        &self.loaders
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1504,6 +1597,166 @@ impl Scene {
         }
 
         Ok(plan)
+    }
+
+    /// Load datasets matching the given queries from the attached loaders.
+    ///
+    /// Mirrors `Scene.load(wishlist)` in Satpy: each query is resolved to the
+    /// best matching dataset across all loader inventories, the resolved IDs
+    /// are added to the wishlist, and unloaded datasets are fetched in
+    /// per-loader batches. Loaded datasets are stored in the Scene and their
+    /// dependency-graph nodes are marked as reader-backed.
+    ///
+    /// Loading is transactional per loader: if a loader batch fails, no
+    /// datasets from that loader are inserted, but datasets already loaded
+    /// from earlier loaders remain.
+    pub fn load(&mut self, queries: impl IntoIterator<Item = DataQuery>) -> Result<()> {
+        if self.loaders.is_empty() {
+            return Err(RustySatError::not_found(
+                "no dataset loaders attached to this Scene",
+            ));
+        }
+        let queries: Vec<DataQuery> = queries.into_iter().collect();
+        if queries.is_empty() {
+            return Ok(());
+        }
+        let loader_ids: Vec<Vec<DataId>> = self
+            .loaders
+            .iter()
+            .map(|loader| loader.available_dataset_ids())
+            .collect();
+        let all_ids: Vec<&DataId> = loader_ids.iter().flatten().collect();
+
+        let mut requested: Vec<DataId> = Vec::new();
+        for query in &queries {
+            let best = query.best_match(all_ids.iter().copied())?.clone();
+            if !requested.contains(&best) {
+                requested.push(best);
+            }
+        }
+        self.wishlist.extend(requested.iter().cloned());
+        let to_load: Vec<DataId> = requested
+            .into_iter()
+            .filter(|id| !self.datasets.contains_key(id))
+            .collect();
+        if to_load.is_empty() {
+            return Ok(());
+        }
+
+        for (index, loader) in self.loaders.iter().enumerate() {
+            let ids: Vec<DataId> = to_load
+                .iter()
+                .filter(|id| loader_ids[index].contains(id))
+                .cloned()
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            for id in &ids {
+                self.dependency_graph
+                    .add_node(id.clone(), DependencySource::reader(loader.name())?)?;
+            }
+            for dataset in loader.load_batch(&ids)? {
+                let id = dataset.id().clone();
+                self.datasets.insert(id, dataset);
+            }
+        }
+        Ok(())
+    }
+
+    /// `DataId`s the attached loaders can produce, deduplicated and sorted.
+    ///
+    /// Mirrors `Scene.available_dataset_ids()` in Satpy.
+    pub fn available_dataset_ids(&self) -> Vec<DataId> {
+        self.loaders
+            .iter()
+            .flat_map(|loader| loader.available_dataset_ids())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Names of the datasets the attached loaders can produce, sorted.
+    ///
+    /// Mirrors `Scene.available_dataset_names()` in Satpy.
+    pub fn available_dataset_names(&self) -> Vec<String> {
+        self.available_dataset_ids()
+            .into_iter()
+            .map(|id| id.name().to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Wishlisted `DataId`s that are not currently loaded.
+    ///
+    /// Mirrors the `Scene.missing_datasets` property in Satpy.
+    pub fn missing_datasets(&self) -> Vec<DataId> {
+        self.wishlist
+            .iter()
+            .filter(|id| !self.datasets.contains_key(id))
+            .cloned()
+            .collect()
+    }
+
+    /// Earliest `start_time` attribute among loaded datasets, falling back to
+    /// loader-provided times when no dataset carries one.
+    ///
+    /// Mirrors the `Scene.start_time` property in Satpy. Times are ISO-8601
+    /// strings; lexicographic ordering matches chronological ordering for
+    /// consistently formatted timestamps.
+    pub fn start_time(&self) -> Option<String> {
+        let from_datasets: Vec<&str> = self
+            .datasets
+            .values()
+            .filter_map(|dataset| dataset.attr("start_time").and_then(MetadataValue::as_str))
+            .collect();
+        if from_datasets.is_empty() {
+            return self
+                .loaders
+                .iter()
+                .filter_map(|loader| loader.start_time())
+                .min();
+        }
+        from_datasets.into_iter().min().map(str::to_string)
+    }
+
+    /// Latest `end_time` attribute among loaded datasets, falling back to
+    /// loader-provided times when no dataset carries one.
+    ///
+    /// Mirrors the `Scene.end_time` property in Satpy. See [`Scene::start_time`]
+    /// for the time representation.
+    pub fn end_time(&self) -> Option<String> {
+        let from_datasets: Vec<&str> = self
+            .datasets
+            .values()
+            .filter_map(|dataset| dataset.attr("end_time").and_then(MetadataValue::as_str))
+            .collect();
+        if from_datasets.is_empty() {
+            return self
+                .loaders
+                .iter()
+                .filter_map(|loader| loader.end_time())
+                .max();
+        }
+        from_datasets.into_iter().max().map(str::to_string)
+    }
+
+    /// Sensor names from loaded dataset attrs merged with loader-provided
+    /// sensor names.
+    ///
+    /// Mirrors the `Scene.sensor_names` property in Satpy.
+    pub fn sensor_names(&self) -> Vec<String> {
+        let mut sensors = BTreeSet::new();
+        for dataset in self.datasets.values() {
+            if let Some(sensor) = dataset.attr("sensor").and_then(MetadataValue::as_str) {
+                sensors.insert(sensor.to_string());
+            }
+        }
+        for loader in &self.loaders {
+            sensors.extend(loader.sensor_names());
+        }
+        sensors.into_iter().collect()
     }
 
     pub fn register_composite(&mut self, recipe: CompositeRecipe) -> Result<()> {
@@ -2354,6 +2607,255 @@ mod tests {
             }
         }
         candidates
+    }
+
+    #[derive(Debug, Default)]
+    struct TestLoader {
+        datasets: Vec<(String, DataId)>,
+        start_time: Option<String>,
+        end_time: Option<String>,
+        sensors: Vec<String>,
+        fail_on: Option<String>,
+    }
+
+    impl TestLoader {
+        fn with_dataset(mut self, name: &str, qualifiers: &[(&str, &str)]) -> Self {
+            let mut id = DataId::new(name).expect("valid test data id");
+            for (key, value) in qualifiers {
+                id = id.with_qualifier(*key, *value).expect("valid qualifier");
+            }
+            self.datasets.push((name.to_string(), id));
+            self
+        }
+
+        fn with_number(mut self, name: &str, key: &str, value: f64) -> Self {
+            let id = DataId::new(name)
+                .expect("valid test data id")
+                .with_qualifier(key, value)
+                .expect("valid qualifier");
+            self.datasets.push((name.to_string(), id));
+            self
+        }
+
+        fn with_time(mut self, start: &str, end: &str) -> Self {
+            self.start_time = Some(start.to_string());
+            self.end_time = Some(end.to_string());
+            self
+        }
+
+        fn with_sensor(mut self, sensor: &str) -> Self {
+            self.sensors.push(sensor.to_string());
+            self
+        }
+
+        fn failing_on(mut self, name: &str) -> Self {
+            self.fail_on = Some(name.to_string());
+            self
+        }
+    }
+
+    impl SceneLoader for TestLoader {
+        fn name(&self) -> &str {
+            "test_loader"
+        }
+
+        fn available_dataset_ids(&self) -> Vec<DataId> {
+            self.datasets.iter().map(|(_, id)| id.clone()).collect()
+        }
+
+        fn load(&self, id: &DataId) -> Result<Dataset> {
+            if self.fail_on.as_deref() == Some(id.name()) {
+                return Err(RustySatError::not_found(format!(
+                    "test loader intentionally failed for '{}'",
+                    id.name()
+                )));
+            }
+            self.datasets
+                .iter()
+                .find(|(_, candidate)| candidate == id)
+                .map(|(name, candidate)| {
+                    let mut dataset = Dataset::new(candidate.clone()).with_data(
+                        DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid grid"),
+                    );
+                    dataset
+                        .insert_metadata("reader", name)
+                        .expect("valid metadata");
+                    dataset
+                })
+                .ok_or_else(|| RustySatError::not_found(format!("test dataset '{}'", id.name())))
+        }
+
+        fn start_time(&self) -> Option<String> {
+            self.start_time.clone()
+        }
+
+        fn end_time(&self) -> Option<String> {
+            self.end_time.clone()
+        }
+
+        fn sensor_names(&self) -> Vec<String> {
+            self.sensors.clone()
+        }
+    }
+
+    #[test]
+    fn scene_with_loader_loads_dataset_by_query() {
+        let loader =
+            TestLoader::default().with_dataset("VIS006", &[("calibration", "reflectance")]);
+        let mut scene = Scene::with_loader(loader);
+        let id = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("calibration", "reflectance")
+            .unwrap();
+
+        scene.load([DataQuery::named("VIS006").unwrap()]).unwrap();
+
+        assert_eq!(scene.len(), 1);
+        assert!(scene.wishlist().contains(&id));
+        assert!(scene.get(&id).is_some());
+        assert_eq!(
+            scene.dependency_graph().get(&id).unwrap().source(),
+            &DependencySource::Reader("test_loader".to_string())
+        );
+        assert_eq!(
+            scene.dependency_graph().get(&id).unwrap().source(),
+            &DependencySource::reader("test_loader").unwrap()
+        );
+        assert!(scene.missing_datasets().is_empty());
+    }
+
+    #[test]
+    fn scene_load_without_loaders_returns_not_found() {
+        let mut scene = Scene::new();
+        let err = scene
+            .load([DataQuery::named("VIS006").unwrap()])
+            .unwrap_err();
+
+        assert!(matches!(err, RustySatError::NotFound { .. }));
+    }
+
+    #[test]
+    fn scene_load_resolves_best_match_across_multiple_loaders() {
+        let coarse = TestLoader::default().with_number("VIS006", "resolution", 3000.0);
+        let fine = TestLoader::default().with_number("VIS006", "resolution", 1000.0);
+        let mut scene = Scene::with_loaders([coarse, fine]);
+        let expected = DataId::new("VIS006")
+            .unwrap()
+            .with_qualifier("resolution", 1000.0)
+            .unwrap();
+
+        scene.load([DataQuery::named("VIS006").unwrap()]).unwrap();
+
+        assert_eq!(scene.len(), 1);
+        assert!(scene.get(&expected).is_some());
+        assert_eq!(scene.available_dataset_ids().len(), 2);
+    }
+
+    #[test]
+    fn scene_load_skips_datasets_that_are_already_loaded() {
+        let loader = TestLoader::default().with_dataset("VIS006", &[]);
+        let id = DataId::new("VIS006").unwrap();
+        let mut scene = Scene::with_loader(loader);
+        scene.insert_dataset(Dataset::new(id.clone()));
+
+        scene.load([DataQuery::named("VIS006").unwrap()]).unwrap();
+
+        assert_eq!(scene.len(), 1);
+        assert!(scene.get(&id).unwrap().array().is_none());
+    }
+
+    #[test]
+    fn scene_load_batch_failure_leaves_scene_datasets_unmodified() {
+        let loader = TestLoader::default()
+            .with_dataset("VIS006", &[])
+            .with_dataset("broken", &[])
+            .failing_on("broken");
+        let mut scene = Scene::with_loader(loader);
+
+        let err = scene
+            .load([
+                DataQuery::named("VIS006").unwrap(),
+                DataQuery::named("broken").unwrap(),
+            ])
+            .unwrap_err();
+
+        assert!(matches!(err, RustySatError::NotFound { .. }));
+        assert!(scene.is_empty());
+        assert!(scene.wishlist().len() == 2);
+        assert_eq!(scene.missing_datasets().len(), 2);
+    }
+
+    #[test]
+    fn scene_missing_datasets_reports_wishlist_minus_loaded() {
+        let loader = TestLoader::default()
+            .with_dataset("VIS006", &[])
+            .with_dataset("IR_108", &[])
+            .failing_on("IR_108");
+        let mut scene = Scene::with_loader(loader);
+
+        scene.load([DataQuery::named("VIS006").unwrap()]).unwrap();
+        assert!(scene.missing_datasets().is_empty());
+
+        scene
+            .load([DataQuery::named("IR_108").unwrap()])
+            .unwrap_err();
+        let missing = scene.missing_datasets();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name(), "IR_108");
+    }
+
+    #[test]
+    fn scene_start_end_time_and_sensor_names_from_dataset_attrs() {
+        let mut scene = Scene::new();
+        let mut early = Dataset::new(DataId::new("VIS006").unwrap());
+        early
+            .insert_attr("start_time", "2025-09-23T07:00:00Z")
+            .unwrap();
+        early
+            .insert_attr("end_time", "2025-09-23T07:10:00Z")
+            .unwrap();
+        early.insert_attr("sensor", "ahi").unwrap();
+        let mut late = Dataset::new(DataId::new("IR_108").unwrap());
+        late.insert_attr("start_time", "2025-09-23T07:05:00Z")
+            .unwrap();
+        late.insert_attr("sensor", "seviri").unwrap();
+        scene.insert_dataset(early);
+        scene.insert_dataset(late);
+
+        assert_eq!(scene.start_time().as_deref(), Some("2025-09-23T07:00:00Z"));
+        assert_eq!(scene.end_time().as_deref(), Some("2025-09-23T07:10:00Z"));
+        assert_eq!(
+            scene.sensor_names(),
+            vec!["ahi".to_string(), "seviri".to_string()]
+        );
+    }
+
+    #[test]
+    fn scene_time_and_sensor_fall_back_to_loader_metadata() {
+        let loader = TestLoader::default()
+            .with_dataset("VIS006", &[])
+            .with_time("2025-09-23T07:00:00Z", "2025-09-23T07:10:00Z")
+            .with_sensor("ahi");
+        let scene = Scene::with_loader(loader);
+
+        assert_eq!(scene.start_time().as_deref(), Some("2025-09-23T07:00:00Z"));
+        assert_eq!(scene.end_time().as_deref(), Some("2025-09-23T07:10:00Z"));
+        assert_eq!(scene.sensor_names(), vec!["ahi".to_string()]);
+    }
+
+    #[test]
+    fn scene_available_dataset_ids_and_names_merge_and_deduplicate() {
+        let first = TestLoader::default().with_dataset("VIS006", &[]);
+        let second = TestLoader::default()
+            .with_dataset("VIS006", &[])
+            .with_dataset("IR_108", &[]);
+        let scene = Scene::with_loaders([first, second]);
+
+        assert_eq!(scene.available_dataset_ids().len(), 2);
+        assert_eq!(
+            scene.available_dataset_names(),
+            vec!["IR_108".to_string(), "VIS006".to_string()]
+        );
     }
 
     #[derive(Default)]

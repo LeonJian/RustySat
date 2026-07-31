@@ -359,6 +359,18 @@ impl Reader for AhiL2NcFixtureReader {
         }
         self.handler.load_dataset(id.name(), &self.source)
     }
+
+    fn start_time(&self) -> Option<String> {
+        Some(self.handler.start_time().to_string())
+    }
+
+    fn end_time(&self) -> Option<String> {
+        Some(self.handler.end_time().to_string())
+    }
+
+    fn sensor_names(&self) -> Vec<String> {
+        vec![self.handler.sensor().to_string()]
+    }
 }
 
 fn required_global_attr<'a>(handler: &'a NetCdfFileHandler, key: &str) -> Result<&'a str> {
@@ -902,6 +914,35 @@ variables:
             .unwrap();
 
         assert_eq!(plan.reader_datasets().get("ahi_l2_nc").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ahi_l2_scene_lifecycle_loads_time_and_sensor_metadata() {
+        let source = NetCdfFixtureSource::from_yaml_str(AHI_L2_SMALL_DATA_FIXTURE).unwrap();
+        let reader = AhiL2NcFixtureReader::from_source(
+            "fixture.yaml",
+            filename_info(),
+            AhiL2NcFileType::Mask,
+            source,
+        )
+        .unwrap();
+        let mut scene = Scene::with_loader(reader);
+
+        assert_eq!(scene.start_time().as_deref(), Some("2023-08-24T05:40:21Z"));
+        assert_eq!(scene.end_time().as_deref(), Some("2023-08-24T05:49:40Z"));
+        assert_eq!(scene.sensor_names(), vec!["ahi".to_string()]);
+
+        scene
+            .load([DataQuery::named("cloud_mask").unwrap()])
+            .unwrap();
+
+        let dataset = scene.get(&DataId::new("cloud_mask").unwrap()).unwrap();
+        assert_eq!(
+            dataset.attr("start_time").and_then(MetadataValue::as_str),
+            Some("2023-08-24T05:40:21Z")
+        );
+        assert_eq!(scene.len(), 1);
+        assert!(scene.missing_datasets().is_empty());
     }
 
     #[test]
