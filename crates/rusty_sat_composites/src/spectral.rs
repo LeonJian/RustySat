@@ -16,7 +16,8 @@ use crate::common::{
 };
 use crate::Compositor;
 use rusty_sat_core::{
-    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError, ValidityMask,
+    AnyDataArray, DataArray, DataId, Dataset, MetadataValue, NumericElement, Result, RustySatError,
+    ValidityMask,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +52,33 @@ impl SpectralBlender {
     fn compose_blend(&self, inputs: &[Dataset]) -> Result<Dataset> {
         let arrays = require_weighted_arrays(inputs, self.weights.len())?;
         let array_info = require_matching_2d_arrays(&arrays)?;
+        let metadata = extract_composite_metadata(inputs[0].attrs());
+        // Keep the public dtype contract identical across entry points: when
+        // every input is f32, the blend stays f32 (Satpy composites default to
+        // float32) on the borrowed path too, so `Compositor::compose` and
+        // `compose_owned` never diverge in output dtype or numerics.
+        if arrays
+            .iter()
+            .all(|array| matches!(array, AnyDataArray::F32(_)))
+        {
+            let value_count = array_info.value_count();
+            let mut values = vec![0.0_f32; value_count];
+            for (array, weight) in arrays.iter().zip(&self.weights) {
+                let AnyDataArray::F32(array) = array else {
+                    unreachable!("all-f32 inputs checked above");
+                };
+                let weight = *weight as f32;
+                for (output, value) in values.iter_mut().zip(array.values()) {
+                    *output += weight * *value;
+                }
+            }
+            return self.finish_dataset(
+                array_info,
+                values,
+                build_or_mask(arrays.iter().map(|array| array.mask())),
+                &metadata,
+            );
+        }
         let value_count = array_info.value_count();
         let mut values = vec![0.0; value_count];
         for (array, weight) in arrays.iter().zip(&self.weights) {
@@ -58,7 +86,6 @@ impl SpectralBlender {
                 *output += *weight * value;
             }
         }
-        let metadata = extract_composite_metadata(inputs[0].attrs());
         self.finish_dataset(
             array_info,
             values,
@@ -137,48 +164,37 @@ impl SpectralBlender {
             }
             masks.push(mask);
         }
-        let mut array =
-            DataArray::<f32>::from_vec_named(array_info.shape, array_info.dims, values)?;
-        for (name, coordinate) in array_info.coords {
-            array.set_coordinate(name, coordinate)?;
-        }
-        if let Some(mask) = build_or_mask(masks.iter().map(Option::as_ref)) {
-            array.set_mask(mask)?;
-        }
-        let mut dataset = Dataset::new(DataId::new(self.name)?).with_array(array);
-        dataset.insert_attr("operation", MetadataValue::string("spectral_blend"))?;
-        dataset.insert_attr(
-            "weights",
-            MetadataValue::List(
-                self.weights
-                    .iter()
-                    .copied()
-                    .map(MetadataValue::float)
-                    .collect::<Result<Vec<_>>>()?,
-            ),
-        )?;
-        for (key, value) in metadata {
-            dataset.insert_attr(key.clone(), value.clone())?;
-        }
-        Ok(dataset)
+        self.finish_dataset(
+            array_info,
+            values,
+            build_or_mask(masks.iter().map(Option::as_ref)),
+            metadata,
+        )
     }
 
-    fn finish_dataset(
+    /// Shared finalization for both the f32 and f64 blend paths: array
+    /// construction from `array_info`, mask application, and the
+    /// `operation`/`weights`/metadata attribute emission all live here so a
+    /// behavioral fix never silently diverges between the two dtypes.
+    fn finish_dataset<T: NumericElement>(
         &self,
         array_info: ArrayInfo,
-        values: Vec<f64>,
+        values: Vec<T>,
         mask: Option<ValidityMask>,
-        metadata: &Vec<(String, MetadataValue)>,
-    ) -> Result<Dataset> {
-        let mut array =
-            DataArray::<f64>::from_vec_named(array_info.shape, array_info.dims, values)?;
+        metadata: &[(String, MetadataValue)],
+    ) -> Result<Dataset>
+    where
+        DataArray<T>: IntoAnyArray,
+    {
+        let mut array = DataArray::<T>::from_vec_named(array_info.shape, array_info.dims, values)?;
         for (name, coordinate) in array_info.coords {
             array.set_coordinate(name, coordinate)?;
         }
         if let Some(mask) = mask {
             array.set_mask(mask)?;
         }
-        let mut dataset = Dataset::new(DataId::new(self.name.clone())?).with_array(array);
+        let mut dataset =
+            Dataset::new(DataId::new(self.name.clone())?).with_array(array.into_any());
         dataset.insert_attr("operation", MetadataValue::string("spectral_blend"))?;
         dataset.insert_attr(
             "weights",
@@ -194,6 +210,43 @@ impl SpectralBlender {
             dataset.insert_attr(key, value.clone())?;
         }
         Ok(dataset)
+    }
+}
+
+/// Bridge for [`AnyDataArray`] conversion in the generic blend finalizer:
+/// `AnyDataArray` has no blanket `From<DataArray<T>>`, so the five concrete
+/// runtime dtypes are mapped explicitly.
+trait IntoAnyArray {
+    fn into_any(self) -> AnyDataArray;
+}
+
+impl IntoAnyArray for DataArray<f32> {
+    fn into_any(self) -> AnyDataArray {
+        AnyDataArray::F32(self)
+    }
+}
+
+impl IntoAnyArray for DataArray<f64> {
+    fn into_any(self) -> AnyDataArray {
+        AnyDataArray::F64(self)
+    }
+}
+
+impl IntoAnyArray for DataArray<u8> {
+    fn into_any(self) -> AnyDataArray {
+        AnyDataArray::U8(self)
+    }
+}
+
+impl IntoAnyArray for DataArray<u16> {
+    fn into_any(self) -> AnyDataArray {
+        AnyDataArray::U16(self)
+    }
+}
+
+impl IntoAnyArray for DataArray<i16> {
+    fn into_any(self) -> AnyDataArray {
+        AnyDataArray::I16(self)
     }
 }
 

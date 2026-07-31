@@ -225,6 +225,16 @@ const CIRA_SCALE: f64 = 0.01;
 const CIRA_LOG_CUTOFF: f64 = -1.651695136952194; // log10(0.0223)
 const CIRA_DENOM: f64 = 1.9887713527141455; // (1 - LOG_CUTOFF) * 0.75
 
+/// CIRA logarithmic stretch for a single value.
+///
+/// Shared by [`FloatImage::cira_stretch_in_place`] and the fused
+/// [`finalize_rgb_cira_u8`] so satpy-parity or numeric fixes never drift
+/// between the two paths.
+fn cira_stretch_value(value: f64) -> f64 {
+    let scaled = (value * CIRA_SCALE).max(f64::EPSILON);
+    (scaled.log10() - CIRA_LOG_CUTOFF) / CIRA_DENOM
+}
+
 /// Finalize a band-major `[3, y, x]` RGB array straight to an 8-bit
 /// interleaved `Image`, applying the CIRA stretch per pixel in one
 /// rayon-parallel pass.
@@ -265,6 +275,8 @@ fn finalize_rgb_cira_typed<U: NumericElement>(
     fill_value: u8,
 ) -> Result<Image> {
     let channels = ImageMode::Rgb.channels();
+    // Pre-size + rayon `par_chunks_mut`: see `from_numeric_rgb_array` for why
+    // a rayon `collect` over the 1->3 band expansion cannot preserve order.
     let mut pixels = vec![0u8; pixel_count * channels];
     pixels
         .par_chunks_mut(channels)
@@ -281,9 +293,12 @@ fn finalize_rgb_cira_typed<U: NumericElement>(
             for (band, out) in chunk.iter_mut().enumerate() {
                 let value = values[band * pixel_count + pixel_index].to_f64();
                 *out = if value.is_finite() {
-                    let scaled = (value * CIRA_SCALE).max(f64::EPSILON);
-                    let stretched = (scaled.log10() - CIRA_LOG_CUTOFF) / CIRA_DENOM;
-                    (stretched * 255.0).clamp(0.0, 255.0).round() as u8
+                    let stretched = cira_stretch_value(value);
+                    // Match the FloatImage<f32> reference path exactly: the
+                    // stretched value is stored as f32 before scaling by 255,
+                    // so pixels near a rounding boundary are byte-identical.
+                    let stretched = stretched as f32;
+                    (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8
                 } else {
                     fill_value
                 };
@@ -626,6 +641,15 @@ impl<T: ImageFloat> FloatImage<T> {
             .checked_mul(width)
             .ok_or_else(|| RustySatError::invalid_input("RGB image shape is too large"))?;
         let values = array.values();
+        // Pre-size + rayon `par_chunks_mut` instead of a rayon `collect`:
+        // `collect` on a non-indexed iterator (needed for the 1->3 band
+        // expansion) does NOT preserve input order in rayon — the unindexed
+        // `CollectConsumer` is `unreachable!` and the fallback merges chunks
+        // into a `LinkedList` in non-deterministic tree order (rayon 1.12
+        // `iter/collect/consumer.rs`). The pre-init pass is therefore the
+        // order-safe way to fill a single interleaved buffer in parallel; the
+        // extra zero-write is ~0.3s on a 5.8 GB buffer, cheaper than the
+        // double-buffer alternative.
         let mut pixels = vec![T::from_f64(0.0); pixel_count * ImageMode::Rgb.channels()];
         // Rayon-parallel interleaving: each interleaved pixel chunk is filled
         // from the three band-major sections independently, so the output is
@@ -730,8 +754,7 @@ impl<T: ImageFloat> FloatImage<T> {
                         continue;
                     }
                     let f = value.to_f64();
-                    let scaled = (f * CIRA_SCALE).max(f64::EPSILON);
-                    let stretched = (scaled.log10() - CIRA_LOG_CUTOFF) / CIRA_DENOM;
+                    let stretched = cira_stretch_value(f);
                     *value = T::from_f64(stretched);
                 }
             });

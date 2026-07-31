@@ -320,11 +320,11 @@ fn true_color_reproduction() {
     // interleaved u8 with the CIRA stretch applied per pixel, so the
     // interleaved f32 FloatImage intermediate (~5.8 GB) never exists.
     eprintln!("--- cira_stretch + save ---");
-    let u8 = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8");
+    let u8_img = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8 image");
     drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
     let png = out.join("true_color_05km.png");
     SimpleImageWriter::default()
-        .save_image(&u8, &png)
+        .save_image(&u8_img, &png)
         .expect("save");
     assert!(png.is_file());
     let sz = std::fs::metadata(&png).expect("meta").len();

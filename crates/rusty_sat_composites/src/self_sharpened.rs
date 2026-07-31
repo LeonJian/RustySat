@@ -83,6 +83,7 @@ impl SelfSharpenedRgb {
         // up-sampled and sharpened in a single fused pass reading `ratio`, so
         // no separate up-sampled 0.5 km intermediates are ever allocated.
         let band_count = h_r * w_r;
+        debug_assert_eq!(red.len(), band_count, "red length must equal h_r * w_r");
         let mut rgb = Vec::with_capacity(3 * band_count);
         rgb.extend(red);
         // Size the green/blue sections (zero-filled, then overwritten by the
