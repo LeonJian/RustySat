@@ -78,25 +78,43 @@ impl SelfSharpenedRgb {
         let mut ratio = mean4_2x2(&red, h_r, w_r, scale);
         compute_ratio(&mut ratio, &red); // ratio[i] = clip(red[i] / ratio[i], 0, 1.5)
 
-        // Now: `red` holds original R values, `ratio` holds sharpening factors.
-
-        // Step 3: up-sample green to target resolution, multiply by ratio
-        let mut green_up = repeat_2d(&green_1km, h_g, w_g, scale);
-        drop(green_1km);
-        apply_ratio(&mut green_up, &ratio);
-
-        // Step 4: up-sample blue, multiply by ratio
-        let mut blue_up = repeat_2d(&blue_1km, h_b, w_b, scale);
-        drop(blue_1km);
-        apply_ratio(&mut blue_up, &ratio);
-        drop(ratio);
-
-        // Step 5: stack [R, G, B] → band-major f32 [3, h_r, w_r]
+        // Step 3-5: write the three band sections of the band-major output.
+        // Red is moved in (freeing its buffer), then green and blue are
+        // up-sampled and sharpened in a single fused pass reading `ratio`, so
+        // no separate up-sampled 0.5 km intermediates are ever allocated.
         let band_count = h_r * w_r;
         let mut rgb = Vec::with_capacity(3 * band_count);
         rgb.extend(red);
-        rgb.extend(green_up);
-        rgb.extend(blue_up);
+        // Size the green/blue sections (zero-filled, then overwritten by the
+        // fused pass below) so the output can be split into disjoint slices.
+        rgb.resize(3 * band_count, 0.0);
+        let (green_section, blue_section) = rgb[band_count..].split_at_mut(band_count);
+        green_section
+            .par_chunks_mut(w_r)
+            .zip(blue_section.par_chunks_mut(w_r))
+            .enumerate()
+            .for_each(|(oi, (green_row, blue_row))| {
+                let si = oi / scale;
+                for oj in 0..w_r {
+                    let r = ratio[oi * w_r + oj];
+                    let src_idx = si * w_g + oj / scale;
+                    let gv = green_1km[src_idx];
+                    let bv = blue_1km[src_idx];
+                    green_row[oj] = if gv.is_finite() && r.is_finite() {
+                        gv * r
+                    } else {
+                        gv
+                    };
+                    blue_row[oj] = if bv.is_finite() && r.is_finite() {
+                        bv * r
+                    } else {
+                        bv
+                    };
+                }
+            });
+        drop(ratio);
+        drop(green_1km);
+        drop(blue_1km);
 
         let array =
             DataArray::<f32>::from_vec_named(vec![3, h_r, w_r], vec!["bands", "y", "x"], rgb)?;
@@ -185,6 +203,10 @@ fn compute_ratio(out: &mut [f32], data: &[f32]) {
 }
 
 /// Integer up-sample: each pixel repeated `scale`×`scale` times.
+///
+/// Kept for unit tests; the compositor itself fuses up-sampling with the
+/// ratio sharpening to avoid full-resolution intermediates.
+#[cfg(test)]
 fn repeat_2d(data: &[f32], h: usize, w: usize, scale: usize) -> Vec<f32> {
     let out_h = h * scale;
     let out_w = w * scale;
@@ -201,6 +223,10 @@ fn repeat_2d(data: &[f32], h: usize, w: usize, scale: usize) -> Vec<f32> {
 }
 
 /// Element-wise: `data[i] *= ratio[i]`.
+///
+/// Kept for unit tests; the compositor itself fuses the ratio into the
+/// up-sampled write.
+#[cfg(test)]
 fn apply_ratio(data: &mut [f32], ratio: &[f32]) {
     data.par_iter_mut()
         .zip(ratio.par_iter())

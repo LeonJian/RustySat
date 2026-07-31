@@ -884,6 +884,7 @@ pub struct AhiHsdReader {
     handlers: Vec<AhiHsdFileHandler>,
     calibration: AhiCalibration,
     output: AhiCalibrationOutput,
+    parallel_segments: usize,
 }
 
 impl AhiHsdReader {
@@ -921,7 +922,24 @@ impl AhiHsdReader {
             handlers: handlers.into_iter().collect(),
             calibration,
             output: AhiCalibrationOutput::DisplayF32,
+            parallel_segments: CONCURRENT_SEGMENT_LOADS,
         })
+    }
+
+    /// Set how many HSD segments are loaded/calibrated concurrently during
+    /// full-disk assembly.
+    ///
+    /// Higher values use more CPU (bzip2 decompression is single-threaded per
+    /// segment) at the cost of peak memory: `assembled buffer + N segment
+    /// buffers` coexist. The default is [`CONCURRENT_SEGMENT_LOADS`].
+    pub fn with_parallel_segments(mut self, parallel_segments: usize) -> Result<Self> {
+        if parallel_segments == 0 {
+            return Err(RustySatError::invalid_input(
+                "AHI HSD parallel segment count must be at least 1",
+            ));
+        }
+        self.parallel_segments = parallel_segments;
+        Ok(self)
     }
 
     pub fn handlers(&self) -> &[AhiHsdFileHandler] {
@@ -1019,7 +1037,7 @@ impl AhiHsdReader {
                 let (first_values, _, mut acc_mask) = $first_typed.into_parts();
                 let mut values = Vec::with_capacity(total_len);
                 values.extend(first_values);
-                for chunk in sorted_handlers[1..].chunks(CONCURRENT_SEGMENT_LOADS) {
+                for chunk in sorted_handlers[1..].chunks(self.parallel_segments) {
                     let chunk_datasets: Vec<Dataset> = chunk
                         .par_iter()
                         .map(|handler| self.load_handler_dataset(handler))

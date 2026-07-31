@@ -15,8 +15,8 @@
 #![allow(clippy::unwrap_used)]
 
 use rusty_sat_composites::{SelfSharpenedRgb, SpectralBlender};
-use rusty_sat_core::{AnyDataArray, DataQuery, Dataset, MetadataValue, Scene};
-use rusty_sat_image::FloatImage;
+use rusty_sat_core::{AnyDataArray, DataQuery, Dataset, MetadataValue, NumericElement, Scene};
+use rusty_sat_image::finalize_rgb_cira_u8;
 use rusty_sat_modifiers::{
     rayleigh_correct_with_sun_zenith, Atmosphere, RayleighConfig, RayleighCorrector, UtcInstant,
 };
@@ -165,20 +165,38 @@ fn take_dataset(scene: &mut Scene, name: &str) -> Dataset {
     scene.remove_dataset(&id).expect("band present in scene")
 }
 
-/// Mask-aware finite mean over any runtime-typed array.
+/// Mask-aware finite mean over any runtime-typed array, iterating the native
+/// dtype directly (no full f64 copy).
 fn finite_mean(array: &AnyDataArray) -> f64 {
+    let mask = array.mask();
     let mut sum = 0.0;
     let mut count = 0u64;
-    for (i, value) in array.values_as_f64().iter().enumerate() {
-        if value.is_finite() && array.mask().is_none_or(|m| m.is_masked(i) != Some(true)) {
-            sum += *value;
-            count += 1;
-        }
+    match array {
+        AnyDataArray::F32(a) => accumulate_numeric(a.values(), mask, &mut sum, &mut count),
+        AnyDataArray::F64(a) => accumulate_numeric(a.values(), mask, &mut sum, &mut count),
+        AnyDataArray::U8(a) => accumulate_numeric(a.values(), mask, &mut sum, &mut count),
+        AnyDataArray::U16(a) => accumulate_numeric(a.values(), mask, &mut sum, &mut count),
+        AnyDataArray::I16(a) => accumulate_numeric(a.values(), mask, &mut sum, &mut count),
     }
     if count == 0 {
         0.0
     } else {
         sum / count as f64
+    }
+}
+
+fn accumulate_numeric<T: NumericElement>(
+    values: &[T],
+    mask: Option<&rusty_sat_core::ValidityMask>,
+    sum: &mut f64,
+    count: &mut u64,
+) {
+    for (i, v) in values.iter().enumerate() {
+        let value = v.to_f64();
+        if value.is_finite() && mask.is_none_or(|m| m.is_masked(i) != Some(true)) {
+            *sum += value;
+            *count += 1;
+        }
     }
 }
 
@@ -214,7 +232,15 @@ fn true_color_reproduction() {
             ));
         }
         readers.push(
-            AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers).expect("reader"),
+            AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)
+                .expect("reader")
+                // 8-way segment parallelism: bzip2 decompression is
+                // single-threaded per segment, so more concurrent segments
+                // use more cores during the load phase. Peak assembly memory
+                // grows to assembled + 8 segment buffers, which fits after
+                // the later pipeline stages were made leaner.
+                .with_parallel_segments(8)
+                .expect("valid segment parallelism"),
         );
     }
     let t = obs_time.expect("observation time");
@@ -289,17 +315,13 @@ fn true_color_reproduction() {
         eprintln!("  RGB shape: [{}, {}, {}]", s[0], s[1], s[2]);
     };
 
-    // ── Step 7: cira_stretch → save 8-bit PNG (Satpy true_color_default) ─
-    // Memory: drop band-major f32 after from_rgb_array, keep interleaved only
+    // ── Step 7: fused cira stretch → 8-bit PNG (Satpy true_color_default) ──
+    // Memory: band-major f32 [3,y,x] (~5.8 GB) is finalized straight to
+    // interleaved u8 with the CIRA stretch applied per pixel, so the
+    // interleaved f32 FloatImage intermediate (~5.8 GB) never exists.
     eprintln!("--- cira_stretch + save ---");
-    let mut img = {
-        let rgb_arr = rgb.array().expect("arr");
-        FloatImage::<f32>::from_rgb_array(rgb_arr).expect("float image")
-    };
+    let u8 = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8");
     drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
-    img.cira_stretch_in_place();
-    let u8 = img.to_u8_image(0).expect("u8");
-    drop(img); // free f32 interleaved (~5.8 GB)
     let png = out.join("true_color_05km.png");
     SimpleImageWriter::default()
         .save_image(&u8, &png)

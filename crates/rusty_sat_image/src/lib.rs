@@ -216,6 +216,82 @@ fn luma_stretch_scale_offset(min: f64, max: f64) -> (f64, f64) {
     (scale, offset)
 }
 
+/// CIRA logarithmic stretch constants, shared by the in-place
+/// [`FloatImage::cira_stretch_in_place`] and the fused band-major RGB
+/// finalizer [`finalize_rgb_cira_u8`].
+///
+/// Reference: `satpy/satpy/enhancements/contrast.py` — `_cira_stretch`.
+const CIRA_SCALE: f64 = 0.01;
+const CIRA_LOG_CUTOFF: f64 = -1.651695136952194; // log10(0.0223)
+const CIRA_DENOM: f64 = 1.9887713527141455; // (1 - LOG_CUTOFF) * 0.75
+
+/// Finalize a band-major `[3, y, x]` RGB array straight to an 8-bit
+/// interleaved `Image`, applying the CIRA stretch per pixel in one
+/// rayon-parallel pass.
+///
+/// This mirrors `FloatImage::from_rgb_array(...).cira_stretch_in_place()
+/// .to_u8_image(fill_value)` without materializing the interleaved f32
+/// `FloatImage` intermediate: for a full-disk 0.5 km RGB image that halves
+/// the peak memory at this stage (band-major f32 + interleaved f32 + u8
+/// becomes band-major f32 + u8).
+pub fn finalize_rgb_cira_u8(array: &AnyDataArray, fill_value: u8) -> Result<Image> {
+    let (height, width, pixel_count) = require_band_major_rgb_shape(array)?;
+    let mask = array.mask();
+    match array {
+        AnyDataArray::F32(a) => {
+            finalize_rgb_cira_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::F64(a) => {
+            finalize_rgb_cira_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::U8(a) => {
+            finalize_rgb_cira_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::U16(a) => {
+            finalize_rgb_cira_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::I16(a) => {
+            finalize_rgb_cira_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+    }
+}
+
+fn finalize_rgb_cira_typed<U: NumericElement>(
+    values: &[U],
+    mask: Option<&ValidityMask>,
+    height: usize,
+    width: usize,
+    pixel_count: usize,
+    fill_value: u8,
+) -> Result<Image> {
+    let channels = ImageMode::Rgb.channels();
+    let mut pixels = vec![0u8; pixel_count * channels];
+    pixels
+        .par_chunks_mut(channels)
+        .enumerate()
+        .for_each(|(pixel_index, chunk)| {
+            let masked = (0..channels).any(|band| {
+                mask.and_then(|m| m.is_masked(band * pixel_count + pixel_index))
+                    .unwrap_or(false)
+            });
+            if masked {
+                chunk.fill(fill_value);
+                return;
+            }
+            for (band, out) in chunk.iter_mut().enumerate() {
+                let value = values[band * pixel_count + pixel_index].to_f64();
+                *out = if value.is_finite() {
+                    let scaled = (value * CIRA_SCALE).max(f64::EPSILON);
+                    let stretched = (scaled.log10() - CIRA_LOG_CUTOFF) / CIRA_DENOM;
+                    (stretched * 255.0).clamp(0.0, 255.0).round() as u8
+                } else {
+                    fill_value
+                };
+            }
+        });
+    Image::from_pixels(ImageMode::Rgb, height, width, pixels)
+}
+
 /// Finalize a 2D luma dataset straight to an 8-bit `Image`, bypassing the
 /// `FloatImage<f32>` intermediate. Numerically identical to
 /// `FloatImage::<f32>::from_luma_array(...).crude_stretched(None, None).to_u8_image(0)`:
@@ -530,9 +606,12 @@ impl<T: ImageFloat> FloatImage<T> {
         height: usize,
         width: usize,
     ) -> Result<Self> {
+        // Rayon-parallel conversion: each source value maps to exactly one
+        // output pixel, so the parallel result is identical to the sequential
+        // loop.
         let pixels = array
             .values()
-            .iter()
+            .par_iter()
             .map(|value| T::from_f64(value.to_f64()))
             .collect();
         Self::from_pixels(ImageMode::Luma, height, width, pixels)
@@ -547,14 +626,18 @@ impl<T: ImageFloat> FloatImage<T> {
             .checked_mul(width)
             .ok_or_else(|| RustySatError::invalid_input("RGB image shape is too large"))?;
         let values = array.values();
-        let mut pixels = Vec::with_capacity(pixel_count * ImageMode::Rgb.channels());
-        for pixel_index in 0..pixel_count {
-            for band in 0..ImageMode::Rgb.channels() {
-                pixels.push(T::from_f64(
-                    values[band * pixel_count + pixel_index].to_f64(),
-                ));
-            }
-        }
+        let mut pixels = vec![T::from_f64(0.0); pixel_count * ImageMode::Rgb.channels()];
+        // Rayon-parallel interleaving: each interleaved pixel chunk is filled
+        // from the three band-major sections independently, so the output is
+        // deterministic and the conversion uses all cores.
+        pixels
+            .par_chunks_mut(ImageMode::Rgb.channels())
+            .enumerate()
+            .for_each(|(pixel_index, chunk)| {
+                for (band, out) in chunk.iter_mut().enumerate() {
+                    *out = T::from_f64(values[band * pixel_count + pixel_index].to_f64());
+                }
+            });
         Self::from_pixels(ImageMode::Rgb, height, width, pixels)
     }
 
@@ -629,9 +712,6 @@ impl<T: ImageFloat> FloatImage<T> {
     ///
     /// Reference: `satpy/satpy/enhancements/contrast.py` — `_cira_stretch`.
     pub fn cira_stretch_in_place(&mut self) {
-        const SCALE: f64 = 0.01;
-        const LOG_CUTOFF: f64 = -1.651695136952194; // log10(0.0223)
-        const DENOM: f64 = 1.9887713527141455; // (1 - LOG_CUTOFF) * 0.75
         let channels = self.mode.channels();
         let mask = &self.mask;
         self.pixels
@@ -650,8 +730,8 @@ impl<T: ImageFloat> FloatImage<T> {
                         continue;
                     }
                     let f = value.to_f64();
-                    let scaled = (f * SCALE).max(f64::EPSILON);
-                    let stretched = (scaled.log10() - LOG_CUTOFF) / DENOM;
+                    let scaled = (f * CIRA_SCALE).max(f64::EPSILON);
+                    let stretched = (scaled.log10() - CIRA_LOG_CUTOFF) / CIRA_DENOM;
                     *value = T::from_f64(stretched);
                 }
             });

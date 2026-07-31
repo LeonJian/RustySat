@@ -72,6 +72,16 @@ impl SpectralBlender {
         let arrays = require_weighted_owned_arrays(inputs, self.weights.len())?;
         let refs = arrays.iter().collect::<Vec<_>>();
         let array_info = require_matching_2d_arrays(&refs)?;
+        // Satpy composites produce float32 by default; when every input is
+        // already f32, keep the blend in f32 instead of promoting to f64 —
+        // this halves the output buffer and avoids an f64->f32 conversion in
+        // downstream consumers. Mixed/f64 inputs still use the f64 path.
+        if refs
+            .iter()
+            .all(|array| matches!(array, AnyDataArray::F32(_)))
+        {
+            return self.compose_owned_f32(arrays, array_info, &metadata);
+        }
         let mut array_iter = arrays.into_iter();
         let first = array_iter
             .next()
@@ -95,6 +105,62 @@ impl SpectralBlender {
             build_or_mask(masks.iter().map(Option::as_ref)),
             &metadata,
         )
+    }
+
+    fn compose_owned_f32(
+        self,
+        arrays: Vec<AnyDataArray>,
+        array_info: ArrayInfo,
+        metadata: &[(String, MetadataValue)],
+    ) -> Result<Dataset> {
+        let mut array_iter = arrays.into_iter();
+        let first = array_iter
+            .next()
+            .expect("weights validation requires at least one input");
+        let first_weight = self.weights[0] as f32;
+        let AnyDataArray::F32(first) = first else {
+            unreachable!("all-f32 inputs checked before this path");
+        };
+        let (mut values, _, first_mask) = first.into_parts();
+        for value in &mut values {
+            *value *= first_weight;
+        }
+        let mut masks = vec![first_mask];
+        for (array, weight) in array_iter.zip(self.weights.iter().skip(1)) {
+            let AnyDataArray::F32(array) = array else {
+                unreachable!("all-f32 inputs checked before this path");
+            };
+            let (array_values, _, mask) = array.into_parts();
+            let weight = *weight as f32;
+            for (output, value) in values.iter_mut().zip(array_values) {
+                *output += weight * value;
+            }
+            masks.push(mask);
+        }
+        let mut array =
+            DataArray::<f32>::from_vec_named(array_info.shape, array_info.dims, values)?;
+        for (name, coordinate) in array_info.coords {
+            array.set_coordinate(name, coordinate)?;
+        }
+        if let Some(mask) = build_or_mask(masks.iter().map(Option::as_ref)) {
+            array.set_mask(mask)?;
+        }
+        let mut dataset = Dataset::new(DataId::new(self.name)?).with_array(array);
+        dataset.insert_attr("operation", MetadataValue::string("spectral_blend"))?;
+        dataset.insert_attr(
+            "weights",
+            MetadataValue::List(
+                self.weights
+                    .iter()
+                    .copied()
+                    .map(MetadataValue::float)
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+        )?;
+        for (key, value) in metadata {
+            dataset.insert_attr(key.clone(), value.clone())?;
+        }
+        Ok(dataset)
     }
 
     fn finish_dataset(
