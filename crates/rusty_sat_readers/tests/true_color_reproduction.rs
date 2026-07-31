@@ -112,7 +112,7 @@ fn ahi_time_to_utc(days: f64) -> UtcInstant {
 
 fn build_corrector(nm: f64) -> Option<RayleighCorrector> {
     let cfg = RayleighConfig {
-        platform_name: "Himawari-8".into(),
+        platform_name: "Himawari-9".into(),
         sensor: "ahi".into(),
         atmosphere: Atmosphere::UsStandard,
         aerosol_type: rusty_sat_modifiers::AerosolType::RayleighOnly,
