@@ -75,6 +75,8 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 
 2. **Scene** (in `rusty_sat_core`) acts as a container and orchestrator:
    - Holds all loaded `Dataset` objects indexed by `DataId`
+   - Owns one or more `SceneLoader` sources (readers bridge to this contract) and loads datasets by `DataQuery` through `Scene::load()`, mirroring Satpy's `Scene(filenames, reader)` + `Scene.load(wishlist)` lifecycle
+   - `available_dataset_ids()` / `available_dataset_names()` / `missing_datasets()` for discovery; `start_time()` / `end_time()` / `sensor_names()` derived from dataset attrs with loader fallback
    - Manages a `DependencyGraph` tracking what each dataset depends on
    - `plan_reader_loads()` matches `DataQuery` patterns against `ReaderInventory` from each reader
    - `save_dataset()` delegates to `DatasetWriter` implementations
@@ -122,7 +124,8 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 - `AnyDataArray` — runtime-typed numeric array (`F32`, `F64`, `U8`, `U16`, `I16`)
 - `DataArray<T>` — owned n-dimensional array with shape, dimensions, values, mask, coordinates, chunks
 - `DataGrid` — type alias for `DataArray<f64>` (2D legacy compatibility)
-- `Scene` — main container: datasets, wishlist, dependency graph, reader load planning
+- `Scene` — main container: datasets, wishlist, dependency graph, reader load planning, and query-based loading through attached `SceneLoader` sources
+- `SceneLoader` — dataset discovery/loading contract (`name`, `available_dataset_ids`, `load`, `load_batch`, time/sensor metadata) that readers bridge to
 - `DependencyGraph` — directed graph tracking dataset dependencies
 - `ValidityMask` — bit-packed mask where set bit = invalid pixel
 - `Coordinate` — named coordinate axis with f64 values
@@ -133,7 +136,7 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 **Design Patterns**:
 - `DataArray<T>` is generic over `NumericElement` trait (f32/f64/u8/u16/i16)
 - `AnyDataArray` provides runtime dtype dispatch via `DataType` enum
-- `Scene` owns datasets and orchestrates reader/compositor/modifier execution
+- `Scene` owns datasets and orchestrates reader/compositor/modifier execution; readers attach as `Box<dyn SceneLoader>` so the core crate stays reader-agnostic
 - Single error type eliminates per-crate error conversions
 
 ---
@@ -155,7 +158,8 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 - **YAML Reader**: Metadata-driven configuration
 
 **Key Abstractions**:
-- `Reader` trait — `name()`, `available_dataset_ids()`, `load(&DataId) -> Dataset`
+- `Reader` trait — `name()`, `available_dataset_ids()`, `load(&DataId) -> Dataset`, plus time/sensor metadata hooks
+- Every concrete reader also implements the core `SceneLoader` contract (explicit forwarding impls) so it can be attached to a `Scene`
 - `AhiHsdReader` — full AHI HSD implementation with calibration modes
 - `AhiHsdFileHandler` — single HSD segment file parser
 - `NetCdfFileHandler` — generic NetCDF file handler

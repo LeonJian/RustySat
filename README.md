@@ -33,7 +33,8 @@ cargo build --release
 ### Example: Load and Calibrate AHI Data
 
 ```rust
-use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, Reader};
+use rusty_sat_core::{DataQuery, Scene};
+use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
 use std::path::Path;
 
@@ -44,14 +45,16 @@ fn main() -> rusty_sat_core::Result<()> {
         // ... additional segments
     ];
 
-    // Create reader with calibration mode
+    // Create reader with calibration mode and attach it to a Scene
     let reader = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)?;
+    let mut scene = Scene::with_loader(reader);
 
-    // Load dataset
-    let dataset = reader.load(&reader.available_dataset_ids()[0])?;
+    // Load dataset by name (Satpy-style `scene.load(["B03"])`)
+    scene.load([DataQuery::named("B03")?])?;
 
     // Save as PNG
-    SimpleImageWriter::default().save_dataset(&dataset, "output.png")?;
+    let id = &scene.available_dataset_ids()[0];
+    scene.save_dataset(id, &SimpleImageWriter::default(), "output.png")?;
 
     Ok(())
 }
@@ -133,6 +136,13 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
 | `rusty_sat_cli` | Command-line interface (skeleton) | `main()` |
 
 ## Current Capabilities
+
+### Scene Orchestration
+
+- **Scene lifecycle** — `Scene::with_loader(reader)` / `with_loaders([...])` mirrors Satpy's `Scene(filenames, reader)`; `Scene::load([DataQuery])` resolves queries against attached readers, batches loads per reader, and tracks the wishlist
+- **Discovery** — `available_dataset_ids()`, `available_dataset_names()`, `missing_datasets()`
+- **Metadata** — `start_time()`, `end_time()`, `sensor_names()` derived from loaded dataset attrs with reader-level fallback
+- **SceneLoader contract** — readers bridge to `Scene` via explicit `SceneLoader` impls; `Scene::save_dataset()` writes through the `DatasetWriter` contract
 
 ### Readers
 

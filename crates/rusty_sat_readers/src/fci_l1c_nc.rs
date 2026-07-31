@@ -244,6 +244,23 @@ groups:
     }
 
     #[test]
+    fn fci_fixture_reader_drives_scene_load_lifecycle() {
+        let path = fixture_path("scene_lifecycle");
+        fs::write(&path, FCI_FIXTURE).unwrap();
+        let reader = FciL1cFixtureReader::from_fixture_path(&path, ["vis_04"]).unwrap();
+        let mut scene = Scene::with_loader(reader);
+
+        assert_eq!(scene.available_dataset_names(), vec!["vis_04".to_string()]);
+        scene.load([DataQuery::named("vis_04").unwrap()]).unwrap();
+
+        assert_eq!(scene.len(), 1);
+        assert!(scene.missing_datasets().is_empty());
+        let id = FciL1cFixtureReader::dataset_id("vis_04").unwrap();
+        assert_eq!(scene.get(&id).unwrap().array().unwrap().shape(), &[2, 3]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn fci_fixture_reader_rejects_unknown_calibration() {
         let source = NetCdfFixtureSource::from_yaml_str(FCI_FIXTURE).unwrap();
         let reader = FciL1cFixtureReader::from_source(
