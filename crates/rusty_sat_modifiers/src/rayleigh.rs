@@ -847,7 +847,7 @@ mod tests {
         let h = 3;
         let geos = GeosProjection {
             semi_major_axis: 6_378_137.0,
-            semi_minor_axis: 6_356_752.31414,
+            semi_minor_axis: 6_356_752.314_14,
             perspective_point_height: 35_785_863.0,
             longitude_of_projection_origin: 140.7,
         };
