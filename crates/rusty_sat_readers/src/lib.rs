@@ -67,7 +67,11 @@ pub trait Reader {
 ///
 /// A blanket implementation is not possible here because `SceneLoader` is a
 /// foreign trait (from `rusty_sat_core`), so each reader gets an explicit
-/// forwarding implementation via this macro.
+/// forwarding implementation via this macro. The default `load_batch` is
+/// overridden with a rayon-parallel version: reader dataset loads are
+/// independent, so batched loads (e.g. several bands from one reader) run
+/// concurrently. Readers with large per-dataset memory footprints can override
+/// `load_batch` again to bound concurrency.
 macro_rules! impl_scene_loader_for_reader {
     ($($reader:ty),+ $(,)?) => {
         $(
@@ -82,6 +86,13 @@ macro_rules! impl_scene_loader_for_reader {
 
                 fn load(&self, id: &DataId) -> Result<Dataset> {
                     <Self as Reader>::load(self, id)
+                }
+
+                fn load_batch(&self, ids: &[DataId]) -> Result<Vec<Dataset>> {
+                    use rayon::prelude::*;
+                    ids.par_iter()
+                        .map(|id| <Self as Reader>::load(self, id))
+                        .collect()
                 }
 
                 fn start_time(&self) -> Option<String> {

@@ -1405,9 +1405,14 @@ impl SceneLoadPlan {
 ///
 /// Mirrors the reader-facing parts of Satpy's `Scene` lifecycle: dataset
 /// discovery, batched loading, and reader-level time/sensor metadata hooks.
-/// `rusty_sat_readers::Reader` is bridged to this trait with a blanket
-/// implementation, so every reader can be attached to a `Scene` directly.
-pub trait SceneLoader: fmt::Debug {
+/// `rusty_sat_readers::Reader` is bridged to this trait with explicit
+/// forwarding implementations, so every reader can be attached to a `Scene`
+/// directly.
+///
+/// The `Send + Sync` bounds allow [`SceneLoader::load_batch`] implementations
+/// (and callers) to load independent datasets in parallel; loaders that are
+/// purely file/header metadata based satisfy them for free.
+pub trait SceneLoader: fmt::Debug + Send + Sync {
     /// Unique loader name (e.g. `"ahi_hsd"`).
     fn name(&self) -> &str;
 
@@ -1628,9 +1633,10 @@ impl Scene {
         let all_ids: Vec<&DataId> = loader_ids.iter().flatten().collect();
 
         let mut requested: Vec<DataId> = Vec::new();
+        let mut seen: BTreeSet<DataId> = BTreeSet::new();
         for query in &queries {
             let best = query.best_match(all_ids.iter().copied())?.clone();
-            if !requested.contains(&best) {
+            if seen.insert(best.clone()) {
                 requested.push(best);
             }
         }
@@ -1643,10 +1649,12 @@ impl Scene {
             return Ok(());
         }
 
+        let loader_sets: Vec<BTreeSet<&DataId>> =
+            loader_ids.iter().map(|ids| ids.iter().collect()).collect();
         for (index, loader) in self.loaders.iter().enumerate() {
             let ids: Vec<DataId> = to_load
                 .iter()
-                .filter(|id| loader_ids[index].contains(id))
+                .filter(|id| loader_sets[index].contains(id))
                 .cloned()
                 .collect();
             if ids.is_empty() {

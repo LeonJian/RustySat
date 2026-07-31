@@ -618,10 +618,10 @@ fn repeat_yx_from_parts(
     }
 
     for output_idx in 0..output_size {
-        let mut indexes = unravel_index(output_idx, &output_shape, &output_strides);
+        let mut indexes = unravel_index_fixed(output_idx, &output_shape, &output_strides);
         indexes[y_dim] /= y_factor;
         indexes[x_dim] /= x_factor;
-        let source_idx = linear_index(&indexes, &source_strides);
+        let source_idx = linear_index(&indexes[..source_shape_nd.len()], &source_strides);
         values.push(source_values[source_idx]);
         if source_mask.is_some() {
             mask_flags.push(
@@ -665,10 +665,10 @@ fn repeat_yx_typed_from_parts<T: NumericElement>(
     }
 
     for output_idx in 0..output_size {
-        let mut indexes = unravel_index(output_idx, &output_shape, &output_strides);
+        let mut indexes = unravel_index_fixed(output_idx, &output_shape, &output_strides);
         indexes[y_dim] /= y_factor;
         indexes[x_dim] /= x_factor;
-        let source_idx = linear_index(&indexes, &source_strides);
+        let source_idx = linear_index(&indexes[..source_shape_nd.len()], &source_strides);
         values.push(source_values[source_idx]);
         if source_mask.is_some() {
             mask_flags.push(
@@ -708,15 +708,16 @@ fn aggregate_mean_yx_from_parts(
     let mut mask_flags = Vec::with_capacity(output_size);
 
     for output_idx in 0..output_size {
-        let output_indexes = unravel_index(output_idx, &output_shape, &output_strides);
+        let output_indexes = unravel_index_fixed(output_idx, &output_shape, &output_strides);
         let mut sum = 0.0;
         let mut count = 0usize;
         for dy in 0..y_factor {
             for dx in 0..x_factor {
-                let mut source_indexes = output_indexes.clone();
+                let mut source_indexes = output_indexes;
                 source_indexes[y_dim] = output_indexes[y_dim] * y_factor + dy;
                 source_indexes[x_dim] = output_indexes[x_dim] * x_factor + dx;
-                let source_idx = linear_index(&source_indexes, &source_strides);
+                let source_idx =
+                    linear_index(&source_indexes[..source_shape_nd.len()], &source_strides);
                 let masked = source_mask
                     .as_ref()
                     .and_then(|mask| mask.is_masked(source_idx))
@@ -919,11 +920,15 @@ fn row_major_strides(shape: &[usize]) -> Result<Vec<usize>> {
     crate::nd_utils::row_major_strides(shape)
 }
 
-fn unravel_index(mut index: usize, shape: &[usize], strides: &[usize]) -> Vec<usize> {
-    let mut indexes = Vec::with_capacity(shape.len());
-    for (dim, stride) in shape.iter().zip(strides) {
+/// Stack-based unravel: arrays have at most 4 dimensions (1D-4D defaults), so
+/// the index vector fits in a fixed `[usize; 4]` without a per-pixel heap
+/// allocation (the previous `Vec<usize>` version allocated once per output
+/// pixel, which dominated multi-dimensional native resampling costs).
+fn unravel_index_fixed(mut index: usize, shape: &[usize], strides: &[usize]) -> [usize; 4] {
+    let mut indexes = [0usize; 4];
+    for ((dim, stride), out) in shape.iter().zip(strides).zip(indexes.iter_mut()) {
         let value = index / *stride;
-        indexes.push(value % *dim);
+        *out = value % *dim;
         index %= *stride;
     }
     indexes

@@ -12,6 +12,7 @@
 //! source pixels.
 
 use crate::{AreaDefinition, Resampler};
+use rayon::prelude::*;
 use rusty_sat_core::{Coordinate, DataGrid, Dataset, Result, RustySatError, ValidityMask};
 use std::collections::BTreeMap;
 
@@ -177,21 +178,31 @@ fn resample_area_bilinear_with_policy(
     validate_source_shape(source_grid, source)?;
     validate_projection_compatibility(source, destination)?;
     let (dst_height, dst_width) = destination.shape();
-    let mut values = Vec::with_capacity(dst_height * dst_width);
-    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
-
-    for (x, y) in destination.iter_projection_coords() {
-        match bilinear_sample(source_grid.values(), source_grid.mask(), source, x, y) {
-            Some(value) => {
-                values.push(value);
-                mask_flags.push(false);
+    let row_ys: Vec<f64> = destination.iter_projection_y_coords().collect();
+    // Destination rows are independent: compute per-row vectors in parallel
+    // (deterministic, bounded row-buffer memory) and concatenate in order.
+    let rows: Vec<(Vec<f64>, Vec<bool>)> = (0..dst_height)
+        .into_par_iter()
+        .map(|y| {
+            let mut row_values = Vec::with_capacity(dst_width);
+            let mut row_masks = Vec::with_capacity(dst_width);
+            let row_y = row_ys[y];
+            for x in destination.iter_projection_x_coords() {
+                match bilinear_sample(source_grid.values(), source_grid.mask(), source, x, row_y) {
+                    Some(value) => {
+                        row_values.push(value);
+                        row_masks.push(false);
+                    }
+                    None => {
+                        row_values.push(fill_value);
+                        row_masks.push(missing_policy.masks_missing());
+                    }
+                }
             }
-            None => {
-                values.push(fill_value);
-                mask_flags.push(missing_policy.masks_missing());
-            }
-        }
-    }
+            (row_values, row_masks)
+        })
+        .collect();
+    let (values, mask_flags) = flatten_bilinear_rows(rows, dst_height * dst_width);
 
     add_bilinear_coords(
         finish_bilinear_grid(dst_height, dst_width, values, mask_flags)?,
@@ -211,27 +222,48 @@ fn resample_area_bilinear_owned_with_policy(
     validate_projection_compatibility(source, destination)?;
     let (src_values, src_coords, src_mask) = source_grid.into_parts();
     let (dst_height, dst_width) = destination.shape();
-    let mut values = Vec::with_capacity(dst_height * dst_width);
-    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
-
-    for (x, y) in destination.iter_projection_coords() {
-        match bilinear_sample(&src_values, src_mask.as_ref(), source, x, y) {
-            Some(value) => {
-                values.push(value);
-                mask_flags.push(false);
+    let row_ys: Vec<f64> = destination.iter_projection_y_coords().collect();
+    let rows: Vec<(Vec<f64>, Vec<bool>)> = (0..dst_height)
+        .into_par_iter()
+        .map(|y| {
+            let mut row_values = Vec::with_capacity(dst_width);
+            let mut row_masks = Vec::with_capacity(dst_width);
+            let row_y = row_ys[y];
+            for x in destination.iter_projection_x_coords() {
+                match bilinear_sample(&src_values, src_mask.as_ref(), source, x, row_y) {
+                    Some(value) => {
+                        row_values.push(value);
+                        row_masks.push(false);
+                    }
+                    None => {
+                        row_values.push(fill_value);
+                        row_masks.push(missing_policy.masks_missing());
+                    }
+                }
             }
-            None => {
-                values.push(fill_value);
-                mask_flags.push(missing_policy.masks_missing());
-            }
-        }
-    }
+            (row_values, row_masks)
+        })
+        .collect();
+    let (values, mask_flags) = flatten_bilinear_rows(rows, dst_height * dst_width);
 
     add_bilinear_coords_owned(
         finish_bilinear_grid(dst_height, dst_width, values, mask_flags)?,
         Some(src_coords),
         destination,
     )
+}
+
+fn flatten_bilinear_rows(
+    rows: Vec<(Vec<f64>, Vec<bool>)>,
+    total_len: usize,
+) -> (Vec<f64>, Vec<bool>) {
+    let mut values = Vec::with_capacity(total_len);
+    let mut mask_flags = Vec::with_capacity(total_len);
+    for (row_values, row_masks) in rows {
+        values.extend(row_values);
+        mask_flags.extend(row_masks);
+    }
+    (values, mask_flags)
 }
 
 fn bilinear_sample(

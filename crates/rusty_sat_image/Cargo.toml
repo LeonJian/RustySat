@@ -6,6 +6,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+rayon = "1.10"
 rusty_sat_core = { path = "../rusty_sat_core" }
 
 [lints]

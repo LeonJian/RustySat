@@ -229,12 +229,17 @@ fn build_kd_tree(mut points: Vec<Point2D>, depth: usize, nodes: &mut Vec<KdNode>
         return None;
     }
     let axis = Axis::for_depth(depth);
-    points.sort_by(|left, right| {
+    // O(n log n) partition: `select_nth_unstable_by` places the median element
+    // in its final sorted position with all smaller values left and larger
+    // values right, which is exactly what KD-tree construction needs (the
+    // partitions themselves need no further ordering). `sort_by` was O(n log² n)
+    // because every recursion level sorted its full slice.
+    let median = points.len() / 2;
+    points.select_nth_unstable_by(median, |left, right| {
         axis.value(*left)
             .total_cmp(&axis.value(*right))
             .then_with(|| left.index.cmp(&right.index))
     });
-    let median = points.len() / 2;
     let right_points = points.split_off(median + 1);
     let point = points.pop().expect("median point exists after split_off");
     let node_index = nodes.len();

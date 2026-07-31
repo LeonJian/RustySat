@@ -5,6 +5,7 @@
 //! provides an explicit scaled u16 path for HDR display-oriented products.
 
 use crate::Writer;
+use rayon::prelude::*;
 use rusty_sat_core::{AnyDataArray, Dataset, MetadataValue, Result, RustySatError, ValidityMask};
 use rusty_sat_image::Image;
 use rusty_sat_resample::geo_keys::{
@@ -489,9 +490,11 @@ fn write_tiff_pixels(
         // Tile retiling is done; the contiguous source buffer is no longer needed.
         drop(bytes);
         if compression == TiffCompression::Deflate {
+            // Each tile compresses independently: parallelize the DEFLATE
+            // encoding while preserving tile order (IndexedParallelIterator).
             raw_blocks
-                .iter()
-                .map(|b| compress_deflate(b))
+                .into_par_iter()
+                .map(|block| compress_deflate(&block))
                 .collect::<Result<Vec<_>>>()?
         } else {
             raw_blocks

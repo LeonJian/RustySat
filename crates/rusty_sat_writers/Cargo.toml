@@ -9,6 +9,7 @@ license.workspace = true
 flate2 = "1.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 png = "0.18"
+rayon = "1.10"
 rusty_sat_core = { path = "../rusty_sat_core" }
 rusty_sat_image = { path = "../rusty_sat_image" }
 rusty_sat_resample = { path = "../rusty_sat_resample" }

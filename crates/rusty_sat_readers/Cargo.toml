@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bzip2 = "0.4"
+rayon = "1.10"
 regex = "1.10"
 rusty_sat_core = { path = "../rusty_sat_core" }
 serde_norway = "0.9"

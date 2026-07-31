@@ -27,11 +27,14 @@
 //! // img.pixels() → &[u8] with auto-stretched 0–255 range
 //! ```
 
+use rayon::prelude::*;
 use rusty_sat_core::{
     AnyDataArray, DataArray, Dataset, NumericElement, Result, RustySatError, ValidityMask,
 };
 
-pub trait ImageFloat: Copy + Clone + PartialEq + PartialOrd + std::fmt::Debug + 'static {
+pub trait ImageFloat:
+    Copy + Clone + PartialEq + PartialOrd + std::fmt::Debug + Send + Sync + 'static
+{
     fn from_f64(value: f64) -> Self;
     fn to_f64(self) -> f64;
     fn is_finite(self) -> bool;
@@ -581,18 +584,30 @@ impl<T: ImageFloat> FloatImage<T> {
             };
             scale.push(T::from_f64(channel_scale));
             offset.push(T::from_f64(channel_offset));
-            for idx in (channel..self.pixels.len()).step_by(channels) {
-                if self.is_masked_pixel(idx / channels) {
-                    continue;
-                }
-                let value = self.pixels[idx];
-                self.pixels[idx] = if value.is_finite() {
-                    T::from_f64(value.to_f64() * channel_scale + channel_offset)
-                } else {
-                    value
-                };
-            }
         }
+        // Apply the per-channel scale/offset to every pixel in parallel: each
+        // interleaved pixel chunk is independent, so the result is identical
+        // to the sequential loop.
+        let mask = &self.mask;
+        self.pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_idx, chunk)| {
+                if mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(pixel_idx))
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                for (channel, value) in chunk.iter_mut().enumerate() {
+                    if value.is_finite() {
+                        *value = T::from_f64(
+                            value.to_f64() * scale[channel].to_f64() + offset[channel].to_f64(),
+                        );
+                    }
+                }
+            });
         self.enhancement_history
             .push(StretchRecord { scale, offset });
     }
@@ -618,19 +633,28 @@ impl<T: ImageFloat> FloatImage<T> {
         const LOG_CUTOFF: f64 = -1.651695136952194; // log10(0.0223)
         const DENOM: f64 = 1.9887713527141455; // (1 - LOG_CUTOFF) * 0.75
         let channels = self.mode.channels();
-        for idx in 0..self.pixels.len() {
-            if self.is_masked_pixel(idx / channels) {
-                continue;
-            }
-            let v = self.pixels[idx];
-            if !v.is_finite() {
-                continue;
-            }
-            let f = v.to_f64();
-            let scaled = (f * SCALE).max(f64::EPSILON);
-            let stretched = (scaled.log10() - LOG_CUTOFF) / DENOM;
-            self.pixels[idx] = T::from_f64(stretched);
-        }
+        let mask = &self.mask;
+        self.pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_idx, chunk)| {
+                if mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(pixel_idx))
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                for value in chunk.iter_mut() {
+                    if !value.is_finite() {
+                        continue;
+                    }
+                    let f = value.to_f64();
+                    let scaled = (f * SCALE).max(f64::EPSILON);
+                    let stretched = (scaled.log10() - LOG_CUTOFF) / DENOM;
+                    *value = T::from_f64(stretched);
+                }
+            });
     }
 
     pub fn gamma_in_place(&mut self, gamma: T) -> Result<()> {
@@ -659,17 +683,25 @@ impl<T: ImageFloat> FloatImage<T> {
         {
             return Ok(());
         }
-        for (channel, inverse_gamma) in inverse_gamma.into_iter().enumerate() {
-            for idx in (channel..self.pixels.len()).step_by(channels) {
-                if self.is_masked_pixel(idx / channels) {
-                    continue;
+        let channels = self.mode.channels();
+        let mask = &self.mask;
+        self.pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_idx, chunk)| {
+                if mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(pixel_idx))
+                    .unwrap_or(false)
+                {
+                    return;
                 }
-                let value = self.pixels[idx];
-                if value.is_finite() {
-                    self.pixels[idx] = T::from_f64(value.to_f64().max(0.0).powf(inverse_gamma));
+                for (channel, value) in chunk.iter_mut().enumerate() {
+                    if value.is_finite() {
+                        *value = T::from_f64(value.to_f64().max(0.0).powf(inverse_gamma[channel]));
+                    }
                 }
-            }
-        }
+            });
         self.gamma_history.push(gamma.to_vec());
         Ok(())
     }
@@ -691,20 +723,25 @@ impl<T: ImageFloat> FloatImage<T> {
         if invert.iter().all(|value| !*value) {
             return Ok(());
         }
-        for (channel, invert) in invert.iter().copied().enumerate() {
-            if !invert {
-                continue;
-            }
-            for idx in (channel..self.pixels.len()).step_by(channels) {
-                if self.is_masked_pixel(idx / channels) {
-                    continue;
+        let channels = self.mode.channels();
+        let mask = &self.mask;
+        self.pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_idx, chunk)| {
+                if mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(pixel_idx))
+                    .unwrap_or(false)
+                {
+                    return;
                 }
-                let value = self.pixels[idx];
-                if value.is_finite() {
-                    self.pixels[idx] = T::from_f64(1.0 - value.to_f64());
+                for (channel, value) in chunk.iter_mut().enumerate() {
+                    if invert[channel] && value.is_finite() {
+                        *value = T::from_f64(1.0 - value.to_f64());
+                    }
                 }
-            }
-        }
+            });
         self.invert_history.push(invert.to_vec());
         Ok(())
     }
@@ -724,34 +761,45 @@ impl<T: ImageFloat> FloatImage<T> {
 
     fn channel_extreme(&self, channel: usize, extreme: ChannelExtreme) -> T {
         let channels = self.mode.channels();
-        let mut result = match extreme {
+        let mask = &self.mask;
+        let identity = match extreme {
             ChannelExtreme::Min => f64::INFINITY,
             ChannelExtreme::Max => f64::NEG_INFINITY,
         };
-        for idx in (channel..self.pixels.len()).step_by(channels) {
-            if self.is_masked_pixel(idx / channels) {
-                continue;
-            }
-            let value = self.pixels[idx];
-            if value.is_finite() {
-                let value = value.to_f64();
-                result = match extreme {
-                    ChannelExtreme::Min => result.min(value),
-                    ChannelExtreme::Max => result.max(value),
-                };
-            }
-        }
+        let combine = |left: f64, right: f64| match extreme {
+            ChannelExtreme::Min => left.min(right),
+            ChannelExtreme::Max => left.max(right),
+        };
+        let indices: Vec<usize> = (channel..self.pixels.len()).step_by(channels).collect();
+        let result = indices
+            .into_par_iter()
+            .filter(|idx| {
+                !mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(*idx / channels))
+                    .unwrap_or(false)
+            })
+            .map(|idx| self.pixels[idx].to_f64())
+            .filter(|value| value.is_finite())
+            .fold(|| identity, &combine)
+            .reduce(|| identity, &combine);
         T::from_f64(result)
     }
 
     pub fn to_u8_image(&self, fill_value: u8) -> Result<Image> {
         let channels = self.mode.channels();
+        let mask = &self.mask;
         let pixels = self
             .pixels
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(idx, value)| {
-                if self.is_masked_pixel(idx / channels) || !value.is_finite() {
+                if mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(idx / channels))
+                    .unwrap_or(false)
+                    || !value.is_finite()
+                {
                     fill_value
                 } else {
                     (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
@@ -763,12 +811,18 @@ impl<T: ImageFloat> FloatImage<T> {
 
     pub fn to_u16_image(&self, fill_value: u16) -> Result<Image16> {
         let channels = self.mode.channels();
+        let mask = &self.mask;
         let pixels = self
             .pixels
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(idx, value)| {
-                if self.is_masked_pixel(idx / channels) || !value.is_finite() {
+                if mask
+                    .as_ref()
+                    .and_then(|mask| mask.is_masked(idx / channels))
+                    .unwrap_or(false)
+                    || !value.is_finite()
+                {
                     fill_value
                 } else {
                     (value.to_f64() * 65_535.0).clamp(0.0, 65_535.0).round() as u16
@@ -838,13 +892,6 @@ impl<T: ImageFloat> FloatImage<T> {
 
     pub fn invert_history(&self) -> &[Vec<bool>] {
         &self.invert_history
-    }
-
-    fn is_masked_pixel(&self, pixel_index: usize) -> bool {
-        self.mask
-            .as_ref()
-            .and_then(|mask| mask.is_masked(pixel_index))
-            .unwrap_or(false)
     }
 }
 

@@ -11,9 +11,9 @@
 //! policy.
 
 use crate::{AreaDefinition, KdPointIndex2D, Resampler, SwathDefinition};
+use rayon::prelude::*;
 use rusty_sat_core::{
-    Coordinate, DataGrid, Dataset, LazyDataArray, MetadataValue, Result, RustySatError,
-    ValidityMask,
+    Coordinate, DataGrid, Dataset, LazyDataArray, Result, RustySatError, ValidityMask,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -103,11 +103,11 @@ impl Resampler for NearestAreaResampler {
             self.missing_value_policy,
         )?;
         let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
-        for (key, value) in dataset_metadata_pairs(dataset.metadata()) {
-            resampled_dataset.insert_metadata(key, value)?;
+        for (key, value) in dataset.metadata() {
+            resampled_dataset.insert_metadata(key.clone(), value.clone())?;
         }
-        for (key, value) in dataset_attr_pairs(dataset.attrs()) {
-            resampled_dataset.insert_attr(key, value)?;
+        for (key, value) in dataset.attrs() {
+            resampled_dataset.insert_attr(key.clone(), value.clone())?;
         }
         resampled_dataset.insert_metadata("area", destination.id())?;
         resampled_dataset.insert_metadata("resampler", self.name())?;
@@ -155,24 +155,6 @@ impl Resampler for NearestAreaResampler {
         resampled_dataset.insert_metadata("resampler", self.name())?;
         Ok(resampled_dataset)
     }
-}
-
-fn dataset_metadata_pairs(
-    metadata: &std::collections::BTreeMap<String, String>,
-) -> Vec<(String, String)> {
-    metadata
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
-}
-
-fn dataset_attr_pairs(
-    attrs: &std::collections::BTreeMap<String, MetadataValue>,
-) -> Vec<(String, MetadataValue)> {
-    attrs
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }
 
 pub fn resample_area_nearest(
@@ -274,27 +256,27 @@ fn resample_area_nearest_with_policy(
         )));
     }
     let (dst_height, dst_width) = destination.shape();
-    let mut values = Vec::with_capacity(dst_height * dst_width);
-    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
-    for y in 0..dst_height {
-        for x in 0..dst_width {
-            let (dst_x, dst_y) = pixel_center(destination, y, x);
-            let Some((src_y, src_x, distance)) = nearest_source_pixel(source, dst_x, dst_y) else {
-                values.push(fill_value);
-                mask_flags.push(missing_value_policy.masks_missing());
-                continue;
-            };
-            if radius_of_influence.is_some_and(|radius| distance > radius) {
-                values.push(fill_value);
-                mask_flags.push(missing_value_policy.masks_missing());
-                continue;
-            }
-            let source_index = src_y * source.shape().1 + src_x;
-            let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
-            values.push(source_grid.get(src_y, src_x).unwrap_or(fill_value));
-            mask_flags.push(source_masked);
-        }
-    }
+    // Destination rows are independent: compute each row in parallel and
+    // concatenate in row order, so results are deterministic and the memory
+    // overhead is only the in-flight row buffers (bounded by thread count).
+    let rows = nearest_rows(
+        dst_height,
+        dst_width,
+        destination,
+        &NearestSource::from(source),
+        radius_of_influence,
+        fill_value,
+        missing_value_policy,
+        &|src_idx| {
+            let src_y = src_idx / source.shape().1;
+            let src_x = src_idx % source.shape().1;
+            (
+                source_grid.get(src_y, src_x).unwrap_or(fill_value),
+                source_grid.is_masked(src_idx).unwrap_or(false),
+            )
+        },
+    )?;
+    let (values, mask_flags) = flatten_rows(rows, dst_height * dst_width);
     add_resampled_coords(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
         Some(source_grid),
@@ -319,33 +301,27 @@ fn resample_area_nearest_owned_with_policy(
         )));
     }
     let (src_values, src_coords, src_mask) = source_grid.into_parts();
-    let src_width = source.shape().1;
     let (dst_height, dst_width) = destination.shape();
     let dst_len = dst_height * dst_width;
-    let mut values = Vec::with_capacity(dst_len);
-    let mut mask_flags = Vec::with_capacity(dst_len);
-    for y in 0..dst_height {
-        for x in 0..dst_width {
-            let (dst_x, dst_y) = pixel_center(destination, y, x);
-            let Some((src_y, src_x, distance)) = nearest_source_pixel(source, dst_x, dst_y) else {
-                values.push(fill_value);
-                mask_flags.push(missing_value_policy.masks_missing());
-                continue;
-            };
-            if radius_of_influence.is_some_and(|radius| distance > radius) {
-                values.push(fill_value);
-                mask_flags.push(missing_value_policy.masks_missing());
-                continue;
-            }
-            let source_index = src_y * src_width + src_x;
-            let source_masked = src_mask
-                .as_ref()
-                .and_then(|m| m.is_masked(source_index))
-                .unwrap_or(false);
-            values.push(src_values.get(source_index).copied().unwrap_or(fill_value));
-            mask_flags.push(source_masked);
-        }
-    }
+    let rows = nearest_rows(
+        dst_height,
+        dst_width,
+        destination,
+        &NearestSource::from(source),
+        radius_of_influence,
+        fill_value,
+        missing_value_policy,
+        &|src_idx| {
+            (
+                src_values.get(src_idx).copied().unwrap_or(fill_value),
+                src_mask
+                    .as_ref()
+                    .and_then(|m| m.is_masked(src_idx))
+                    .unwrap_or(false),
+            )
+        },
+    )?;
+    let (values, mask_flags) = flatten_rows(rows, dst_len);
     add_resampled_coords_owned(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
         Some(src_coords),
@@ -503,27 +479,108 @@ fn resample_swath_nearest_with_policy(
     })?;
     let source_index = KdPointIndex2D::from_xy(lons, lats)?;
     let (dst_height, dst_width) = destination.shape();
-    let mut values = Vec::with_capacity(dst_height * dst_width);
-    let mut mask_flags = Vec::with_capacity(dst_height * dst_width);
-    for y in 0..dst_height {
-        for x in 0..dst_width {
-            let (dst_x, dst_y) = pixel_center(destination, y, x);
-            let Some(nearest) = source_index.nearest(dst_x, dst_y, radius_of_influence)? else {
-                values.push(fill_value);
-                mask_flags.push(missing_value_policy.masks_missing());
-                continue;
-            };
-            let source_index = nearest.index();
-            let source_masked = source_grid.is_masked(source_index).unwrap_or(false);
-            values.push(source_grid.values()[source_index]);
-            mask_flags.push(source_masked);
-        }
-    }
+    let rows = nearest_rows(
+        dst_height,
+        dst_width,
+        destination,
+        &NearestSource::from(&source_index),
+        radius_of_influence,
+        fill_value,
+        missing_value_policy,
+        &|src_idx| {
+            let source_masked = source_grid.is_masked(src_idx).unwrap_or(false);
+            (source_grid.values()[src_idx], source_masked)
+        },
+    )?;
+    let (values, mask_flags) = flatten_rows(rows, dst_height * dst_width);
     add_resampled_coords(
         finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
         Some(source_grid),
         destination,
     )
+}
+
+/// Compute one destination row of nearest sampling in parallel.
+///
+/// `sample` maps a resolved source position to `(value, masked)` and is
+/// invoked only for in-radius neighbours, so callers pass either an area
+/// pixel lookup or a KD-indexed swath lookup. Rows are computed with rayon
+/// and returned in row order, keeping the output deterministic.
+#[allow(clippy::too_many_arguments)]
+fn nearest_rows(
+    dst_height: usize,
+    dst_width: usize,
+    destination: &AreaDefinition,
+    source: &NearestSource,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
+    sample: &(dyn Fn(usize) -> (f64, bool) + Sync),
+) -> Result<Vec<(Vec<f64>, Vec<bool>)>> {
+    (0..dst_height)
+        .into_par_iter()
+        .map(|y| {
+            let mut values = Vec::with_capacity(dst_width);
+            let mut mask_flags = Vec::with_capacity(dst_width);
+            for x in 0..dst_width {
+                let (dst_x, dst_y) = pixel_center(destination, y, x);
+                let Some(source_idx) = source.nearest(dst_x, dst_y, radius_of_influence)? else {
+                    values.push(fill_value);
+                    mask_flags.push(missing_value_policy.masks_missing());
+                    continue;
+                };
+                let (value, masked) = sample(source_idx);
+                values.push(value);
+                mask_flags.push(masked);
+            }
+            Ok((values, mask_flags))
+        })
+        .collect()
+}
+
+fn flatten_rows(rows: Vec<(Vec<f64>, Vec<bool>)>, total_len: usize) -> (Vec<f64>, Vec<bool>) {
+    let mut values = Vec::with_capacity(total_len);
+    let mut mask_flags = Vec::with_capacity(total_len);
+    for (row_values, row_masks) in rows {
+        values.extend(row_values);
+        mask_flags.extend(row_masks);
+    }
+    (values, mask_flags)
+}
+
+/// Nearest-neighbour source lookup: either an area's pixel grid or a
+/// KD-indexed swath, both resolving a destination projection coordinate to a
+/// flat source index.
+enum NearestSource {
+    Area(AreaDefinition),
+    Swath(KdPointIndex2D),
+}
+
+impl NearestSource {
+    fn nearest(&self, x: f64, y: f64, radius_of_influence: Option<f64>) -> Result<Option<usize>> {
+        match self {
+            Self::Area(source) => Ok(nearest_source_pixel(source, x, y)
+                .filter(|(_, _, distance)| {
+                    !radius_of_influence.is_some_and(|radius| *distance > radius)
+                })
+                .map(|(src_y, src_x, _)| src_y * source.shape().1 + src_x)),
+            Self::Swath(index) => Ok(index
+                .nearest(x, y, radius_of_influence)?
+                .map(|nearest| nearest.index())),
+        }
+    }
+}
+
+impl From<&AreaDefinition> for NearestSource {
+    fn from(area: &AreaDefinition) -> Self {
+        Self::Area(area.clone())
+    }
+}
+
+impl From<&KdPointIndex2D> for NearestSource {
+    fn from(index: &KdPointIndex2D) -> Self {
+        Self::Swath(index.clone())
+    }
 }
 
 fn finish_resampled_grid(
@@ -630,7 +687,7 @@ fn pixel_center(area: &AreaDefinition, y: usize, x: usize) -> (f64, f64) {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataArray};
+    use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataArray, MetadataValue};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 

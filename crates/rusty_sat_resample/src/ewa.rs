@@ -15,8 +15,10 @@
 //! S5-next work.
 
 use crate::{AreaDefinition, Resampler, SwathDefinition};
+use rayon::prelude::*;
 use rusty_sat_core::{Coordinate, DataGrid, Dataset, Result, RustySatError, ValidityMask};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EwaOptions {
@@ -179,7 +181,7 @@ pub fn resample_swath_ewa(
 ) -> Result<DataGrid> {
     validate_source_shape(source_grid, source)?;
     validate_ewa_target(destination)?;
-    let mut accumulators = EwaAccumulators::new(destination, options)?;
+    let accumulators = EwaAccumulators::new(destination, options)?;
     accumulators.add_borrowed(source_grid, source)?;
     add_ewa_coords(
         accumulators.finish()?,
@@ -197,7 +199,7 @@ pub fn resample_swath_ewa_owned(
     validate_source_shape(&source_grid, source)?;
     validate_ewa_target(destination)?;
     let (values, coords, mask) = source_grid.into_parts();
-    let mut accumulators = EwaAccumulators::new(destination, options)?;
+    let accumulators = EwaAccumulators::new(destination, options)?;
     accumulators.add_values(&values, mask.as_ref(), source)?;
     add_ewa_coords_owned(accumulators.finish()?, Some(coords), destination)
 }
@@ -206,10 +208,22 @@ pub fn resample_swath_ewa_owned(
 struct EwaAccumulators<'a> {
     destination: &'a AreaDefinition,
     options: EwaOptions,
-    sums: Vec<f64>,
-    weight_sums: Vec<f64>,
+    sums: Vec<AtomicU64>,
+    weight_sums: Vec<AtomicU64>,
     radius_squared: f64,
     alpha: f64,
+}
+
+/// Lock-free f64 addition on top of `AtomicU64` (bit-pattern CAS loop).
+///
+/// Parallel EWA accumulation writes to shared per-pixel sums; CAS-based adds
+/// keep the memory footprint identical to the sequential version (no
+/// per-thread accumulator copies of the target grid). Contention is bounded
+/// because each source point only touches its small pixel footprint.
+fn atomic_add_f64(atomic: &AtomicU64, value: f64) {
+    let _ = atomic.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some((f64::from_bits(current) + value).to_bits())
+    });
 }
 
 impl<'a> EwaAccumulators<'a> {
@@ -221,19 +235,23 @@ impl<'a> EwaAccumulators<'a> {
         Ok(Self {
             destination,
             options,
-            sums: vec![0.0; size],
-            weight_sums: vec![0.0; size],
+            sums: (0..size)
+                .map(|_| AtomicU64::new(0.0_f64.to_bits()))
+                .collect(),
+            weight_sums: (0..size)
+                .map(|_| AtomicU64::new(0.0_f64.to_bits()))
+                .collect(),
             radius_squared,
             alpha,
         })
     }
 
-    fn add_borrowed(&mut self, source_grid: &DataGrid, source: &SwathDefinition) -> Result<()> {
+    fn add_borrowed(&self, source_grid: &DataGrid, source: &SwathDefinition) -> Result<()> {
         self.add_values(source_grid.values(), source_grid.mask(), source)
     }
 
     fn add_values(
-        &mut self,
+        &self,
         values: &[f64],
         mask: Option<&ValidityMask>,
         source: &SwathDefinition,
@@ -244,22 +262,26 @@ impl<'a> EwaAccumulators<'a> {
         let lats = source
             .lats()
             .ok_or_else(|| RustySatError::invalid_input("EWA resampling requires source lats"))?;
-        for (source_idx, ((lon, lat), value)) in lons.iter().zip(lats).zip(values).enumerate() {
+        let count = lons.len().min(lats.len()).min(values.len());
+        (0..count).into_par_iter().for_each(|source_idx| {
             if mask
                 .and_then(|mask| mask.is_masked(source_idx))
                 .unwrap_or(false)
             {
-                continue;
+                return;
             }
+            let lon = lons[source_idx];
+            let lat = lats[source_idx];
+            let value = values[source_idx];
             if !lon.is_finite() || !lat.is_finite() || !value.is_finite() {
-                continue;
+                return;
             }
-            self.add_sample(*lon, *lat, *value);
-        }
+            self.add_sample(lon, lat, value);
+        });
         Ok(())
     }
 
-    fn add_sample(&mut self, lon: f64, lat: f64, value: f64) {
+    fn add_sample(&self, lon: f64, lat: f64, value: f64) {
         let (height, width) = self.destination.shape();
         let extent = self.destination.area_extent();
         let (pixel_size_x, pixel_size_y) = self.destination.pixel_size();
@@ -294,19 +316,27 @@ impl<'a> EwaAccumulators<'a> {
                     continue;
                 }
                 let target_idx = y * width + x;
-                self.sums[target_idx] += value * weight;
-                self.weight_sums[target_idx] += weight;
+                atomic_add_f64(&self.sums[target_idx], value * weight);
+                atomic_add_f64(&self.weight_sums[target_idx], weight);
             }
         }
     }
 
     fn finish(self) -> Result<DataGrid> {
         let (height, width) = self.destination.shape();
+        let sums = self
+            .sums
+            .into_iter()
+            .map(|atomic| f64::from_bits(atomic.into_inner()));
+        let weight_sums = self
+            .weight_sums
+            .into_iter()
+            .map(|atomic| f64::from_bits(atomic.into_inner()));
         let mut values = Vec::with_capacity(height * width);
         let mut masked = Vec::with_capacity(height * width);
-        for idx in 0..self.sums.len() {
-            if self.weight_sums[idx] > self.options.weight_sum_min {
-                values.push(self.sums[idx] / self.weight_sums[idx]);
+        for (sum, weight_sum) in sums.zip(weight_sums) {
+            if weight_sum > self.options.weight_sum_min {
+                values.push(sum / weight_sum);
                 masked.push(false);
             } else {
                 values.push(self.options.fill_value);

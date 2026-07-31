@@ -825,6 +825,7 @@ version = "0.1.0"
 name = "rusty_sat_image"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "rusty_sat_core",
 ]
 
@@ -844,6 +845,7 @@ name = "rusty_sat_readers"
 version = "0.1.0"
 dependencies = [
  "bzip2",
+ "rayon",
  "regex",
  "rusty_sat_composites",
  "rusty_sat_core",
@@ -858,6 +860,7 @@ dependencies = [
 name = "rusty_sat_resample"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "rusty_sat_core",
  "serde_norway",
 ]
@@ -869,6 +872,7 @@ dependencies = [
  "flate2",
  "image",
  "png",
+ "rayon",
  "rusty_sat_core",
  "rusty_sat_image",
  "rusty_sat_resample",
@@ -876,9 +880,9 @@ dependencies = [
 
 [[package]]
 name = "rustyspectral"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a578e026f36a2d56a03aca6ef4c4497aee895c9cc156848629707935a2eb3b1"
+checksum = "d7ca0adfb34b15fcfa4079cf579f00709f0f9d7710cf963cf6e329c450076769"
 dependencies = [
  "dirs",
  "env_logger",
