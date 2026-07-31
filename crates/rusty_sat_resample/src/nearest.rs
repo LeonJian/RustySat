@@ -16,6 +16,7 @@ use rusty_sat_core::{
     Coordinate, DataGrid, Dataset, LazyDataArray, Result, RustySatError, ValidityMask,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingValuePolicy {
@@ -144,6 +145,162 @@ impl Resampler for NearestAreaResampler {
             self.fill_value,
             self.missing_value_policy,
         )?;
+        let mut resampled_dataset = Dataset::new(id).with_data(resampled);
+        for (key, value) in metadata {
+            resampled_dataset.insert_metadata(key, value)?;
+        }
+        for (key, value) in attrs {
+            resampled_dataset.insert_attr(key, value)?;
+        }
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
+}
+
+/// KD-indexed swath-to-area nearest resampler with a lazily built, cached
+/// point index.
+///
+/// The KD tree over the swath lon/lat points is built once per instance and
+/// reused across `resample`/`resample_owned` calls, so resampling several
+/// datasets that share one swath builds the tree only once (the free
+/// `resample_swath_nearest` functions rebuild it on every call).
+#[derive(Debug, Clone)]
+pub struct NearestSwathResampler {
+    source: SwathDefinition,
+    index: OnceLock<KdPointIndex2D>,
+    radius_of_influence: Option<f64>,
+    fill_value: f64,
+    missing_value_policy: MissingValuePolicy,
+}
+
+impl NearestSwathResampler {
+    pub fn new(source: SwathDefinition) -> Self {
+        Self {
+            source,
+            index: OnceLock::new(),
+            radius_of_influence: None,
+            fill_value: f64::NAN,
+            missing_value_policy: MissingValuePolicy::FillValue,
+        }
+    }
+
+    pub fn with_radius_of_influence(mut self, radius_of_influence: f64) -> Result<Self> {
+        if !radius_of_influence.is_finite() || radius_of_influence <= 0.0 {
+            return Err(RustySatError::invalid_input(
+                "nearest swath radius of influence must be finite and positive",
+            ));
+        }
+        self.radius_of_influence = Some(radius_of_influence);
+        Ok(self)
+    }
+
+    pub fn with_fill_value(mut self, fill_value: f64) -> Self {
+        self.fill_value = fill_value;
+        self.missing_value_policy = MissingValuePolicy::FillValue;
+        self
+    }
+
+    pub fn with_masked_missing(mut self) -> Self {
+        self.missing_value_policy = MissingValuePolicy::Mask;
+        self
+    }
+
+    fn index(&self) -> Result<&KdPointIndex2D> {
+        if self.index.get().is_none() {
+            let lons = self.source.lons().ok_or_else(|| {
+                RustySatError::invalid_input(
+                    "swath nearest resampling requires longitude coordinates",
+                )
+            })?;
+            let lats = self.source.lats().ok_or_else(|| {
+                RustySatError::invalid_input(
+                    "swath nearest resampling requires latitude coordinates",
+                )
+            })?;
+            let built = KdPointIndex2D::from_xy(lons, lats)?;
+            // A concurrent caller may have built it first; either instance is
+            // equivalent, so a lost race is harmless.
+            let _ = self.index.set(built);
+        }
+        let Some(index) = self.index.get() else {
+            unreachable!("index set above");
+        };
+        Ok(index)
+    }
+
+    fn resample_impl(
+        &self,
+        source_grid: &DataGrid,
+        destination: &AreaDefinition,
+    ) -> Result<DataGrid> {
+        if source_grid.shape() != self.source.shape() {
+            return Err(RustySatError::invalid_input(format!(
+                "source grid shape {:?} does not match source swath shape {:?}",
+                source_grid.shape(),
+                self.source.shape()
+            )));
+        }
+        require_lonlat_area(destination)?;
+        let index = self.index()?;
+        let (dst_height, dst_width) = destination.shape();
+        let rows = nearest_rows(
+            dst_height,
+            dst_width,
+            destination,
+            &NearestSource::Swath(index),
+            self.radius_of_influence,
+            self.fill_value,
+            self.missing_value_policy,
+            &|src_idx| {
+                let source_masked = source_grid.is_masked(src_idx).unwrap_or(false);
+                (source_grid.values()[src_idx], source_masked)
+            },
+        )?;
+        let (values, mask_flags) = flatten_rows(rows, dst_height * dst_width);
+        add_resampled_coords(
+            finish_resampled_grid(dst_height, dst_width, values, mask_flags)?,
+            Some(source_grid),
+            destination,
+        )
+    }
+}
+
+impl Resampler for NearestSwathResampler {
+    fn name(&self) -> &str {
+        "nearest_swath"
+    }
+
+    fn resample(&self, dataset: &Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let source_grid = dataset.data().ok_or_else(|| {
+            RustySatError::invalid_input("nearest swath resampling requires dataset grid values")
+        })?;
+        let resampled = self.resample_impl(source_grid, destination)?;
+        let mut resampled_dataset = Dataset::new(dataset.id().clone()).with_data(resampled);
+        for (key, value) in dataset.metadata() {
+            resampled_dataset.insert_metadata(key.clone(), value.clone())?;
+        }
+        for (key, value) in dataset.attrs() {
+            resampled_dataset.insert_attr(key.clone(), value.clone())?;
+        }
+        resampled_dataset.insert_metadata("area", destination.id())?;
+        resampled_dataset.insert_metadata("resampler", self.name())?;
+        Ok(resampled_dataset)
+    }
+
+    fn resample_owned(&self, dataset: Dataset, destination: &AreaDefinition) -> Result<Dataset> {
+        let id = dataset.id().clone();
+        let metadata = dataset.metadata().clone();
+        let attrs = dataset.attrs().clone();
+        let source_grid = dataset
+            .into_array()
+            .and_then(|array| array.into_f64())
+            .ok_or_else(|| {
+                RustySatError::invalid_input(
+                    "nearest swath resampling requires an f64 dataset grid",
+                )
+            })?;
+        let resampled = self.resample_impl(&source_grid, destination)?;
         let mut resampled_dataset = Dataset::new(id).with_data(resampled);
         for (key, value) in metadata {
             resampled_dataset.insert_metadata(key, value)?;
@@ -511,7 +668,7 @@ fn nearest_rows(
     dst_height: usize,
     dst_width: usize,
     destination: &AreaDefinition,
-    source: &NearestSource,
+    source: &NearestSource<'_>,
     radius_of_influence: Option<f64>,
     fill_value: f64,
     missing_value_policy: MissingValuePolicy,
@@ -550,13 +707,14 @@ fn flatten_rows(rows: Vec<(Vec<f64>, Vec<bool>)>, total_len: usize) -> (Vec<f64>
 
 /// Nearest-neighbour source lookup: either an area's pixel grid or a
 /// KD-indexed swath, both resolving a destination projection coordinate to a
-/// flat source index.
-enum NearestSource {
+/// flat source index. The swath variant borrows the (possibly cached) index
+/// so resamplers can reuse a tree across datasets without cloning it.
+enum NearestSource<'a> {
     Area(AreaDefinition),
-    Swath(KdPointIndex2D),
+    Swath(&'a KdPointIndex2D),
 }
 
-impl NearestSource {
+impl NearestSource<'_> {
     fn nearest(&self, x: f64, y: f64, radius_of_influence: Option<f64>) -> Result<Option<usize>> {
         match self {
             Self::Area(source) => Ok(nearest_source_pixel(source, x, y)
@@ -571,15 +729,15 @@ impl NearestSource {
     }
 }
 
-impl From<&AreaDefinition> for NearestSource {
+impl From<&AreaDefinition> for NearestSource<'_> {
     fn from(area: &AreaDefinition) -> Self {
         Self::Area(area.clone())
     }
 }
 
-impl From<&KdPointIndex2D> for NearestSource {
-    fn from(index: &KdPointIndex2D) -> Self {
-        Self::Swath(index.clone())
+impl<'a> From<&'a KdPointIndex2D> for NearestSource<'a> {
+    fn from(index: &'a KdPointIndex2D) -> Self {
+        Self::Swath(index)
     }
 }
 
@@ -687,7 +845,7 @@ fn pixel_center(area: &AreaDefinition, y: usize, x: usize) -> (f64, f64) {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataArray, MetadataValue};
+    use rusty_sat_core::{ChunkRegion, ChunkShape, ChunkSource, DataArray, DataId, MetadataValue};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -971,6 +1129,39 @@ mod tests {
             resample_swath_nearest(&source_grid, &swath, &destination, Some(0.0), -999.0).unwrap();
 
         assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn nearest_swath_resampler_reuses_index_across_datasets() {
+        let swath =
+            SwathDefinition::from_lonlats(2, 2, vec![0.5, 1.5, 0.5, 1.5], vec![1.5, 1.5, 0.5, 0.5])
+                .unwrap();
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let first = Dataset::new(DataId::new("a").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let second = Dataset::new(DataId::new("b").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![10.0, 20.0, 30.0, 40.0]).unwrap());
+        // Free-function reference first (it owns the swath for the lookup),
+        // then the resampler reuses its own cached index across both datasets.
+        let reference = resample_swath_nearest(
+            first.data().unwrap(),
+            &swath,
+            &destination,
+            Some(0.0),
+            -999.0,
+        )
+        .unwrap();
+        let resampler = NearestSwathResampler::new(swath).with_fill_value(-999.0);
+
+        let out_a = resampler.resample(&first, &destination).unwrap();
+        let out_b = resampler.resample(&second, &destination).unwrap();
+
+        assert_eq!(out_a.data().unwrap().values(), reference.values());
+        assert_eq!(out_b.data().unwrap().values(), &[10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(
+            out_a.attr("resampler").unwrap(),
+            &MetadataValue::string("nearest_swath")
+        );
     }
 
     #[test]

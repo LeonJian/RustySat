@@ -10,8 +10,8 @@
 use crate::{
     reduce_area_dataset_owned_with_divisibility, reduce_area_dataset_with_divisibility,
     AreaDefinition, BilinearAreaResampler, BucketFractionResampler, BucketResampler,
-    BucketStatistic, EwaOptions, EwaResampler, NativeResampler, NearestAreaResampler, Resampler,
-    SwathDefinition,
+    BucketStatistic, EwaOptions, EwaResampler, NativeResampler, NearestAreaResampler,
+    NearestSwathResampler, Resampler, SwathDefinition,
 };
 use rusty_sat_core::{Dataset, Result, RustySatError};
 use std::str::FromStr;
@@ -250,6 +250,7 @@ impl ResampleOptions {
 #[derive(Debug, Clone)]
 pub enum PreparedResampler {
     NearestArea(NearestAreaResampler),
+    NearestSwath(NearestSwathResampler),
     Bilinear(BilinearAreaResampler),
     Native(NativeResampler),
     Bucket(BucketResampler),
@@ -260,7 +261,7 @@ pub enum PreparedResampler {
 impl PreparedResampler {
     pub fn method(&self) -> ResamplerMethod {
         match self {
-            Self::NearestArea(_) => ResamplerMethod::NearestArea,
+            Self::NearestArea(_) | Self::NearestSwath(_) => ResamplerMethod::NearestArea,
             Self::Bilinear(_) => ResamplerMethod::Bilinear,
             Self::Native(_) => ResamplerMethod::Native,
             Self::Bucket(resampler) => match resampler.statistic() {
@@ -278,6 +279,7 @@ impl Resampler for PreparedResampler {
     fn name(&self) -> &str {
         match self {
             Self::NearestArea(resampler) => resampler.name(),
+            Self::NearestSwath(resampler) => resampler.name(),
             Self::Bilinear(resampler) => resampler.name(),
             Self::Native(resampler) => resampler.name(),
             Self::Bucket(resampler) => resampler.name(),
@@ -289,6 +291,7 @@ impl Resampler for PreparedResampler {
     fn resample(&self, dataset: &Dataset, destination: &AreaDefinition) -> Result<Dataset> {
         match self {
             Self::NearestArea(resampler) => resampler.resample(dataset, destination),
+            Self::NearestSwath(resampler) => resampler.resample(dataset, destination),
             Self::Bilinear(resampler) => resampler.resample(dataset, destination),
             Self::Native(resampler) => resampler.resample(dataset, destination),
             Self::Bucket(resampler) => resampler.resample(dataset, destination),
@@ -300,6 +303,7 @@ impl Resampler for PreparedResampler {
     fn resample_owned(&self, dataset: Dataset, destination: &AreaDefinition) -> Result<Dataset> {
         match self {
             Self::NearestArea(resampler) => resampler.resample_owned(dataset, destination),
+            Self::NearestSwath(resampler) => resampler.resample_owned(dataset, destination),
             Self::Bilinear(resampler) => resampler.resample_owned(dataset, destination),
             Self::Native(resampler) => resampler.resample_owned(dataset, destination),
             Self::Bucket(resampler) => resampler.resample_owned(dataset, destination),
@@ -421,23 +425,32 @@ pub fn prepare_resampler_for_geometry(
     options: ResampleOptions,
 ) -> Result<PreparedResampler> {
     match options.method {
-        ResamplerMethod::NearestArea => {
-            let SourceGeometry::Area(source) = source else {
-                return Err(RustySatError::unsupported(
-                    "nearest_area pipeline preparation from swath geometry",
-                ));
-            };
-            let mut resampler = NearestAreaResampler::new(source);
-            if let Some(radius_of_influence) = options.radius_of_influence {
-                resampler = resampler.with_radius_of_influence(radius_of_influence)?;
+        ResamplerMethod::NearestArea => match source {
+            SourceGeometry::Area(source) => {
+                let mut resampler = NearestAreaResampler::new(source);
+                if let Some(radius_of_influence) = options.radius_of_influence {
+                    resampler = resampler.with_radius_of_influence(radius_of_influence)?;
+                }
+                resampler = if options.mask_missing {
+                    resampler.with_masked_missing()
+                } else {
+                    resampler.with_fill_value(options.fill_value)
+                };
+                Ok(PreparedResampler::NearestArea(resampler))
             }
-            resampler = if options.mask_missing {
-                resampler.with_masked_missing()
-            } else {
-                resampler.with_fill_value(options.fill_value)
-            };
-            Ok(PreparedResampler::NearestArea(resampler))
-        }
+            SourceGeometry::Swath(source) => {
+                let mut resampler = NearestSwathResampler::new(source);
+                if let Some(radius_of_influence) = options.radius_of_influence {
+                    resampler = resampler.with_radius_of_influence(radius_of_influence)?;
+                }
+                resampler = if options.mask_missing {
+                    resampler.with_masked_missing()
+                } else {
+                    resampler.with_fill_value(options.fill_value)
+                };
+                Ok(PreparedResampler::NearestSwath(resampler))
+            }
+        },
         ResamplerMethod::Bilinear => {
             let SourceGeometry::Area(source) = source else {
                 return Err(RustySatError::unsupported(
@@ -1154,18 +1167,23 @@ mod tests {
     }
 
     #[test]
-    fn area_pipeline_methods_require_area_geometry() {
+    fn swath_nearest_pipeline_preparation_builds_swath_resampler() {
         let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
 
-        assert!(matches!(
-            prepare_resampler_for_geometry(
-                SourceGeometry::swath(swath()),
-                &destination,
-                ResampleOptions::nearest_area(),
-            )
-            .unwrap_err(),
-            RustySatError::Unsupported { .. }
-        ));
+        // Swath + nearest area now prepares the cached KD-indexed swath
+        // resampler instead of erroring.
+        let prepared = prepare_resampler_for_geometry(
+            SourceGeometry::swath(swath()),
+            &destination,
+            ResampleOptions::nearest_area(),
+        )
+        .unwrap();
+        assert_eq!(prepared.name(), "nearest_swath");
+
+        let dataset = Dataset::new(DataId::new("swath_data").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+        let resampled = prepared.resample(&dataset, &destination).unwrap();
+        assert_eq!(resampled.data().unwrap().shape(), (1, 1));
     }
 
     #[test]

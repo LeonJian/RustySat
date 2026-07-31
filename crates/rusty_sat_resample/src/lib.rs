@@ -92,7 +92,7 @@ pub use native::{
 };
 pub use nearest::{
     resample_area_nearest, resample_area_nearest_lazy, resample_area_nearest_owned,
-    resample_swath_nearest, NearestAreaResampler,
+    resample_swath_nearest, NearestAreaResampler, NearestSwathResampler,
 };
 pub use neighbour::{
     gaussian_weight, get_area_neighbour_info, get_area_neighbour_info_with_neighbours,

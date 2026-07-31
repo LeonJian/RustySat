@@ -221,8 +221,18 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_values: Option<Vec<f64>> =
-            red_dataset.map(|ds| ds.array().map(|a| a.values_as_f64()).unwrap_or_default());
+        let red_values: Option<Vec<f32>> = red_dataset.map(|ds| {
+            let Some(array) = ds.array() else {
+                return Vec::new();
+            };
+            match array {
+                AnyDataArray::F32(a) => a.values().to_vec(),
+                AnyDataArray::F64(a) => a.values().iter().map(|v| *v as f32).collect(),
+                AnyDataArray::U8(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+                AnyDataArray::U16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+                AnyDataArray::I16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+            }
+        });
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
@@ -268,60 +278,63 @@ impl RayleighCorrector {
             let offset = y0 * width;
 
             use rayon::prelude::*;
+            // Row-chunked parallel iteration: each parallel task is one full
+            // strip row, so row/col indices come from the chunk position and
+            // inner offset instead of a div/mod per pixel.
             vis_f32[offset..offset + strip_n]
-                .par_iter_mut()
+                .par_chunks_mut(width)
                 .enumerate()
-                .for_each(|(local_i, out)| {
-                    if !out.is_finite() {
-                        return;
-                    }
-                    let row = local_i / width;
-                    let col = local_i % width;
-                    let col_pre = &column_data[col];
-
-                    let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
-
-                    let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
-                    let (satz, sata) =
-                        satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
-
-                    let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
-                    if !azidiff.is_finite() {
-                        return;
-                    }
-
-                    let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
-                    let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
-
-                    let mut correction = trilinear_interpolate(
-                        grid_3d,
-                        sunzsec,
-                        azidiff,
-                        satzsec,
-                        &lut.sunz_coord,
-                        &lut.azid_coord,
-                        &lut.satz_coord,
-                    );
-
-                    if let Some(red_vals) = red {
-                        let r = red_vals[offset + local_i];
-                        if r.is_finite() && r >= 20.0 {
-                            correction *= 1.0 - (r - 20.0) / 80.0;
+                .for_each(|(row, strip_row)| {
+                    for (col, out) in strip_row.iter_mut().enumerate() {
+                        if !out.is_finite() {
+                            continue;
                         }
-                    }
+                        let col_pre = &column_data[col];
 
-                    if reduce && sunz.is_finite() && zenith_span > 0.0 {
-                        let t = if sunz < zenith_lo {
-                            0.0
-                        } else {
-                            ((sunz - zenith_lo) / zenith_span).min(1.0)
-                        };
-                        let factor = (1.0 - config.reduce_strength * t).clamp(0.0, 1.0);
-                        correction *= factor;
-                    }
+                        let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
 
-                    let corrected = (*out as f64 - correction).max(0.0);
-                    *out = corrected as f32;
+                        let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+                        let (satz, sata) =
+                            satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
+
+                        let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
+                        if !azidiff.is_finite() {
+                            continue;
+                        }
+
+                        let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
+                        let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
+
+                        let mut correction = trilinear_interpolate(
+                            grid_3d,
+                            sunzsec,
+                            azidiff,
+                            satzsec,
+                            &lut.sunz_coord,
+                            &lut.azid_coord,
+                            &lut.satz_coord,
+                        );
+
+                        if let Some(red_vals) = red {
+                            let r = f64::from(red_vals[offset + row * width + col]);
+                            if r.is_finite() && r >= 20.0 {
+                                correction *= 1.0 - (r - 20.0) / 80.0;
+                            }
+                        }
+
+                        if reduce && sunz.is_finite() && zenith_span > 0.0 {
+                            let t = if sunz < zenith_lo {
+                                0.0
+                            } else {
+                                ((sunz - zenith_lo) / zenith_span).min(1.0)
+                            };
+                            let factor = (1.0 - config.reduce_strength * t).clamp(0.0, 1.0);
+                            correction *= factor;
+                        }
+
+                        let corrected = (f64::from(*out) - correction).max(0.0);
+                        *out = corrected as f32;
+                    }
                 });
         }
 
@@ -374,8 +387,18 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_values: Option<Vec<f64>> =
-            red_dataset.map(|ds| ds.array().map(|a| a.values_as_f64()).unwrap_or_default());
+        let red_values: Option<Vec<f32>> = red_dataset.map(|ds| {
+            let Some(array) = ds.array() else {
+                return Vec::new();
+            };
+            match array {
+                AnyDataArray::F32(a) => a.values().to_vec(),
+                AnyDataArray::F64(a) => a.values().iter().map(|v| *v as f32).collect(),
+                AnyDataArray::U8(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+                AnyDataArray::U16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+                AnyDataArray::I16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+            }
+        });
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
@@ -425,81 +448,84 @@ impl RayleighCorrector {
             let offset = y0 * width;
 
             use rayon::prelude::*;
+            // Row-chunked parallel iteration: each parallel task is one full
+            // strip row, so row/col indices come from the chunk position and
+            // inner offset instead of a div/mod per pixel.
             vis_f32[offset..offset + strip_n]
-                .par_iter_mut()
+                .par_chunks_mut(width)
                 .enumerate()
-                .for_each(|(local_i, out)| {
-                    if !out.is_finite() {
-                        return;
-                    }
-                    let row = local_i / width;
-                    let col = local_i % width;
-                    let col_pre = &column_data[col];
-
-                    let x_pos = params.x_coords[col];
-                    let y_pos = params.y_coords[y0 + row];
-                    let rsq = (x_pos * x_pos + y_pos * y_pos) / (h * h);
-                    if rsq > max_angle_sq {
-                        *out = f32::NAN;
-                        return;
-                    }
-
-                    let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
-
-                    let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
-                    if !sunz.is_finite() {
-                        *out = f32::NAN;
-                        return;
-                    }
-
-                    let cos_sza = sunz.to_radians().cos();
-                    *out *= crate::sun_zenith::sza_correction_factor(
-                        cos_sza,
-                        limit_cos,
-                        max_sza_cos,
-                        inv_span,
-                    );
-
-                    let (satz, sata) =
-                        satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
-
-                    let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
-                    if !azidiff.is_finite() {
-                        return;
-                    }
-
-                    let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
-                    let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
-
-                    let mut correction = trilinear_interpolate(
-                        grid_3d,
-                        sunzsec,
-                        azidiff,
-                        satzsec,
-                        &lut.sunz_coord,
-                        &lut.azid_coord,
-                        &lut.satz_coord,
-                    );
-
-                    if let Some(red_vals) = red {
-                        let r = red_vals[offset + local_i];
-                        if r.is_finite() && r >= 20.0 {
-                            correction *= 1.0 - (r - 20.0) / 80.0;
+                .for_each(|(row, strip_row)| {
+                    for (col, out) in strip_row.iter_mut().enumerate() {
+                        if !out.is_finite() {
+                            continue;
                         }
-                    }
+                        let col_pre = &column_data[col];
 
-                    if reduce && sunz.is_finite() && zenith_span > 0.0 {
-                        let t = if sunz < zenith_lo {
-                            0.0
-                        } else {
-                            ((sunz - zenith_lo) / zenith_span).min(1.0)
-                        };
-                        let factor = (1.0 - config.reduce_strength * t).clamp(0.0, 1.0);
-                        correction *= factor;
-                    }
+                        let x_pos = params.x_coords[col];
+                        let y_pos = params.y_coords[y0 + row];
+                        let rsq = (x_pos * x_pos + y_pos * y_pos) / (h * h);
+                        if rsq > max_angle_sq {
+                            *out = f32::NAN;
+                            continue;
+                        }
 
-                    let corrected = (*out as f64 - correction).max(0.0);
-                    *out = corrected as f32;
+                        let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
+
+                        let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+                        if !sunz.is_finite() {
+                            *out = f32::NAN;
+                            continue;
+                        }
+
+                        let cos_sza = sunz.to_radians().cos();
+                        *out *= crate::sun_zenith::sza_correction_factor(
+                            cos_sza,
+                            limit_cos,
+                            max_sza_cos,
+                            inv_span,
+                        );
+
+                        let (satz, sata) =
+                            satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
+
+                        let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
+                        if !azidiff.is_finite() {
+                            continue;
+                        }
+
+                        let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
+                        let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
+
+                        let mut correction = trilinear_interpolate(
+                            grid_3d,
+                            sunzsec,
+                            azidiff,
+                            satzsec,
+                            &lut.sunz_coord,
+                            &lut.azid_coord,
+                            &lut.satz_coord,
+                        );
+
+                        if let Some(red_vals) = red {
+                            let r = f64::from(red_vals[offset + row * width + col]);
+                            if r.is_finite() && r >= 20.0 {
+                                correction *= 1.0 - (r - 20.0) / 80.0;
+                            }
+                        }
+
+                        if reduce && sunz.is_finite() && zenith_span > 0.0 {
+                            let t = if sunz < zenith_lo {
+                                0.0
+                            } else {
+                                ((sunz - zenith_lo) / zenith_span).min(1.0)
+                            };
+                            let factor = (1.0 - config.reduce_strength * t).clamp(0.0, 1.0);
+                            correction *= factor;
+                        }
+
+                        let corrected = (f64::from(*out) - correction).max(0.0);
+                        *out = corrected as f32;
+                    }
                 });
         }
 

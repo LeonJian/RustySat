@@ -262,6 +262,13 @@ impl<'a> EwaAccumulators<'a> {
         let lats = source
             .lats()
             .ok_or_else(|| RustySatError::invalid_input("EWA resampling requires source lats"))?;
+        // Destination geometry is identical for every source point; hoist it
+        // (and the derived radius in pixels) out of the per-point hot loop.
+        let (height, width) = self.destination.shape();
+        let extent = self.destination.area_extent();
+        let (pixel_size_x, pixel_size_y) = self.destination.pixel_size();
+        let radius_x = self.options.radius_of_influence / pixel_size_x.abs();
+        let radius_y = self.options.radius_of_influence / pixel_size_y.abs();
         let count = lons.len().min(lats.len()).min(values.len());
         (0..count).into_par_iter().for_each(|source_idx| {
             if mask
@@ -276,23 +283,42 @@ impl<'a> EwaAccumulators<'a> {
             if !lon.is_finite() || !lat.is_finite() || !value.is_finite() {
                 return;
             }
-            self.add_sample(lon, lat, value);
+            self.add_sample(
+                lon,
+                lat,
+                value,
+                height,
+                width,
+                extent,
+                pixel_size_x,
+                pixel_size_y,
+                radius_x,
+                radius_y,
+            );
         });
         Ok(())
     }
 
-    fn add_sample(&self, lon: f64, lat: f64, value: f64) {
-        let (height, width) = self.destination.shape();
-        let extent = self.destination.area_extent();
-        let (pixel_size_x, pixel_size_y) = self.destination.pixel_size();
+    #[allow(clippy::too_many_arguments)]
+    fn add_sample(
+        &self,
+        lon: f64,
+        lat: f64,
+        value: f64,
+        height: usize,
+        width: usize,
+        extent: [f64; 4],
+        pixel_size_x: f64,
+        pixel_size_y: f64,
+        radius_x: f64,
+        radius_y: f64,
+    ) {
         let center_x = (lon - extent[0]) / pixel_size_x - 0.5;
         let center_y = (extent[3] - lat) / pixel_size_y - 0.5;
         if !center_x.is_finite() || !center_y.is_finite() {
             return;
         }
 
-        let radius_x = self.options.radius_of_influence / pixel_size_x.abs();
-        let radius_y = self.options.radius_of_influence / pixel_size_y.abs();
         let x_start = ((center_x - radius_x).floor().max(0.0)) as usize;
         let y_start = ((center_y - radius_y).floor().max(0.0)) as usize;
         let x_end = ((center_x + radius_x).ceil().min(width as f64 - 1.0)) as usize;
@@ -324,27 +350,31 @@ impl<'a> EwaAccumulators<'a> {
 
     fn finish(self) -> Result<DataGrid> {
         let (height, width) = self.destination.shape();
-        let sums = self
-            .sums
-            .into_iter()
-            .map(|atomic| f64::from_bits(atomic.into_inner()));
-        let weight_sums = self
-            .weight_sums
-            .into_iter()
-            .map(|atomic| f64::from_bits(atomic.into_inner()));
-        let mut values = Vec::with_capacity(height * width);
-        let mut masked = Vec::with_capacity(height * width);
-        for (sum, weight_sum) in sums.zip(weight_sums) {
-            if weight_sum > self.options.weight_sum_min {
-                values.push(sum / weight_sum);
-                masked.push(false);
-            } else {
-                values.push(self.options.fill_value);
-                masked.push(true);
-            }
-        }
+        let size = height * width;
+        let fill_value = self.options.fill_value;
+        let weight_sum_min = self.options.weight_sum_min;
+        let mask_missing = self.options.mask_missing;
+        // Parallel finalization: each target pixel's output only depends on
+        // its own accumulators, and indexed collect preserves order.
+        let values: Vec<f64> = (0..size)
+            .into_par_iter()
+            .map(|idx| {
+                let weight_sum = f64::from_bits(self.weight_sums[idx].load(Ordering::Relaxed));
+                if weight_sum > weight_sum_min {
+                    f64::from_bits(self.sums[idx].load(Ordering::Relaxed)) / weight_sum
+                } else {
+                    fill_value
+                }
+            })
+            .collect();
+        let masked: Vec<bool> = (0..size)
+            .into_par_iter()
+            .map(|idx| {
+                f64::from_bits(self.weight_sums[idx].load(Ordering::Relaxed)) <= weight_sum_min
+            })
+            .collect();
         let mut grid = DataGrid::new(height, width, values)?;
-        if self.options.mask_missing {
+        if mask_missing {
             grid.set_mask(ValidityMask::from_masked_flags(masked))?;
         }
         Ok(grid)

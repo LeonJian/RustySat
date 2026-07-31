@@ -176,9 +176,10 @@ impl Image {
     }
 
     pub fn from_rgb_array(array: &AnyDataArray) -> Result<Self> {
-        FloatImage::<f32>::from_rgb_array(array)?
-            .crude_stretched(None, None)
-            .to_u8_image(0)
+        // Fused finalization: band-major RGB -> interleaved u8 with per-channel
+        // crude stretch in one pass, bypassing the interleaved f32 FloatImage
+        // intermediate (halves peak memory for full-disk RGB output).
+        finalize_rgb_crude_u8(array, 0)
     }
 
     pub fn mode(&self) -> ImageMode {
@@ -278,12 +279,138 @@ fn finalize_rgb_cira_typed<U: NumericElement>(
     // Pre-size + rayon `par_chunks_mut`: see `from_numeric_rgb_array` for why
     // a rayon `collect` over the 1->3 band expansion cannot preserve order.
     let mut pixels = vec![0u8; pixel_count * channels];
+    if let Some(mask) = mask {
+        // Masked path: per-pixel band mask checks.
+        pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_index, chunk)| {
+                let masked = (0..channels).any(|band| {
+                    mask.is_masked(band * pixel_count + pixel_index)
+                        .unwrap_or(false)
+                });
+                if masked {
+                    chunk.fill(fill_value);
+                    return;
+                }
+                for (band, out) in chunk.iter_mut().enumerate() {
+                    *out = cira_byte(values[band * pixel_count + pixel_index], fill_value);
+                }
+            });
+    } else {
+        // Fast path: no mask, no per-pixel branch.
+        pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_index, chunk)| {
+                for (band, out) in chunk.iter_mut().enumerate() {
+                    *out = cira_byte(values[band * pixel_count + pixel_index], fill_value);
+                }
+            });
+    }
+    Image::from_pixels(ImageMode::Rgb, height, width, pixels)
+}
+
+/// CIRA stretch + 8-bit scale for one value, matching the `FloatImage<f32>`
+/// reference path: the stretched value is stored as f32 before scaling by
+/// 255, so pixels near a rounding boundary are byte-identical.
+fn cira_byte<U: NumericElement>(value: U, fill_value: u8) -> u8 {
+    let value = value.to_f64();
+    if value.is_finite() {
+        let stretched = cira_stretch_value(value);
+        let stretched = stretched as f32;
+        (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8
+    } else {
+        fill_value
+    }
+}
+
+/// Finalize a band-major `[3, y, x]` RGB array straight to an 8-bit
+/// interleaved `Image` with a per-channel crude stretch.
+///
+/// Numerically identical to
+/// `FloatImage::<f32>::from_rgb_array(array)?.crude_stretched(None, None)
+/// .to_u8_image(fill_value)`: source values are truncated through f32,
+/// per-channel min/max ignore masked/non-finite pixels, the stretched value
+/// is truncated back to f32, and masked/non-finite pixels become `fill_value`.
+/// One rayon-parallel pass emits the u8 pixels, so the interleaved f32
+/// `FloatImage` intermediate never exists (full-disk RGB: ~13 GB -> ~7.3 GB
+/// peak at this stage).
+pub fn finalize_rgb_crude_u8(array: &AnyDataArray, fill_value: u8) -> Result<Image> {
+    let (height, width, pixel_count) = require_band_major_rgb_shape(array)?;
+    let mask = array.mask();
+    match array {
+        AnyDataArray::F32(a) => {
+            finalize_rgb_crude_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::F64(a) => {
+            finalize_rgb_crude_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::U8(a) => {
+            finalize_rgb_crude_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::U16(a) => {
+            finalize_rgb_crude_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+        AnyDataArray::I16(a) => {
+            finalize_rgb_crude_typed(a.values(), mask, height, width, pixel_count, fill_value)
+        }
+    }
+}
+
+fn finalize_rgb_crude_typed<U: NumericElement>(
+    values: &[U],
+    mask: Option<&ValidityMask>,
+    height: usize,
+    width: usize,
+    pixel_count: usize,
+    fill_value: u8,
+) -> Result<Image> {
+    let channels = ImageMode::Rgb.channels();
+    let mut scale = [0.0_f64; 3];
+    let mut offset = [0.0_f64; 3];
+    for band in 0..channels {
+        // One parallel pass per channel computes min and max together
+        // (arithmetic pixel indices, no index Vec allocation).
+        let (min_value, max_value) = (0..pixel_count)
+            .into_par_iter()
+            .filter(|pixel| {
+                !mask
+                    .and_then(|m| m.is_masked(band * pixel_count + *pixel))
+                    .unwrap_or(false)
+            })
+            .map(|pixel| (values[band * pixel_count + pixel].to_f64() as f32) as f64)
+            .filter(|stored| stored.is_finite())
+            .fold(
+                || (f64::INFINITY, f64::NEG_INFINITY),
+                |(mn, mx), v| (mn.min(v), mx.max(v)),
+            )
+            .reduce(
+                || (f64::INFINITY, f64::NEG_INFINITY),
+                |(mn1, mx1), (mn2, mx2)| (mn1.min(mn2), mx1.max(mx2)),
+            );
+        let delta = max_value - min_value;
+        let channel_scale = if delta.is_finite() && delta != 0.0 {
+            1.0 / delta
+        } else {
+            0.0
+        };
+        scale[band] = channel_scale;
+        offset[band] = if channel_scale == 0.0 {
+            0.0
+        } else {
+            -min_value * channel_scale
+        };
+    }
+    // Pre-size + rayon `par_chunks_mut`: see `from_numeric_rgb_array` for why
+    // a rayon `collect` over the 1->3 band expansion cannot preserve order.
+    let mut pixels = vec![0u8; pixel_count * channels];
     pixels
         .par_chunks_mut(channels)
         .enumerate()
-        .for_each(|(pixel_index, chunk)| {
+        .for_each(|(pixel, chunk)| {
             let masked = (0..channels).any(|band| {
-                mask.and_then(|m| m.is_masked(band * pixel_count + pixel_index))
+                mask.and_then(|m| m.is_masked(band * pixel_count + pixel))
                     .unwrap_or(false)
             });
             if masked {
@@ -291,13 +418,11 @@ fn finalize_rgb_cira_typed<U: NumericElement>(
                 return;
             }
             for (band, out) in chunk.iter_mut().enumerate() {
-                let value = values[band * pixel_count + pixel_index].to_f64();
-                *out = if value.is_finite() {
-                    let stretched = cira_stretch_value(value);
-                    // Match the FloatImage<f32> reference path exactly: the
-                    // stretched value is stored as f32 before scaling by 255,
-                    // so pixels near a rounding boundary are byte-identical.
-                    let stretched = stretched as f32;
+                let stored = (values[band * pixel_count + pixel].to_f64() as f32) as f64;
+                *out = if stored.is_finite() {
+                    // Match FloatImage<f32> storage: stretch truncates to f32,
+                    // then *255.
+                    let stretched = (stored * scale[band] + offset[band]) as f32;
                     (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8
                 } else {
                     fill_value
@@ -318,34 +443,42 @@ fn finalize_luma_to_u8_typed<U: NumericElement>(array: &DataArray<U>) -> Result<
     let values = array.values();
     let mask = array.mask();
 
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for (idx, value) in values.iter().enumerate() {
-        if mask.is_some_and(|m| m.is_masked(idx) == Some(true)) {
-            continue;
-        }
-        // Match FloatImage<f32> storage truncation: source -> f32 -> f64.
-        let stored = (value.to_f64() as f32) as f64;
-        if stored.is_finite() {
-            min = min.min(stored);
-            max = max.max(stored);
-        }
-    }
-    let (scale, offset) = luma_stretch_scale_offset(min, max);
+    // Parallel min/max reduction (indexed iterator, order irrelevant for the
+    // reduction itself), matching FloatImage<f32> storage truncation:
+    // source -> f32 -> f64.
+    let (min_value, max_value) = values
+        .par_iter()
+        .enumerate()
+        .filter(|(idx, _)| !mask.is_some_and(|m| m.is_masked(*idx) == Some(true)))
+        .map(|(_, value)| (value.to_f64() as f32) as f64)
+        .filter(|stored| stored.is_finite())
+        .fold(
+            || (f64::INFINITY, f64::NEG_INFINITY),
+            |(mn, mx), v| (mn.min(v), mx.max(v)),
+        )
+        .reduce(
+            || (f64::INFINITY, f64::NEG_INFINITY),
+            |(mn1, mx1), (mn2, mx2)| (mn1.min(mn2), mx1.max(mx2)),
+        );
+    let (scale, offset) = luma_stretch_scale_offset(min_value, max_value);
 
-    let mut pixels = Vec::with_capacity(values.len());
-    for (idx, value) in values.iter().enumerate() {
-        let masked = mask.is_some_and(|m| m.is_masked(idx) == Some(true));
-        let stored = (value.to_f64() as f32) as f64;
-        if masked || !stored.is_finite() {
-            pixels.push(0u8);
-        } else {
-            // Stretch truncates back to f32 (FloatImage<f32>), then *255.
-            let stretched = (stored * scale + offset) as f32;
-            let sample = (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8;
-            pixels.push(sample);
-        }
-    }
+    // Parallel single-pass fill via indexed collect: order is preserved and
+    // every byte is written exactly once (no pre-init pass).
+    let pixels: Vec<u8> = values
+        .par_iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let masked = mask.is_some_and(|m| m.is_masked(idx) == Some(true));
+            let stored = (value.to_f64() as f32) as f64;
+            if masked || !stored.is_finite() {
+                0u8
+            } else {
+                // Stretch truncates back to f32 (FloatImage<f32>), then *255.
+                let stretched = (stored * scale + offset) as f32;
+                (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8
+            }
+        })
+        .collect();
     Image::from_pixels(ImageMode::Luma, height, width, pixels)
 }
 
@@ -873,9 +1006,13 @@ impl<T: ImageFloat> FloatImage<T> {
             ChannelExtreme::Min => left.min(right),
             ChannelExtreme::Max => left.max(right),
         };
-        let indices: Vec<usize> = (channel..self.pixels.len()).step_by(channels).collect();
-        let result = indices
+        // Pixel indices are derived arithmetically (pixel * channels + channel)
+        // so no index Vec is materialized: for a full-disk RGB image the old
+        // `(channel..len).step_by(channels).collect()` allocated ~3.9 GB.
+        let pixel_count = self.pixels.len() / channels;
+        let result = (0..pixel_count)
             .into_par_iter()
+            .map(|pixel| pixel * channels + channel)
             .filter(|idx| {
                 !mask
                     .as_ref()
@@ -891,47 +1028,61 @@ impl<T: ImageFloat> FloatImage<T> {
 
     pub fn to_u8_image(&self, fill_value: u8) -> Result<Image> {
         let channels = self.mode.channels();
-        let mask = &self.mask;
-        let pixels = self
-            .pixels
-            .par_iter()
-            .enumerate()
-            .map(|(idx, value)| {
-                if mask
-                    .as_ref()
-                    .and_then(|mask| mask.is_masked(idx / channels))
-                    .unwrap_or(false)
-                    || !value.is_finite()
-                {
-                    fill_value
-                } else {
-                    (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
-                }
-            })
-            .collect();
+        let pixels = if let Some(mask) = &self.mask {
+            self.pixels
+                .par_iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if mask.is_masked(idx / channels).unwrap_or(false) || !value.is_finite() {
+                        fill_value
+                    } else {
+                        (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
+                    }
+                })
+                .collect()
+        } else {
+            // Fast path: no mask, no per-pixel branch.
+            self.pixels
+                .par_iter()
+                .map(|value| {
+                    if value.is_finite() {
+                        (value.to_f64() * 255.0).clamp(0.0, 255.0).round() as u8
+                    } else {
+                        fill_value
+                    }
+                })
+                .collect()
+        };
         Image::from_pixels(self.mode, self.height, self.width, pixels)
     }
 
     pub fn to_u16_image(&self, fill_value: u16) -> Result<Image16> {
         let channels = self.mode.channels();
-        let mask = &self.mask;
-        let pixels = self
-            .pixels
-            .par_iter()
-            .enumerate()
-            .map(|(idx, value)| {
-                if mask
-                    .as_ref()
-                    .and_then(|mask| mask.is_masked(idx / channels))
-                    .unwrap_or(false)
-                    || !value.is_finite()
-                {
-                    fill_value
-                } else {
-                    (value.to_f64() * 65_535.0).clamp(0.0, 65_535.0).round() as u16
-                }
-            })
-            .collect();
+        let pixels = if let Some(mask) = &self.mask {
+            self.pixels
+                .par_iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if mask.is_masked(idx / channels).unwrap_or(false) || !value.is_finite() {
+                        fill_value
+                    } else {
+                        (value.to_f64() * 65_535.0).clamp(0.0, 65_535.0).round() as u16
+                    }
+                })
+                .collect()
+        } else {
+            // Fast path: no mask, no per-pixel branch.
+            self.pixels
+                .par_iter()
+                .map(|value| {
+                    if value.is_finite() {
+                        (value.to_f64() * 65_535.0).clamp(0.0, 65_535.0).round() as u16
+                    } else {
+                        fill_value
+                    }
+                })
+                .collect()
+        };
         Image16::from_pixels(self.mode, self.height, self.width, pixels)
     }
 

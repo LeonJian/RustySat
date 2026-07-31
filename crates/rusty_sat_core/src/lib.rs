@@ -1455,6 +1455,11 @@ pub struct Scene {
     wishlist: BTreeSet<DataId>,
     dependency_graph: DependencyGraph,
     loaders: Vec<Box<dyn SceneLoader>>,
+    /// Per-loader `available_dataset_ids()` results, recomputed only when the
+    /// loader set changes. `Scene::load` enumerates inventories on every call
+    /// (readers rebuild `DataId`s each time), so caching avoids that work for
+    /// repeated loads on a stable loader set.
+    cached_inventories: Option<Vec<Vec<DataId>>>,
 }
 
 impl Scene {
@@ -1500,11 +1505,27 @@ impl Scene {
         L: SceneLoader + 'static,
     {
         self.loaders.push(Box::new(loader));
+        self.cached_inventories = None;
     }
 
     /// Loaded dataset loaders attached to this Scene.
     pub fn loaders(&self) -> &[Box<dyn SceneLoader>] {
         &self.loaders
+    }
+
+    /// Per-loader dataset inventories, cached until the loader set changes.
+    fn loader_inventories(&mut self) -> &[Vec<DataId>] {
+        if self.cached_inventories.is_none() {
+            self.cached_inventories = Some(
+                self.loaders
+                    .iter()
+                    .map(|loader| loader.available_dataset_ids())
+                    .collect(),
+            );
+        }
+        self.cached_inventories
+            .as_ref()
+            .expect("inventories computed above")
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1625,11 +1646,7 @@ impl Scene {
         if queries.is_empty() {
             return Ok(());
         }
-        let loader_ids: Vec<Vec<DataId>> = self
-            .loaders
-            .iter()
-            .map(|loader| loader.available_dataset_ids())
-            .collect();
+        let loader_ids: Vec<Vec<DataId>> = self.loader_inventories().to_vec();
         let all_ids: Vec<&DataId> = loader_ids.iter().flatten().collect();
 
         let mut requested: Vec<DataId> = Vec::new();
