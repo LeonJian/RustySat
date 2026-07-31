@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 rusty_sat_core = { path = "../rusty_sat_core" }
 rayon = "1.10"
-rustyspectral = "1.0"
+rustyspectral = "1.0.3"
 ndarray = "0.16"
 
 [dev-dependencies]

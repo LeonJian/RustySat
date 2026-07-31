@@ -17,8 +17,7 @@
 use rusty_sat_composites::{SelfSharpenedRgb, SpectralBlender};
 use rusty_sat_core::MetadataValue;
 use rusty_sat_modifiers::{
-    rayleigh_correct_with_sun_zenith, Atmosphere, RayleighConfig, RayleighCorrector,
-    SunZenithCorrector, UtcInstant,
+    rayleigh_correct_with_sun_zenith, Atmosphere, RayleighConfig, RayleighCorrector, UtcInstant,
 };
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
@@ -38,7 +37,7 @@ fn data_dir() -> Option<PathBuf> {
         .parent()
         .and_then(Path::parent)
         .expect("root");
-    let d = root.join("local_data/ahi_input/data/20260712/02");
+    let d = root.join("local_data/ahi_input/data/20260728/02");
     if d.is_dir() {
         Some(d)
     } else {
