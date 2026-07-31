@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+  # Cache saves (actions/cache + sccache GHA backend) require `actions: write`.
+  # Without it, saves are silently skipped and every run restores nothing.
+  actions: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,9 +44,11 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.8
 
+      # Per-job cache keys (no shared-key): each job's key includes its job id,
+      # the rustc version, and the Cargo.lock hash, so jobs never fight over
+      # saving the same key concurrently and lockfile changes only rebuild
+      # changed dependencies.
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-stable
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -58,8 +63,6 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.8
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-stable
 
       - run: cargo check --workspace --all-features
 
@@ -76,7 +79,5 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.8
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-stable
 
       - run: cargo nextest run --workspace --all-features
