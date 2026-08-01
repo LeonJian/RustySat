@@ -19,6 +19,12 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResamplerMethod {
     NearestArea,
+    /// KD-indexed swath-to-area nearest resampling. `prepare_resampler`
+    /// accepts either nearest variant as the requested method and derives the
+    /// concrete resampler from the source geometry; `method()` reports the
+    /// concrete resampler's family, so a prepared swath resampler reports
+    /// `NearestSwath`.
+    NearestSwath,
     Bilinear,
     Native,
     BucketAverage,
@@ -36,6 +42,7 @@ impl ResamplerMethod {
     pub fn name(self) -> &'static str {
         match self {
             Self::NearestArea => "nearest_area",
+            Self::NearestSwath => "nearest_swath",
             Self::Bilinear => "bilinear",
             Self::Native => "native",
             Self::BucketAverage => "bucket_avg",
@@ -53,6 +60,7 @@ impl FromStr for ResamplerMethod {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "nearest" | "nearest_area" | "kd_tree" => Ok(Self::NearestArea),
+            "nearest_swath" | "kd_tree_swath" => Ok(Self::NearestSwath),
             "bilinear" => Ok(Self::Bilinear),
             "native" => Ok(Self::Native),
             "bucket" | "bucket_avg" | "bucket_average" => Ok(Self::BucketAverage),
@@ -261,7 +269,8 @@ pub enum PreparedResampler {
 impl PreparedResampler {
     pub fn method(&self) -> ResamplerMethod {
         match self {
-            Self::NearestArea(_) | Self::NearestSwath(_) => ResamplerMethod::NearestArea,
+            Self::NearestArea(_) => ResamplerMethod::NearestArea,
+            Self::NearestSwath(_) => ResamplerMethod::NearestSwath,
             Self::Bilinear(_) => ResamplerMethod::Bilinear,
             Self::Native(_) => ResamplerMethod::Native,
             Self::Bucket(resampler) => match resampler.statistic() {
@@ -425,7 +434,10 @@ pub fn prepare_resampler_for_geometry(
     options: ResampleOptions,
 ) -> Result<PreparedResampler> {
     match options.method {
-        ResamplerMethod::NearestArea => match source {
+        // Both nearest methods request nearest resampling; the concrete
+        // resampler (area or swath) is derived from the source geometry, so
+        // `method()` on the prepared resampler reports the concrete one.
+        ResamplerMethod::NearestArea | ResamplerMethod::NearestSwath => match source {
             SourceGeometry::Area(source) => {
                 let mut resampler = NearestAreaResampler::new(source);
                 if let Some(radius_of_influence) = options.radius_of_influence {
@@ -1170,20 +1182,52 @@ mod tests {
     fn swath_nearest_pipeline_preparation_builds_swath_resampler() {
         let destination = area("destination", 1, 1, [0.0, 0.0, 1.0, 1.0]);
 
-        // Swath + nearest area now prepares the cached KD-indexed swath
-        // resampler instead of erroring.
+        // Swath + nearest now prepares the cached KD-indexed swath resampler
+        // instead of erroring.
         let prepared = prepare_resampler_for_geometry(
             SourceGeometry::swath(swath()),
             &destination,
             ResampleOptions::nearest_area(),
         )
         .unwrap();
+        // method() and name() agree on the concrete swath resampler.
+        assert_eq!(prepared.method(), ResamplerMethod::NearestSwath);
         assert_eq!(prepared.name(), "nearest_swath");
 
         let dataset = Dataset::new(DataId::new("swath_data").unwrap())
             .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
         let resampled = prepared.resample(&dataset, &destination).unwrap();
         assert_eq!(resampled.data().unwrap().shape(), (1, 1));
+        // Closest swath point to the 1x1 destination pixel center (0.5, 0.5)
+        // is (0.25, 0.25), whose source value is 3.0.
+        assert_eq!(resampled.data().unwrap().values(), &[3.0]);
+
+        // An explicit NearestSwath request prepares the same concrete
+        // resampler as the nearest_area request above.
+        let prepared_swath = prepare_resampler_for_geometry(
+            SourceGeometry::swath(swath()),
+            &destination,
+            ResampleOptions::new(ResamplerMethod::NearestSwath),
+        )
+        .unwrap();
+        assert_eq!(prepared_swath.method(), ResamplerMethod::NearestSwath);
+        let resampled_swath = prepared_swath.resample(&dataset, &destination).unwrap();
+        assert_eq!(resampled_swath.data().unwrap().values(), &[3.0]);
+
+        // Radius-of-influence + fill: pixels outside the radius get the fill
+        // value instead of a sample.
+        let far = area("far", 1, 1, [10.0, 10.0, 11.0, 11.0]);
+        let prepared_fill = prepare_resampler_for_geometry(
+            SourceGeometry::swath(swath()),
+            &far,
+            ResampleOptions::nearest_area()
+                .with_radius_of_influence(0.25)
+                .unwrap()
+                .with_fill_value(-999.0),
+        )
+        .unwrap();
+        let resampled_fill = prepared_fill.resample(&dataset, &far).unwrap();
+        assert_eq!(resampled_fill.data().unwrap().values(), &[-999.0]);
     }
 
     #[test]

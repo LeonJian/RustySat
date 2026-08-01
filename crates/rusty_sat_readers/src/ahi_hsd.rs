@@ -39,6 +39,18 @@ const INITIAL_HEADER_PREFIX_LEN: u64 = 4096;
 const MAX_HSD_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const BZIP2_MAGIC: [u8; 3] = *b"BZh";
 
+/// Reject header-declared data block sizes above the safety limit before any
+/// allocation, so a corrupt/oversized header cannot trigger a multi-gigabyte
+/// `Vec::with_capacity` based only on declared dimensions.
+fn validate_hsd_byte_count(byte_count: usize) -> Result<()> {
+    if byte_count > MAX_HSD_FILE_BYTES as usize {
+        return Err(RustySatError::invalid_input(format!(
+            "AHI HSD data block size {byte_count} bytes exceeds the current safety limit of {MAX_HSD_FILE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 /// Bounds how many AHI HSD segments are loaded/calibrated at once.
 ///
 /// Segment loads are independent and parallelized with rayon, but each
@@ -619,6 +631,7 @@ impl AhiHsdFileHandler {
         let byte_count = pixel_count
             .checked_mul(2)
             .ok_or_else(|| RustySatError::invalid_input("AHI HSD data byte count overflow"))?;
+        validate_hsd_byte_count(byte_count)?;
 
         if data_offset > MAX_HSD_FILE_BYTES as usize {
             return Err(RustySatError::invalid_input(format!(
@@ -634,16 +647,24 @@ impl AhiHsdFileHandler {
         if file_has_bzip2_magic(&self.filename)? {
             let mut decoder = MultiBzDecoder::new(BufReader::new(file));
             let mut sink = std::io::sink();
-            std::io::copy(&mut decoder.by_ref().take(data_offset as u64), &mut sink).map_err(
-                |err| {
+            let skipped = std::io::copy(&mut decoder.by_ref().take(data_offset as u64), &mut sink)
+                .map_err(|err| {
                     RustySatError::invalid_input(format!(
                         "failed to skip AHI HSD header in '{}': {err}",
                         self.filename.display()
                     ))
-                },
-            )?;
-            return self
-                .raw_count_values_from_reader(&mut decoder.by_ref().take(byte_count as u64 + 1));
+                })?;
+            if skipped < data_offset as u64 {
+                return Err(RustySatError::invalid_input(format!(
+                    "AHI HSD header in '{}' is truncated: expected {data_offset} bytes, decompressed {}",
+                    self.filename.display(),
+                    skipped
+                )));
+            }
+            return self.raw_count_values_from_reader(
+                &mut decoder.by_ref().take(byte_count as u64 + 1),
+                true,
+            );
         }
         let mut file = BufReader::new(file);
         use std::io::Seek;
@@ -655,10 +676,15 @@ impl AhiHsdFileHandler {
                 ))
             })?;
         match self.header.data.compression_flag {
-            0 => self.raw_count_values_from_reader(&mut file.take(byte_count as u64 + 1)),
+            // Plain files: read exactly the declared block and ignore any
+            // trailing bytes, matching the pre-streaming behavior.
+            0 => self.raw_count_values_from_reader(&mut file.take(byte_count as u64), false),
             2 => {
                 let mut decoder = MultiBzDecoder::new(file);
-                self.raw_count_values_from_reader(&mut decoder.by_ref().take(byte_count as u64 + 1))
+                self.raw_count_values_from_reader(
+                    &mut decoder.by_ref().take(byte_count as u64 + 1),
+                    true,
+                )
             }
             other => Err(RustySatError::unsupported(format!(
                 "AHI HSD data compression flag {other}"
@@ -668,8 +694,14 @@ impl AhiHsdFileHandler {
 
     /// Read exactly `byte_count` bytes from `reader` as little-endian u16
     /// samples, converting pairs directly (no intermediate decompressed
-    /// `Vec<u8>`). Errors on truncation and on extra trailing data.
-    fn raw_count_values_from_reader(&self, reader: &mut impl Read) -> Result<Vec<u16>> {
+    /// `Vec<u8>`). Errors on truncation. When `strict` is set, errors on
+    /// extra trailing data after the declared block (bzip2 branches, where
+    /// the decompressed payload must match the declared size exactly).
+    fn raw_count_values_from_reader(
+        &self,
+        reader: &mut impl Read,
+        strict_trailing: bool,
+    ) -> Result<Vec<u16>> {
         let rows = usize::from(self.header.data.lines);
         let cols = usize::from(self.header.data.columns);
         let pixel_count = rows
@@ -678,6 +710,7 @@ impl AhiHsdFileHandler {
         let byte_count = pixel_count
             .checked_mul(2)
             .ok_or_else(|| RustySatError::invalid_input("AHI HSD data byte count overflow"))?;
+        validate_hsd_byte_count(byte_count)?;
 
         let mut values = Vec::with_capacity(pixel_count);
         let mut buffer = [0u8; 8192];
@@ -695,12 +728,8 @@ impl AhiHsdFileHandler {
             }
             let mut idx = 0;
             if let Some(first) = carry.take() {
-                if idx < read {
-                    values.push(u16::from_le_bytes([first, buffer[idx]]));
-                    idx += 1;
-                } else {
-                    carry = Some(first);
-                }
+                values.push(u16::from_le_bytes([first, buffer[0]]));
+                idx = 1;
             }
             while idx + 1 < read {
                 values.push(u16::from_le_bytes([buffer[idx], buffer[idx + 1]]));
@@ -711,15 +740,17 @@ impl AhiHsdFileHandler {
             }
             remaining -= read;
         }
-        // Probe for extra decompressed data beyond the expected block size.
-        let mut probe = [0u8; 1];
-        let extra = reader.read(&mut probe).map_err(|err| {
-            RustySatError::invalid_input(format!("AHI HSD data read failed: {err}"))
-        })?;
-        if extra > 0 {
-            return Err(RustySatError::invalid_input(format!(
-                "AHI HSD data block decompressed to more than the expected {byte_count} bytes"
-            )));
+        if strict_trailing {
+            // Probe for extra decompressed data beyond the expected block.
+            let mut probe = [0u8; 1];
+            let extra = reader.read(&mut probe).map_err(|err| {
+                RustySatError::invalid_input(format!("AHI HSD data read failed: {err}"))
+            })?;
+            if extra > 0 {
+                return Err(RustySatError::invalid_input(format!(
+                    "AHI HSD data block decompressed to more than the expected {byte_count} bytes"
+                )));
+            }
         }
         Ok(values)
     }
@@ -2297,6 +2328,84 @@ file_types:
         };
         assert_eq!(array.values(), &[1, 65535, 2, 65534, 3, 4]);
         assert_eq!(array.is_masked(3), Some(true));
+    }
+
+    #[test]
+    fn rejects_oversized_declared_data_block_before_allocation() {
+        // A corrupt header declaring 65535x65535 pixels would allocate
+        // ~8.6 GB from header dimensions alone; the byte-count guard must
+        // reject it before any allocation or read.
+        let mut bytes = synthetic_header();
+        write_u16(&mut bytes, BASIC_INFO_LEN + 5, 65535);
+        write_u16(&mut bytes, BASIC_INFO_LEN + 7, 65535);
+        let hsd_path = temp_path("ahi_hsd_oversized", "DAT");
+        fs::write(&hsd_path, &bytes).unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let err = handler.load_counts_dataset().unwrap_err();
+
+        assert!(err.to_string().contains("safety limit"));
+        fs::remove_file(hsd_path).ok();
+    }
+
+    #[test]
+    fn whole_file_bzip2_with_truncated_header_errors() {
+        // The whole-file bzip2 stream decompresses to fewer bytes than the
+        // declared header length; the header skip must report a clear
+        // truncated-header error instead of silently misaligning.
+        let mut bytes = synthetic_full_hsd_file();
+        write_u32(&mut bytes, 70, 1000); // claim a 1000-byte header (file is 818)
+        let hsd_path = temp_path("ahi_hsd_short", "DAT.bz2");
+        fs::write(&hsd_path, bzip2_compress(&bytes)).unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let err = handler.load_counts_dataset().unwrap_err();
+
+        assert!(err.to_string().contains("truncated"));
+        fs::remove_file(hsd_path).ok();
+    }
+
+    #[test]
+    fn plain_hsd_file_ignores_trailing_bytes() {
+        // A plain (uncompressed) HSD file with padding after the declared
+        // data block loads successfully, matching the pre-streaming behavior.
+        let mut bytes = synthetic_full_hsd_file();
+        bytes.extend_from_slice(&[0xAB; 32]);
+        let hsd_path = temp_path("ahi_hsd_trailing", "DAT");
+        fs::write(&hsd_path, &bytes).unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let dataset = handler.load_counts_dataset().unwrap();
+
+        let rusty_sat_core::AnyDataArray::U16(array) = dataset.array().unwrap() else {
+            panic!("expected u16 raw count array");
+        };
+        assert_eq!(array.values(), &[1, 65535, 2, 65534, 3, 4]);
+        fs::remove_file(hsd_path).ok();
+    }
+
+    #[test]
+    fn whole_file_bzip2_rejects_extra_decompressed_trailing_data() {
+        // The whole-file bzip2 stream decompresses to MORE than the declared
+        // block size; the strict probe must reject it as misaligned.
+        let mut payload = synthetic_full_hsd_file();
+        payload.extend_from_slice(&[0xAB; 32]);
+        let hsd_path = temp_path("ahi_hsd_long", "DAT.bz2");
+        fs::write(&hsd_path, bzip2_compress(&payload)).unwrap();
+
+        let handler =
+            AhiHsdFileHandler::from_path(&hsd_path, "hsd_b03", AhiSegmentInfo::new(1, 10).unwrap())
+                .unwrap();
+        let err = handler.load_counts_dataset().unwrap_err();
+
+        assert!(err.to_string().contains("more than the expected"));
+        fs::remove_file(hsd_path).ok();
     }
 
     #[test]

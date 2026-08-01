@@ -331,12 +331,15 @@ fn cira_byte<U: NumericElement>(value: U, fill_value: u8) -> u8 {
 /// Numerically identical to
 /// `FloatImage::<f32>::from_rgb_array(array)?.crude_stretched(None, None)
 /// .to_u8_image(fill_value)`: source values are truncated through f32,
-/// per-channel min/max ignore masked/non-finite pixels, the stretched value
-/// is truncated back to f32, and masked/non-finite pixels become `fill_value`.
-/// One rayon-parallel pass emits the u8 pixels, so the interleaved f32
-/// `FloatImage` intermediate never exists (full-disk RGB: ~13 GB -> ~7.3 GB
-/// peak at this stage).
-pub fn finalize_rgb_crude_u8(array: &AnyDataArray, fill_value: u8) -> Result<Image> {
+/// per-channel min/max and scale/offset are truncated through f32 like the
+/// reference `channel_extreme`/`T::from_f64` storage, a pixel whose ANY band
+/// is masked is excluded from every channel's min/max (matching the reference
+/// `pixel_mask_from_band_major_rgb_mask` any-band semantics) and becomes
+/// `fill_value`, and the stretched value is truncated back to f32 before
+/// scaling by 255. One rayon-parallel pass emits the u8 pixels, so the
+/// interleaved f32 `FloatImage` intermediate never exists (full-disk RGB:
+/// ~13 GB -> ~7.3 GB peak at this stage).
+pub(crate) fn finalize_rgb_crude_u8(array: &AnyDataArray, fill_value: u8) -> Result<Image> {
     let (height, width, pixel_count) = require_band_major_rgb_shape(array)?;
     let mask = array.mask();
     match array {
@@ -367,69 +370,132 @@ fn finalize_rgb_crude_typed<U: NumericElement>(
     fill_value: u8,
 ) -> Result<Image> {
     let channels = ImageMode::Rgb.channels();
-    let mut scale = [0.0_f64; 3];
-    let mut offset = [0.0_f64; 3];
-    for band in 0..channels {
-        // One parallel pass per channel computes min and max together
-        // (arithmetic pixel indices, no index Vec allocation).
-        let (min_value, max_value) = (0..pixel_count)
-            .into_par_iter()
-            .filter(|pixel| {
-                !mask
-                    .and_then(|m| m.is_masked(band * pixel_count + *pixel))
-                    .unwrap_or(false)
-            })
-            .map(|pixel| (values[band * pixel_count + pixel].to_f64() as f32) as f64)
-            .filter(|stored| stored.is_finite())
-            .fold(
-                || (f64::INFINITY, f64::NEG_INFINITY),
-                |(mn, mx), v| (mn.min(v), mx.max(v)),
-            )
-            .reduce(
-                || (f64::INFINITY, f64::NEG_INFINITY),
-                |(mn1, mx1), (mn2, mx2)| (mn1.min(mn2), mx1.max(mx2)),
-            );
-        let delta = max_value - min_value;
-        let channel_scale = if delta.is_finite() && delta != 0.0 {
-            1.0 / delta
-        } else {
-            0.0
-        };
-        scale[band] = channel_scale;
-        offset[band] = if channel_scale == 0.0 {
-            0.0
-        } else {
-            -min_value * channel_scale
-        };
-    }
-    // Pre-size + rayon `par_chunks_mut`: see `from_numeric_rgb_array` for why
-    // a rayon `collect` over the 1->3 band expansion cannot preserve order.
-    let mut pixels = vec![0u8; pixel_count * channels];
-    pixels
-        .par_chunks_mut(channels)
-        .enumerate()
-        .for_each(|(pixel, chunk)| {
-            let masked = (0..channels).any(|band| {
-                mask.and_then(|m| m.is_masked(band * pixel_count + pixel))
-                    .unwrap_or(false)
+    if let Some(mask) = mask {
+        // Masked path: a pixel is excluded from every channel's min/max when
+        // ANY band is masked, matching the reference any-band per-pixel mask.
+        let mut scale = [0.0_f64; 3];
+        let mut offset = [0.0_f64; 3];
+        for band in 0..channels {
+            let (min_value, max_value) =
+                channel_min_max_any_band_masked(values, mask, pixel_count, channels, band);
+            (scale[band], offset[band]) = stretch_scale_offset(min_value, max_value);
+        }
+        let mut pixels = vec![0u8; pixel_count * channels];
+        pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel, chunk)| {
+                let masked = (0..channels)
+                    .any(|band| mask.is_masked(band * pixel_count + pixel).unwrap_or(false));
+                if masked {
+                    chunk.fill(fill_value);
+                    return;
+                }
+                for (band, out) in chunk.iter_mut().enumerate() {
+                    *out = crude_byte(
+                        values[band * pixel_count + pixel],
+                        scale[band],
+                        offset[band],
+                        fill_value,
+                    );
+                }
             });
-            if masked {
-                chunk.fill(fill_value);
-                return;
-            }
-            for (band, out) in chunk.iter_mut().enumerate() {
-                let stored = (values[band * pixel_count + pixel].to_f64() as f32) as f64;
-                *out = if stored.is_finite() {
-                    // Match FloatImage<f32> storage: stretch truncates to f32,
-                    // then *255.
-                    let stretched = (stored * scale[band] + offset[band]) as f32;
-                    (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8
-                } else {
-                    fill_value
-                };
-            }
-        });
-    Image::from_pixels(ImageMode::Rgb, height, width, pixels)
+        Image::from_pixels(ImageMode::Rgb, height, width, pixels)
+    } else {
+        // Fast path: no mask, no per-pixel branch.
+        let mut scale = [0.0_f64; 3];
+        let mut offset = [0.0_f64; 3];
+        for band in 0..channels {
+            let (min_value, max_value) = (0..pixel_count)
+                .into_par_iter()
+                .map(|pixel| (values[band * pixel_count + pixel].to_f64() as f32) as f64)
+                .filter(|stored| stored.is_finite())
+                .fold(
+                    || (f64::INFINITY, f64::NEG_INFINITY),
+                    |(mn, mx), v| (mn.min(v), mx.max(v)),
+                )
+                .reduce(
+                    || (f64::INFINITY, f64::NEG_INFINITY),
+                    |(mn1, mx1), (mn2, mx2)| (mn1.min(mn2), mx1.max(mx2)),
+                );
+            (scale[band], offset[band]) = stretch_scale_offset(min_value, max_value);
+        }
+        let mut pixels = vec![0u8; pixel_count * channels];
+        pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel, chunk)| {
+                for (band, out) in chunk.iter_mut().enumerate() {
+                    *out = crude_byte(
+                        values[band * pixel_count + pixel],
+                        scale[band],
+                        offset[band],
+                        fill_value,
+                    );
+                }
+            });
+        Image::from_pixels(ImageMode::Rgb, height, width, pixels)
+    }
+}
+
+/// Per-channel min/max with reference any-band mask semantics: a pixel is
+/// excluded when any of its bands is masked, so masked pixels never
+/// contribute to the stretch of channels they are valid in.
+fn channel_min_max_any_band_masked<U: NumericElement>(
+    values: &[U],
+    mask: &ValidityMask,
+    pixel_count: usize,
+    channels: usize,
+    channel: usize,
+) -> (f64, f64) {
+    (0..pixel_count)
+        .into_par_iter()
+        .filter(|pixel| {
+            !(0..channels).any(|band| mask.is_masked(band * pixel_count + *pixel).unwrap_or(false))
+        })
+        .map(|pixel| (values[channel * pixel_count + pixel].to_f64() as f32) as f64)
+        .filter(|stored| stored.is_finite())
+        .fold(
+            || (f64::INFINITY, f64::NEG_INFINITY),
+            |(mn, mx), v| (mn.min(v), mx.max(v)),
+        )
+        .reduce(
+            || (f64::INFINITY, f64::NEG_INFINITY),
+            |(mn1, mx1), (mn2, mx2)| (mn1.min(mn2), mx1.max(mx2)),
+        )
+}
+
+/// Scale/offset for one channel, truncated through f32 exactly like the
+/// reference `channel_extreme` (min/max stored as `T`) and
+/// `crude_stretch_in_place` (`T::from_f64` scale/offset).
+fn stretch_scale_offset(min_value: f64, max_value: f64) -> (f64, f64) {
+    let min_value = min_value as f32 as f64;
+    let max_value = max_value as f32 as f64;
+    let delta = max_value - min_value;
+    let channel_scale = if delta.is_finite() && delta != 0.0 {
+        1.0 / delta
+    } else {
+        0.0
+    };
+    let channel_offset = if channel_scale == 0.0 {
+        0.0
+    } else {
+        -min_value * channel_scale
+    };
+    (channel_scale as f32 as f64, channel_offset as f32 as f64)
+}
+
+/// Crude-stretch + 8-bit scale for one value, matching the reference
+/// `FloatImage<f32>` path: f32 scale/offset arithmetic, result truncated to
+/// f32, then `*255` with clamp/round.
+fn crude_byte<U: NumericElement>(value: U, scale: f64, offset: f64, fill_value: u8) -> u8 {
+    let stored = (value.to_f64() as f32) as f64;
+    if stored.is_finite() {
+        let stretched = (stored * scale + offset) as f32;
+        (f64::from(stretched) * 255.0).clamp(0.0, 255.0).round() as u8
+    } else {
+        fill_value
+    }
 }
 
 /// Finalize a 2D luma dataset straight to an 8-bit `Image`, bypassing the
@@ -1435,6 +1501,64 @@ mod tests {
         let image = Image::from_rgb_dataset(&dataset).unwrap();
 
         assert_eq!(image.pixels(), &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rgb_fused_finalize_matches_floatimage_reference() {
+        // The fused finalizer (no FloatImage intermediate) must produce
+        // bit-identical pixels to the FloatImage<f32> stretch+finalize chain,
+        // including partial-band masks, NaN pixels, and f32 rounding
+        // boundaries for min/max and scale/offset.
+        let values = vec![
+            0.1f32, 0.2, 0.3, 10.0, 20.0, 30.0, 40.0, 0.5, 0.1, 0.2, 0.3, 0.4,
+        ];
+        let mask = ValidityMask::from_masked_flags([
+            false, false, false, false, false, true, false, false, false, false, false, false,
+        ]);
+        let array = DataArray::<f32>::from_vec_named(vec![3, 2, 2], ["bands", "y", "x"], values)
+            .unwrap()
+            .with_mask(mask)
+            .unwrap();
+        let any = AnyDataArray::F32(array);
+
+        let direct = Image::from_rgb_array(&any).unwrap();
+        let legacy = FloatImage::<f32>::from_rgb_array(&any)
+            .unwrap()
+            .crude_stretched(None, None)
+            .to_u8_image(0)
+            .unwrap();
+        assert_eq!(direct.shape(), legacy.shape());
+        assert_eq!(direct.pixels(), legacy.pixels());
+    }
+
+    #[test]
+    fn rgb_fused_finalize_any_band_mask_matches_reference() {
+        // Pixel 0 is masked in band 0 only. The reference converts the
+        // band-major mask to a per-pixel any-band mask, so pixel 0 is
+        // excluded from EVERY channel's stretch (channel 1 keeps value 100
+        // but its min/max must not see it). A per-band mask would let
+        // channel 1 stretch to 255 instead of staying at 0.
+        let array = DataArray::<f64>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![10.0, 0.0, 100.0, 0.0, 0.0, 0.0],
+        )
+        .unwrap()
+        .with_mask(ValidityMask::from_masked_flags([
+            true, false, false, false, false, false,
+        ]))
+        .unwrap();
+        let any = AnyDataArray::F64(array);
+
+        let direct = Image::from_rgb_array(&any).unwrap();
+        let legacy = FloatImage::<f32>::from_rgb_array(&any)
+            .unwrap()
+            .crude_stretched(None, None)
+            .to_u8_image(0)
+            .unwrap();
+
+        assert_eq!(direct.pixels(), legacy.pixels());
+        assert_eq!(direct.pixels(), &[0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

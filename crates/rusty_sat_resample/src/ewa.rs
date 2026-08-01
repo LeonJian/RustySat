@@ -264,11 +264,7 @@ impl<'a> EwaAccumulators<'a> {
             .ok_or_else(|| RustySatError::invalid_input("EWA resampling requires source lats"))?;
         // Destination geometry is identical for every source point; hoist it
         // (and the derived radius in pixels) out of the per-point hot loop.
-        let (height, width) = self.destination.shape();
-        let extent = self.destination.area_extent();
-        let (pixel_size_x, pixel_size_y) = self.destination.pixel_size();
-        let radius_x = self.options.radius_of_influence / pixel_size_x.abs();
-        let radius_y = self.options.radius_of_influence / pixel_size_y.abs();
+        let destination = self.destination_geometry();
         let count = lons.len().min(lats.len()).min(values.len());
         (0..count).into_par_iter().for_each(|source_idx| {
             if mask
@@ -283,55 +279,58 @@ impl<'a> EwaAccumulators<'a> {
             if !lon.is_finite() || !lat.is_finite() || !value.is_finite() {
                 return;
             }
-            self.add_sample(
-                lon,
-                lat,
-                value,
-                height,
-                width,
-                extent,
-                pixel_size_x,
-                pixel_size_y,
-                radius_x,
-                radius_y,
-            );
+            self.add_sample(lon, lat, value, destination);
         });
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn add_sample(
-        &self,
-        lon: f64,
-        lat: f64,
-        value: f64,
-        height: usize,
-        width: usize,
-        extent: [f64; 4],
-        pixel_size_x: f64,
-        pixel_size_y: f64,
-        radius_x: f64,
-        radius_y: f64,
-    ) {
-        let center_x = (lon - extent[0]) / pixel_size_x - 0.5;
-        let center_y = (extent[3] - lat) / pixel_size_y - 0.5;
+    /// Destination-grid geometry derived once per accumulation from the
+    /// destination area, avoiding per-source-point recomputation.
+    fn destination_geometry(&self) -> DestinationGeometry {
+        let (height, width) = self.destination.shape();
+        let extent = self.destination.area_extent();
+        let (pixel_size_x, pixel_size_y) = self.destination.pixel_size();
+        let radius_x = self.options.radius_of_influence / pixel_size_x.abs();
+        let radius_y = self.options.radius_of_influence / pixel_size_y.abs();
+        DestinationGeometry {
+            height,
+            width,
+            extent,
+            pixel_size_x,
+            pixel_size_y,
+            radius_x,
+            radius_y,
+        }
+    }
+
+    fn add_sample(&self, lon: f64, lat: f64, value: f64, destination: DestinationGeometry) {
+        let center_x = (lon - destination.extent[0]) / destination.pixel_size_x - 0.5;
+        let center_y = (destination.extent[3] - lat) / destination.pixel_size_y - 0.5;
         if !center_x.is_finite() || !center_y.is_finite() {
             return;
         }
 
-        let x_start = ((center_x - radius_x).floor().max(0.0)) as usize;
-        let y_start = ((center_y - radius_y).floor().max(0.0)) as usize;
-        let x_end = ((center_x + radius_x).ceil().min(width as f64 - 1.0)) as usize;
-        let y_end = ((center_y + radius_y).ceil().min(height as f64 - 1.0)) as usize;
-        if x_start >= width || y_start >= height || x_start > x_end || y_start > y_end {
+        let x_start = ((center_x - destination.radius_x).floor().max(0.0)) as usize;
+        let y_start = ((center_y - destination.radius_y).floor().max(0.0)) as usize;
+        let x_end = ((center_x + destination.radius_x)
+            .ceil()
+            .min(destination.width as f64 - 1.0)) as usize;
+        let y_end = ((center_y + destination.radius_y)
+            .ceil()
+            .min(destination.height as f64 - 1.0)) as usize;
+        if x_start >= destination.width
+            || y_start >= destination.height
+            || x_start > x_end
+            || y_start > y_end
+        {
             return;
         }
 
         for y in y_start..=y_end {
-            let target_y = extent[3] - (y as f64 + 0.5) * pixel_size_y;
+            let target_y = destination.extent[3] - (y as f64 + 0.5) * destination.pixel_size_y;
             let dy = target_y - lat;
             for x in x_start..=x_end {
-                let target_x = extent[0] + (x as f64 + 0.5) * pixel_size_x;
+                let target_x = destination.extent[0] + (x as f64 + 0.5) * destination.pixel_size_x;
                 let dx = target_x - lon;
                 let distance_squared = dx * dx + dy * dy;
                 if distance_squared > self.radius_squared {
@@ -341,7 +340,7 @@ impl<'a> EwaAccumulators<'a> {
                 if weight < self.options.weight_min {
                     continue;
                 }
-                let target_idx = y * width + x;
+                let target_idx = y * destination.width + x;
                 atomic_add_f64(&self.sums[target_idx], value * weight);
                 atomic_add_f64(&self.weight_sums[target_idx], weight);
             }
@@ -354,31 +353,56 @@ impl<'a> EwaAccumulators<'a> {
         let fill_value = self.options.fill_value;
         let weight_sum_min = self.options.weight_sum_min;
         let mask_missing = self.options.mask_missing;
-        // Parallel finalization: each target pixel's output only depends on
-        // its own accumulators, and indexed collect preserves order.
-        let values: Vec<f64> = (0..size)
-            .into_par_iter()
-            .map(|idx| {
+        // Single parallel pass: each target pixel's value and mask are derived
+        // from the exact same `weight_sum` branch, so a non-finite weight_sum
+        // is consistently fill + masked (the previous two-pass `>` vs `<=`
+        // predicates could leave such pixels filled but unmasked).
+        let mut values = vec![0.0_f64; size];
+        if mask_missing {
+            let mut masked = vec![false; size];
+            values
+                .par_iter_mut()
+                .zip(masked.par_iter_mut())
+                .enumerate()
+                .for_each(|(idx, (out, out_masked))| {
+                    let weight_sum = f64::from_bits(self.weight_sums[idx].load(Ordering::Relaxed));
+                    if weight_sum > weight_sum_min {
+                        *out = f64::from_bits(self.sums[idx].load(Ordering::Relaxed)) / weight_sum;
+                    } else {
+                        *out = fill_value;
+                        *out_masked = true;
+                    }
+                });
+            let mut grid = DataGrid::new(height, width, values)?;
+            grid.set_mask(ValidityMask::from_masked_flags(masked))?;
+            Ok(grid)
+        } else {
+            // No mask requested: skip the mask iteration and allocation.
+            values.par_iter_mut().enumerate().for_each(|(idx, out)| {
                 let weight_sum = f64::from_bits(self.weight_sums[idx].load(Ordering::Relaxed));
-                if weight_sum > weight_sum_min {
+                *out = if weight_sum > weight_sum_min {
                     f64::from_bits(self.sums[idx].load(Ordering::Relaxed)) / weight_sum
                 } else {
                     fill_value
-                }
-            })
-            .collect();
-        let masked: Vec<bool> = (0..size)
-            .into_par_iter()
-            .map(|idx| {
-                f64::from_bits(self.weight_sums[idx].load(Ordering::Relaxed)) <= weight_sum_min
-            })
-            .collect();
-        let mut grid = DataGrid::new(height, width, values)?;
-        if mask_missing {
-            grid.set_mask(ValidityMask::from_masked_flags(masked))?;
+                };
+            });
+            DataGrid::new(height, width, values)
         }
-        Ok(grid)
     }
+}
+
+/// Destination-grid geometry derived once per accumulation and passed by
+/// value to [`EwaAccumulators::add_sample`], avoiding a positional geometry
+/// argument list on every source point.
+#[derive(Debug, Clone, Copy)]
+struct DestinationGeometry {
+    height: usize,
+    width: usize,
+    extent: [f64; 4],
+    pixel_size_x: f64,
+    pixel_size_y: f64,
+    radius_x: f64,
+    radius_y: f64,
 }
 
 fn validate_source_shape(source_grid: &DataGrid, source: &SwathDefinition) -> Result<()> {

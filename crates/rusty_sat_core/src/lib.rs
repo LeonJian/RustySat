@@ -1417,6 +1417,12 @@ pub trait SceneLoader: fmt::Debug + Send + Sync {
     fn name(&self) -> &str;
 
     /// `DataId`s this loader can produce with its currently attached files.
+    ///
+    /// The result must be stable for the loader's lifetime: [`Scene`] caches
+    /// the per-loader result and only re-enumerates after
+    /// [`Scene::add_loader`]/[`Scene::with_loaders`] changes the loader set.
+    /// Loaders whose inventory changes at runtime (e.g. lazy file discovery)
+    /// must build the complete inventory at construction time.
     fn available_dataset_ids(&self) -> Vec<DataId>;
 
     /// Load one dataset by its exact [`DataId`].
@@ -1458,7 +1464,8 @@ pub struct Scene {
     /// Per-loader `available_dataset_ids()` results, recomputed only when the
     /// loader set changes. `Scene::load` enumerates inventories on every call
     /// (readers rebuild `DataId`s each time), so caching avoids that work for
-    /// repeated loads on a stable loader set.
+    /// repeated loads on a stable loader set. This relies on the documented
+    /// stability contract of [`SceneLoader::available_dataset_ids`].
     cached_inventories: Option<Vec<Vec<DataId>>>,
 }
 
@@ -1513,8 +1520,8 @@ impl Scene {
         &self.loaders
     }
 
-    /// Per-loader dataset inventories, cached until the loader set changes.
-    fn loader_inventories(&mut self) -> &[Vec<DataId>] {
+    /// Recompute per-loader inventories if the loader set changed.
+    fn ensure_inventories(&mut self) {
         if self.cached_inventories.is_none() {
             self.cached_inventories = Some(
                 self.loaders
@@ -1523,9 +1530,6 @@ impl Scene {
                     .collect(),
             );
         }
-        self.cached_inventories
-            .as_ref()
-            .expect("inventories computed above")
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1646,7 +1650,14 @@ impl Scene {
         if queries.is_empty() {
             return Ok(());
         }
-        let loader_ids: Vec<Vec<DataId>> = self.loader_inventories().to_vec();
+        // Borrow the cached inventories as a single field so the split-field
+        // borrow checker allows mutating `wishlist`/`datasets`/`dependency_graph`
+        // below without deep-cloning every cached `DataId` per load() call.
+        self.ensure_inventories();
+        let loader_ids: &[Vec<DataId>] = self
+            .cached_inventories
+            .as_ref()
+            .expect("inventories ensured above");
         let all_ids: Vec<&DataId> = loader_ids.iter().flatten().collect();
 
         let mut requested: Vec<DataId> = Vec::new();

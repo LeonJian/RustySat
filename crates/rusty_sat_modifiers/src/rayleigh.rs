@@ -221,18 +221,7 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_values: Option<Vec<f32>> = red_dataset.map(|ds| {
-            let Some(array) = ds.array() else {
-                return Vec::new();
-            };
-            match array {
-                AnyDataArray::F32(a) => a.values().to_vec(),
-                AnyDataArray::F64(a) => a.values().iter().map(|v| *v as f32).collect(),
-                AnyDataArray::U8(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-                AnyDataArray::U16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-                AnyDataArray::I16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-            }
-        });
+        let red_values = red_values_from_red_dataset(red_dataset, height * width)?;
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
@@ -387,18 +376,7 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_values: Option<Vec<f32>> = red_dataset.map(|ds| {
-            let Some(array) = ds.array() else {
-                return Vec::new();
-            };
-            match array {
-                AnyDataArray::F32(a) => a.values().to_vec(),
-                AnyDataArray::F64(a) => a.values().iter().map(|v| *v as f32).collect(),
-                AnyDataArray::U8(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-                AnyDataArray::U16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-                AnyDataArray::I16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-            }
-        });
+        let red_values = red_values_from_red_dataset(red_dataset, height * width)?;
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
@@ -639,6 +617,42 @@ pub(crate) fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
     }
 }
 
+/// Extract the red band values as f32, or `None` when no red dataset is given.
+///
+/// The red band is stored as f32 (narrowing f64 sources) to halve the copy
+/// for 0.5 km red bands. A pixel whose value sits within ~1e-6 of the
+/// `r >= 20.0` cloud-relaxation threshold may flip the branch compared to a
+/// full-f64 copy, which is accepted for the memory win. A dataset without an
+/// array, or with fewer values than the visible band, is rejected instead of
+/// panicking on an indexed access in the strip loop.
+fn red_values_from_red_dataset(
+    red_dataset: Option<&Dataset>,
+    visible_count: usize,
+) -> Result<Option<Vec<f32>>> {
+    let Some(ds) = red_dataset else {
+        return Ok(None);
+    };
+    let Some(array) = ds.array() else {
+        return Err(RustySatError::invalid_input(
+            "red dataset has no array data for Rayleigh correction",
+        ));
+    };
+    if array.len() < visible_count {
+        return Err(RustySatError::invalid_input(format!(
+            "red dataset array length {} is smaller than the visible band ({visible_count} pixels)",
+            array.len()
+        )));
+    }
+    let values = match array {
+        AnyDataArray::F32(a) => a.values().to_vec(),
+        AnyDataArray::F64(a) => a.values().iter().map(|v| *v as f32).collect(),
+        AnyDataArray::U8(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+        AnyDataArray::U16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+        AnyDataArray::I16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
+    };
+    Ok(Some(values))
+}
+
 /// Compute angles and apply Rayleigh correction in one call.
 pub fn rayleigh_correct(
     corrector: RayleighCorrector,
@@ -845,6 +859,46 @@ mod tests {
     }
 
     // ── Helpers for combined tests ──
+
+    #[test]
+    fn red_values_reject_missing_or_short_arrays() {
+        let visible_count = 9;
+        // No red dataset -> None.
+        assert!(red_values_from_red_dataset(None, visible_count)
+            .expect("no red is fine")
+            .is_none());
+        // Dataset without an array -> error, not an empty-Vec indexed access.
+        let no_array =
+            rusty_sat_core::Dataset::new(rusty_sat_core::DataId::new("red").expect("id"));
+        assert!(red_values_from_red_dataset(Some(&no_array), visible_count).is_err());
+        // Shorter than the visible band -> error with a clear message.
+        let short = rusty_sat_core::Dataset::new(rusty_sat_core::DataId::new("red").expect("id"))
+            .with_array(
+                rusty_sat_core::DataArray::<f32>::from_vec_named(
+                    vec![2, 2],
+                    ["y", "x"],
+                    vec![1.0_f32; 4],
+                )
+                .expect("array"),
+            );
+        let err = red_values_from_red_dataset(Some(&short), visible_count)
+            .expect_err("short red array must fail");
+        assert!(err.to_string().contains("smaller than the visible band"));
+        // Matching length -> values.
+        let ok = rusty_sat_core::Dataset::new(rusty_sat_core::DataId::new("red").expect("id"))
+            .with_array(
+                rusty_sat_core::DataArray::<f32>::from_vec_named(
+                    vec![3, 3],
+                    ["y", "x"],
+                    vec![1.0_f32; 9],
+                )
+                .expect("array"),
+            );
+        let values = red_values_from_red_dataset(Some(&ok), visible_count)
+            .expect("valid red")
+            .expect("values");
+        assert_eq!(values.len(), 9);
+    }
 
     fn combined_area_attr() -> MetadataValue {
         let proj = MetadataValue::Map(

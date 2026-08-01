@@ -16,7 +16,8 @@ use rusty_sat_core::{
     Coordinate, DataGrid, Dataset, LazyDataArray, Result, RustySatError, ValidityMask,
 };
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::OnceLock;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingValuePolicy {
@@ -164,14 +165,40 @@ impl Resampler for NearestAreaResampler {
 /// The KD tree over the swath lon/lat points is built once per instance and
 /// reused across `resample`/`resample_owned` calls, so resampling several
 /// datasets that share one swath builds the tree only once (the free
-/// `resample_swath_nearest` functions rebuild it on every call).
-#[derive(Debug, Clone)]
+/// `resample_swath_nearest` functions rebuild it on every call). The built
+/// tree is shared through an `Arc`, so cloning a warmed-up resampler shares
+/// the tree instead of deep-copying it.
 pub struct NearestSwathResampler {
     source: SwathDefinition,
-    index: OnceLock<KdPointIndex2D>,
+    index: OnceLock<std::result::Result<Arc<KdPointIndex2D>, RustySatError>>,
     radius_of_influence: Option<f64>,
     fill_value: f64,
     missing_value_policy: MissingValuePolicy,
+}
+
+impl fmt::Debug for NearestSwathResampler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NearestSwathResampler")
+            .field("source", &self.source)
+            .field("radius_of_influence", &self.radius_of_influence)
+            .field("fill_value", &self.fill_value)
+            .field("missing_value_policy", &self.missing_value_policy)
+            .field("index_built", &self.index.get().is_some())
+            .finish()
+    }
+}
+
+impl Clone for NearestSwathResampler {
+    fn clone(&self) -> Self {
+        // The cached KD tree is shared, not copied.
+        Self {
+            source: self.source.clone(),
+            index: self.index.clone(),
+            radius_of_influence: self.radius_of_influence,
+            fill_value: self.fill_value,
+            missing_value_policy: self.missing_value_policy,
+        }
+    }
 }
 
 impl NearestSwathResampler {
@@ -186,9 +213,9 @@ impl NearestSwathResampler {
     }
 
     pub fn with_radius_of_influence(mut self, radius_of_influence: f64) -> Result<Self> {
-        if !radius_of_influence.is_finite() || radius_of_influence <= 0.0 {
+        if !radius_of_influence.is_finite() || radius_of_influence < 0.0 {
             return Err(RustySatError::invalid_input(
-                "nearest swath radius of influence must be finite and positive",
+                "nearest swath radius of influence must be finite and non-negative",
             ));
         }
         self.radius_of_influence = Some(radius_of_influence);
@@ -206,27 +233,31 @@ impl NearestSwathResampler {
         self
     }
 
+    /// The swath point index, built once and cached (including build errors).
+    ///
+    /// Uses `OnceLock::get_or_init` so a single builder wins and concurrent
+    /// callers share the result; failed builds are cached too, so a swath
+    /// without lon/lat coordinates does not rebuild the index on every call.
     fn index(&self) -> Result<&KdPointIndex2D> {
-        if self.index.get().is_none() {
-            let lons = self.source.lons().ok_or_else(|| {
-                RustySatError::invalid_input(
-                    "swath nearest resampling requires longitude coordinates",
-                )
-            })?;
-            let lats = self.source.lats().ok_or_else(|| {
-                RustySatError::invalid_input(
-                    "swath nearest resampling requires latitude coordinates",
-                )
-            })?;
-            let built = KdPointIndex2D::from_xy(lons, lats)?;
-            // A concurrent caller may have built it first; either instance is
-            // equivalent, so a lost race is harmless.
-            let _ = self.index.set(built);
-        }
-        let Some(index) = self.index.get() else {
-            unreachable!("index set above");
-        };
-        Ok(index)
+        self.index
+            .get_or_init(
+                || -> std::result::Result<Arc<KdPointIndex2D>, RustySatError> {
+                    let lons = self.source.lons().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "swath nearest resampling requires longitude coordinates",
+                        )
+                    })?;
+                    let lats = self.source.lats().ok_or_else(|| {
+                        RustySatError::invalid_input(
+                            "swath nearest resampling requires latitude coordinates",
+                        )
+                    })?;
+                    KdPointIndex2D::from_xy(lons, lats).map(Arc::new)
+                },
+            )
+            .as_ref()
+            .map_err(Clone::clone)
+            .map(AsRef::as_ref)
     }
 
     fn resample_impl(
@@ -1162,6 +1193,34 @@ mod tests {
             out_a.attr("resampler").unwrap(),
             &MetadataValue::string("nearest_swath")
         );
+    }
+
+    #[test]
+    fn nearest_swath_resampler_accepts_zero_radius_for_exact_matches() {
+        // A zero radius is exact-coordinate-match mode, matching
+        // NearestAreaResampler, ResampleOptions, and resample_swath_nearest.
+        let swath =
+            SwathDefinition::from_lonlats(2, 2, vec![0.5, 1.5, 0.5, 1.5], vec![1.5, 1.5, 0.5, 0.5])
+                .unwrap();
+        let destination = area("destination", 2, 2, [0.0, 0.0, 2.0, 2.0]);
+        let resampler = NearestSwathResampler::new(swath)
+            .with_radius_of_influence(0.0)
+            .unwrap()
+            .with_fill_value(-999.0);
+        let dataset = Dataset::new(DataId::new("exact").unwrap())
+            .with_data(DataGrid::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+
+        let out = resampler.resample(&dataset, &destination).unwrap();
+
+        assert_eq!(out.data().unwrap().values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn nearest_swath_resampler_rejects_negative_radius() {
+        let swath = SwathDefinition::from_lonlats(1, 1, vec![0.5], vec![0.5]).unwrap();
+        assert!(NearestSwathResampler::new(swath)
+            .with_radius_of_influence(-1.0)
+            .is_err());
     }
 
     #[test]
