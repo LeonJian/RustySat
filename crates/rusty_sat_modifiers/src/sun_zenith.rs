@@ -12,7 +12,7 @@
 //! Formula from satpy: `corrected_refl = refl / pow(cos(sunz_rad), n)`
 //! where n is configurable (default 1.0).
 
-use crate::angles::{precompute_columns, precompute_rows, solar_single_precomputed, AngleParams};
+use crate::angles::{sun_angles_from_lonlat, AngleParams};
 use crate::astronomy::{gmst, sun_ra_dec, UtcInstant};
 use crate::rayleigh::into_vis_f32;
 use rusty_sat_core::{
@@ -95,21 +95,12 @@ impl SunZenithCorrector {
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
-        let h = params.geos.perspective_point_height;
-        let h_inv = 1.0 / h;
-        let lon_0_rad = params.geos.longitude_of_projection_origin.to_radians();
-        let column_data = precompute_columns(&params.x_coords, h_inv, lon_0_rad, gmst_val, sun_ra);
-
-        let max_angle = (params.geos.semi_major_axis / params.geos.satellite_radius()).asin();
-        let max_angle_sq = max_angle * max_angle;
 
         const STRIP_HEIGHT: usize = 64;
 
         for y0 in (0..height).step_by(STRIP_HEIGHT) {
             let y1 = (y0 + STRIP_HEIGHT).min(height);
             let strip_n = (y1 - y0) * width;
-
-            let tan_theta_y_row = precompute_rows(&params.y_coords, y0, y1, h_inv);
             let offset = y0 * width;
 
             use rayon::prelude::*;
@@ -122,18 +113,18 @@ impl SunZenithCorrector {
                     }
                     let row = local_i / width;
                     let col = local_i % width;
-                    let col_pre = &column_data[col];
-
                     let x_pos = params.x_coords[col];
                     let y_pos = params.y_coords[y0 + row];
-                    let rsq = (x_pos * x_pos + y_pos * y_pos) / (h * h);
-                    if rsq > max_angle_sq {
+
+                    // Exact geos inverse: space pixels (ray misses the Earth)
+                    // become NaN, matching the previous disk-boundary check.
+                    let Some((lon, lat)) = params.geos.inverse_rad(x_pos, y_pos) else {
                         *out = f32::NAN;
                         return;
-                    }
+                    };
 
-                    let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
-                    let (sunz_deg, _suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+                    let (sunz_deg, _suna) =
+                        sun_angles_from_lonlat(lon, lat, sun_ra, sun_dec, gmst_val);
                     if !sunz_deg.is_finite() {
                         *out = f32::NAN;
                         return;
@@ -410,6 +401,71 @@ mod tests {
         // Near SSP, cos(sza) ≈ 1, so values stay similar.
         // The mean should not decrease dramatically (it should increase or stay similar).
         assert!(result_mean >= original_mean * 0.8);
+    }
+
+    #[test]
+    fn limb_correction_matches_curved_earth_reference() {
+        // AHI full-disk limb pixels at ±5.22525e6 m projection coordinates.
+        // Reference sun-zenith correction factors computed with the exact
+        // ellipsoidal geos inverse + the pyorbital solar model for
+        // 2025-09-23 07:20:00 UTC (the flat-plane approximation used to give
+        // ~1.03 here instead of the true 1.0-8.2 factors):
+        //   top limb    (0,  +5.22525e6): sza 82.97°  -> corr 8.17309340
+        //   center      (0,        0):    sza 72.61°  -> corr 3.34568739
+        //   bottom limb (0,  -5.22525e6): sza 82.58°  -> corr 7.74841292
+        //   left limb   (-5.22525e6, 0):  sza 8.15°   -> corr 1.01019645
+        //   right limb  (+5.22525e6, 0):  sza 137.07° -> corr 0.0 (night)
+        let geos = GeosProjection {
+            semi_major_axis: 6_378_137.0,
+            semi_minor_axis: 6_356_752.314_14,
+            perspective_point_height: 35_785_863.0,
+            longitude_of_projection_origin: 140.7,
+        };
+        let limb = 5.225_25e6;
+        let params = AngleParams {
+            sat_lon: 140.7,
+            sat_lat: 0.0,
+            sat_alt: geos.perspective_point_height,
+            utc: UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0),
+            width: 3,
+            height: 3,
+            geos,
+            x_coords: vec![-limb, 0.0, limb],
+            y_coords: vec![limb, 0.0, -limb],
+        };
+        // Constant 100% reflectance: corrected = 100 * correction factor.
+        let dataset = make_dataset(3, 3, vec![100.0_f32; 9], false);
+        let result = SunZenithCorrector::default()
+            .apply_correction(dataset, params)
+            .expect("correction succeeds");
+        let values = result.array().expect("array").values_as_f64();
+
+        // Row 0: top limb; row 1: equator; row 2: bottom limb.
+        // Column 0: left limb; column 1: sub-satellite meridian; column 2: right limb.
+        // Corners are space pixels (radius > horizon) -> NaN; the right limb
+        // is on the night side -> sunz factor 0 -> exact 0.0.
+        let expected = [
+            [f64::NAN, 817.309_340, f64::NAN],
+            [101.019_645, 334.568_739, 0.0],
+            [f64::NAN, 774.841_292, f64::NAN],
+        ];
+        for row in 0..3 {
+            for col in 0..3 {
+                let v = values[row * 3 + col];
+                let e = expected[row][col];
+                if e.is_nan() {
+                    assert!(
+                        v.is_nan(),
+                        "space pixel ({row},{col}) should be NaN, got {v}"
+                    );
+                } else {
+                    assert!(
+                        (v - e).abs() < 0.5,
+                        "pixel ({row},{col}) = {v}, expected ~{e}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

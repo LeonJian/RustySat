@@ -18,9 +18,13 @@ use rusty_sat_composites::{SelfSharpenedRgb, SpectralBlender};
 use rusty_sat_core::{AnyDataArray, DataQuery, Dataset, MetadataValue, NumericElement, Scene};
 use rusty_sat_image::finalize_rgb_cira_u8;
 use rusty_sat_modifiers::{
-    rayleigh_correct_with_sun_zenith, Atmosphere, RayleighConfig, RayleighCorrector, UtcInstant,
+    rayleigh_correct_with_sun_zenith, sun_zenith_correct, Atmosphere, RayleighConfig,
+    RayleighCorrector, RedBandSource, UtcInstant,
 };
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo};
+use rusty_sat_resample::{
+    area_from_metadata_value, resample_dataset_from_attrs, with_area_attr, ResampleOptions,
+};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -150,9 +154,46 @@ macro_rules! lut {
 }
 
 /// Correct a band with combined sunz+rayleigh (no resampling).
-fn correct_band(ds: Dataset, t: UtcInstant, nm: f64, max_sza: f64) -> Dataset {
-    rayleigh_correct_with_sun_zenith(lut!(build_corrector(nm)), ds, None, t, max_sza)
+///
+/// `red` follows Satpy's `rayleigh_corrected` red prerequisite (the
+/// sun-zenith-corrected B03, resampled to the band's grid when needed).
+fn correct_band(ds: Dataset, red: RedBandSource, t: UtcInstant, nm: f64, max_sza: f64) -> Dataset {
+    rayleigh_correct_with_sun_zenith(lut!(build_corrector(nm)), ds, red, t, max_sza)
         .expect("combined")
+}
+
+/// Convert a dataset's runtime-typed array to f64, preserving dims, mask,
+/// coordinates, and attrs.
+///
+/// The area nearest resampler is f64-only (P0.1.1d), so the 0.5 km red band
+/// must be promoted before the 0.5→1 km nearest resample. The temporary f64
+/// 0.5 km copy is dropped right after resampling to bound peak memory.
+fn to_f64_dataset(dataset: &Dataset) -> Dataset {
+    let array = dataset.array().expect("array");
+    let dims = array.dims().to_vec();
+    let values: Vec<f64> = match array {
+        AnyDataArray::F32(a) => a.values().iter().map(|v| f64::from(*v)).collect(),
+        AnyDataArray::F64(a) => a.values().to_vec(),
+        AnyDataArray::U8(a) => a.values().iter().map(|v| f64::from(*v)).collect(),
+        AnyDataArray::U16(a) => a.values().iter().map(|v| f64::from(*v)).collect(),
+        AnyDataArray::I16(a) => a.values().iter().map(|v| f64::from(*v)).collect(),
+    };
+    let mask = array.mask().cloned();
+    let coords = array.coords().clone();
+    let mut da =
+        rusty_sat_core::DataArray::<f64>::from_vec_named(array.shape().to_vec(), dims, values)
+            .expect("f64 array");
+    if let Some(m) = mask {
+        da = da.with_mask(m).expect("mask");
+    }
+    for (name, coord) in coords {
+        da = da.with_coordinate(&name, coord).expect("coord");
+    }
+    let mut ds = Dataset::new(dataset.id().clone()).with_array(da);
+    for (key, value) in dataset.attrs() {
+        ds.insert_attr(key.clone(), value.clone()).expect("attr");
+    }
+    ds
 }
 
 /// Resolve a loaded band by name and move it out of the Scene (no array copy).
@@ -262,39 +303,98 @@ fn true_color_reproduction() {
     assert_eq!(scene.sensor_names(), vec!["ahi".to_string()]);
     eprintln!("  Scene loaded B01/B02/B03/B04");
 
-    // ── Step 2: B02 (green) correct at native 1 km + sanity check ────────
-    eprintln!("--- B02: correct (1 km) ---");
+    // ── Step 2: B03 sunz-only red band (Satpy rayleigh_corrected red prereq) ─
+    // Satpy feeds the sun-zenith-corrected B03 as the red band for the
+    // Rayleigh cloud relaxation of every band. For the 1 km bands (B01/B02)
+    // it is nearest-resampled to 1 km (we resample the raw B03 first and
+    // sunz-correct on the 1 km grid — equivalent within a pixel); for B03
+    // itself the red is the in-place sunz-corrected value.
+    let b03_raw = take_dataset(&mut scene, "B03"); // 0.5 km raw
     let b02_id = DataQuery::named("B02")
         .expect("query")
         .best_match(scene.available_dataset_ids().iter())
         .expect("B02 id")
         .clone();
+    let b02_area = area_from_metadata_value(
+        scene
+            .get(&b02_id)
+            .expect("B02 in scene")
+            .attr("area")
+            .expect("B02 area attr"),
+    )
+    .expect("B02 area");
+    // The area nearest resampler is f64-only, so promote the 0.5 km raw band
+    // for the borrowed 0.5→1 km resample; the temporary f64 copy is dropped
+    // right after.
+    let b03_f64 = to_f64_dataset(&b03_raw);
+    let b03_1km = resample_dataset_from_attrs(&b03_f64, &b02_area, ResampleOptions::default())
+        .expect("B03 -> 1 km nearest");
+    drop(b03_f64);
+    // The resampler leaves the nested `area` attr at the destination id
+    // string; re-attach the destination area metadata for downstream
+    // angle/geometry consumers.
+    let b03_1km = with_area_attr(b03_1km, &b02_area).expect("attach 1 km area");
+    let b03_red_1km = sun_zenith_correct(b03_1km, t).expect("sunz-corrected 1 km B03 red");
+
+    // ── Step 3: B02 (green) correct at native 1 km + sanity check ────────
+    eprintln!("--- B02: correct (1 km) ---");
     let orig_mean = finite_mean(scene.get(&b02_id).unwrap().array().expect("arr"));
-    let d02_corr = correct_band(scene.remove_dataset(&b02_id).unwrap(), t, 510.0, max_sza);
+    let d02_corr = correct_band(
+        scene.remove_dataset(&b02_id).unwrap(),
+        RedBandSource::Dataset(&b03_red_1km),
+        t,
+        510.0,
+        max_sza,
+    );
     let corr_mean = finite_mean(d02_corr.array().expect("arr"));
     assert_eq!(
         d02_corr.attr("modifier").and_then(MetadataValue::as_str),
         Some("combined_sun_zenith_rayleigh_correction")
     );
+    // No monotonicity guarantee: the sun-zenith amplification (mean factor
+    // ~2x on this disk) usually exceeds the Rayleigh subtraction, so the
+    // combined mean rises. Assert a sane, finite range instead.
     assert!(
-        corr_mean < orig_mean,
-        "Rayleigh should reduce ({corr_mean:.2} < {orig_mean:.2})"
+        corr_mean.is_finite() && corr_mean > 0.0 && corr_mean < orig_mean * 4.0,
+        "combined correction in a sane range ({corr_mean:.2} vs raw {orig_mean:.2})"
     );
     eprintln!("  B02: {orig_mean:.2} → {corr_mean:.2}");
 
-    // ── Step 3: B04 (NIR) correct, then hybrid green at 1 km ─────────────
+    // ── Step 4: B04 (NIR) correct, then hybrid green at 1 km ─────────────
+    // B04 (0.86 µm) is outside the Rayleigh LUT range (400–800 nm), so its
+    // correction is the sunz-only path; the red band is irrelevant there.
     eprintln!("--- B04 + hybrid green (1 km) ---");
-    let d04_corr = correct_band(take_dataset(&mut scene, "B04"), t, 860.0, max_sza);
+    let d04_corr = correct_band(
+        take_dataset(&mut scene, "B04"),
+        RedBandSource::None,
+        t,
+        860.0,
+        max_sza,
+    );
     let hybrid = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
         .expect("blender")
         .compose_owned(vec![d02_corr, d04_corr])
         .expect("hybrid");
     assert!(hybrid.array().is_some());
 
-    // ── Step 4-5: B03 (red, 0.5 km) and B01 (blue, 1 km) correct ─────────
+    // ── Step 5: B03 (red, 0.5 km) and B01 (blue, 1 km) correct ───────────
     eprintln!("--- B03 (0.5 km) + B01: correct ---");
-    let d03_corr = correct_band(take_dataset(&mut scene, "B03"), t, 640.0, max_sza);
-    let d01_corr = correct_band(take_dataset(&mut scene, "B01"), t, 470.0, max_sza);
+    // B03's own red is its sunz-corrected self (Satpy behavior); B01 uses the
+    // 1 km resampled B03-sunz red.
+    let d03_corr = correct_band(
+        b03_raw,
+        RedBandSource::SunZenithCorrectedVis,
+        t,
+        640.0,
+        max_sza,
+    );
+    let d01_corr = correct_band(
+        take_dataset(&mut scene, "B01"),
+        RedBandSource::Dataset(&b03_red_1km),
+        t,
+        470.0,
+        max_sza,
+    );
     assert!(scene.is_empty(), "all bands taken out for processing");
 
     // ── Step 6: SelfSharpenedRgb(R_05, G_1km, B_1km) → 0.5 km RGB ────────
@@ -322,6 +422,103 @@ fn true_color_reproduction() {
     eprintln!("--- cira_stretch + save ---");
     let u8_img = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8 image");
     drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
+
+    // ── Step 8: edge-contrast regression assertions ──────────────────────
+    // The exact geos inverse (curved-Earth) must brighten the limb regions
+    // through the sun-zenith/Rayleigh corrections instead of leaving them
+    // flat-dark (pre-fix bottom limb mean ~50, left-limb std ~19). The disk
+    // center must be unchanged.
+    eprintln!("--- edge contrast verification ---");
+    {
+        let (h, w) = u8_img.shape();
+        let pixels = u8_img.pixels();
+
+        // Disk bounding box over pixels with any content (mean > 5).
+        let mut y_min = usize::MAX;
+        let mut y_max = 0usize;
+        let mut x_min = usize::MAX;
+        let mut x_max = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 3;
+                if (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3 > 5 {
+                    y_min = y_min.min(y);
+                    y_max = y_max.max(y);
+                    x_min = x_min.min(x);
+                    x_max = x_max.max(x);
+                }
+            }
+        }
+        let cy = (y_max + y_min) / 2;
+        let cx = (x_max + x_min) / 2;
+        eprintln!("  disk bbox y {y_min}..{y_max}, x {x_min}..{x_max}, center ({cy},{cx})");
+
+        let region_stats = |y0: usize, y1: usize, x0: usize, x1: usize| {
+            // (mean per band, std per band) over pixels with content.
+            let mut sums = [0.0f64; 3];
+            let mut sumsq = [0.0f64; 3];
+            let mut count = 0u64;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 3;
+                    if (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3 <= 5 {
+                        continue;
+                    }
+                    count += 1;
+                    for b in 0..3 {
+                        let v = f64::from(pixels[i + b]);
+                        sums[b] += v;
+                        sumsq[b] += v * v;
+                    }
+                }
+            }
+            let n = count as f64;
+            let mean: Vec<f64> = sums.iter().map(|s| s / n).collect();
+            let std: Vec<f64> = (0..3)
+                .map(|b| (sumsq[b] / n - mean[b] * mean[b]).max(0.0).sqrt())
+                .collect();
+            (mean, std)
+        };
+
+        let (c_mean, c_std) = region_stats(cy - 500, cy + 500, cx - 500, cx + 500);
+        let (t_mean, t_std) = region_stats(y_min, y_min + 300, cx - 500, cx + 500);
+        let (b_mean, b_std) = region_stats(y_max - 300, y_max, cx - 500, cx + 500);
+        let (l_mean, l_std) = region_stats(cy - 500, cy + 500, x_min, x_min + 300);
+
+        eprintln!("  center   mean={c_mean:?} std={c_std:?}");
+        eprintln!("  top      mean={t_mean:?} std={t_std:?}");
+        eprintln!("  bottom   mean={b_mean:?} std={b_std:?}");
+        eprintln!("  left     mean={l_mean:?} std={l_std:?}");
+
+        // Center contrast is unchanged by the geometry fix.
+        assert!(
+            c_mean.iter().all(|m| (90.0..140.0).contains(m)),
+            "center means in the expected band: {c_mean:?}"
+        );
+        assert!(
+            c_std.iter().all(|s| *s > 35.0),
+            "center contrast preserved: {c_std:?}"
+        );
+        // The dark flat bottom limb (mean ~50 pre-fix) must be brightened.
+        assert!(
+            b_mean.iter().all(|m| *m > 120.0),
+            "bottom limb brightened by the curved-Earth sunz correction: {b_mean:?}"
+        );
+        // The left limb must be bright AND retain structure (std > 25).
+        assert!(
+            l_mean.iter().all(|m| *m > 120.0),
+            "left limb brightened: {l_mean:?}"
+        );
+        assert!(
+            l_std[0] > 25.0,
+            "left limb contrast recovered (was ~19 pre-fix): {l_std:?}"
+        );
+        assert!(
+            t_std.iter().all(|s| *s > 20.0),
+            "top limb contrast: {t_std:?}"
+        );
+    }
+
     let png = out.join("true_color_05km.png");
     SimpleImageWriter::default()
         .save_image(&u8_img, &png)

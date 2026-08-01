@@ -19,7 +19,9 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use rusty_sat_modifiers::{RayleighCorrector, RayleighConfig, rayleigh_correct};
+//! use rusty_sat_modifiers::{
+//!     rayleigh_correct, RayleighConfig, RayleighCorrector, RedBandSource,
+//! };
 //! use rusty_sat_modifiers::astronomy::UtcInstant;
 //!
 //! let config = RayleighConfig::default();
@@ -29,7 +31,7 @@
 //! let corrected = rayleigh_correct(
 //!     corrector,
 //!     vis_dataset,
-//!     Some(&red_dataset),
+//!     RedBandSource::Dataset(&red_dataset),
 //!     UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0),
 //! )?;
 //! ```
@@ -47,6 +49,6 @@ pub use geos::GeosProjection;
 pub use orbital::{get_observer_look, satellite_angles_grid};
 pub use rayleigh::{
     rayleigh_correct, rayleigh_correct_with_sun_zenith, AerosolType, Atmosphere, RayleighConfig,
-    RayleighCorrector,
+    RayleighCorrector, RedBandSource,
 };
 pub use sun_zenith::{sun_zenith_correct, sun_zenith_correct_with, SunZenithCorrector};

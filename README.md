@@ -188,10 +188,12 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
 
 ### Modifiers
 
+- **Sun-Zenith Correction** — TOA reflectance normalization with Satpy-style 88°→95° gradient falloff
 - **Rayleigh Correction** — atmospheric scattering removal
   - Pyspectral-compatible LUT loading
-  - Parallel pixel interpolation
-  - Cloud relaxation and high-zenith handling
+  - Parallel pixel interpolation with LUT-boundary secant clamping
+  - Cloud relaxation via the red band (Satpy `rayleigh_corrected` semantics) and high-zenith handling
+- **Exact geos inverse** — curved-Earth ray–ellipsoid geolocation for full-disk limb-correct angles
 
 ### Writers
 

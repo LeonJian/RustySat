@@ -285,10 +285,10 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 
 **Modules**:
 - `astronomy` — solar position math (GMST, sun RA/DEC, cos_zen, alt/az) ported from pyorbital
-- `geos` — geostationary projection inverse (x/y meters → lon/lat degrees)
+- `geos` — geostationary projection inverse (x/y meters → lon/lat degrees) via exact ray–ellipsoid intersection (PROJ `geos` / pyresample `get_lonlats` parity; replaces the old flat-plane approximation that was off by ~57° at the disk limb)
 - `orbital` — satellite look angles (azimuth, elevation, zenith) ported from pyorbital
-- `angles` — combined angle computation for dataset grids
-- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate)
+- `angles` — combined angle computation for dataset grids (exact geos inverse + pyorbital solar/satellite angles; strip-parallel per-pixel)
+- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate), pyspectral-parity red-band cloud relaxation via `RedBandSource` (`None` / `Dataset` / `SunZenithCorrectedVis`), LUT-boundary angle clipping, correction clip to [0,100]
 
 **Design Patterns**:
 - `UtcInstant` for time representation (dependency-free)

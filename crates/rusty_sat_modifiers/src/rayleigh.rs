@@ -18,9 +18,7 @@ use rustyspectral::rayleigh::{
 };
 use std::path::{Path, PathBuf};
 
-use crate::angles::{
-    precompute_columns, precompute_rows, satellite_single_precomputed, solar_single_precomputed,
-};
+use crate::angles::{sat_angles_from_lonlat, sun_angles_from_lonlat, AngleParams, AngleSet};
 use crate::astronomy::{gmst, observer_position, sun_ra_dec, UtcInstant};
 use rusty_sat_core::{
     AnyDataArray, Coordinate, DataArray, DataId, Dataset, MetadataValue, Result, RustySatError,
@@ -205,8 +203,8 @@ impl RayleighCorrector {
     pub fn apply_correction(
         self,
         vis_dataset: Dataset,
-        red_dataset: Option<&Dataset>,
-        params: crate::angles::AngleParams,
+        red: RedBandSource,
+        params: AngleParams,
     ) -> Result<Dataset> {
         let config = self.config;
         let lut = self.lut_data;
@@ -221,17 +219,13 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_values = red_values_from_red_dataset(red_dataset, height * width)?;
+        let red_relax = red_relax_from_source(red, height * width, false)?;
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
         let sat_alt_km = params.sat_alt / 1000.0;
         let (sat_x, sat_y, sat_z) =
             observer_position(params.utc, params.sat_lon, params.sat_lat, sat_alt_km);
-
-        let h_inv = 1.0 / params.geos.perspective_point_height;
-        let lon_0_rad = params.geos.longitude_of_projection_origin.to_radians();
-        let column_data = precompute_columns(&params.x_coords, h_inv, lon_0_rad, gmst_val, sun_ra);
 
         let reduce = config.reduce_strength > 0.0;
         let (zenith_lo, zenith_hi) = if config.reduce_lim_low > config.reduce_lim_high {
@@ -256,14 +250,18 @@ impl RayleighCorrector {
             }
         };
 
+        // pyspectral clips the sun/sat zenith ANGLE to the LUT maximum
+        // secant before computing 1/cos; out-of-range pixels evaluate exactly
+        // at the LUT boundary (no extrapolation past the last grid point).
+        let sunz_max = lut.sunz_coord[lut.sunz_coord.len() - 1];
+        let satz_max = lut.satz_coord[lut.satz_coord.len() - 1];
+
         const STRIP_HEIGHT: usize = 64;
 
         for y0 in (0..height).step_by(STRIP_HEIGHT) {
             let y1 = (y0 + STRIP_HEIGHT).min(height);
             let strip_n = (y1 - y0) * width;
-
-            let tan_theta_y_row = precompute_rows(&params.y_coords, y0, y1, h_inv);
-            let red = red_values.as_ref();
+            let red = &red_relax;
             let offset = y0 * width;
 
             use rayon::prelude::*;
@@ -278,21 +276,31 @@ impl RayleighCorrector {
                         if !out.is_finite() {
                             continue;
                         }
-                        let col_pre = &column_data[col];
+                        let x_pos = params.x_coords[col];
+                        let y_pos = params.y_coords[y0 + row];
 
-                        let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
+                        // Exact geos inverse: space pixels become NaN.
+                        let Some((lon, lat)) = params.geos.inverse_rad(x_pos, y_pos) else {
+                            *out = f32::NAN;
+                            continue;
+                        };
 
-                        let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+                        let (sunz, suna) =
+                            sun_angles_from_lonlat(lon, lat, sun_ra, sun_dec, gmst_val);
+                        if !sunz.is_finite() {
+                            *out = f32::NAN;
+                            continue;
+                        }
                         let (satz, sata) =
-                            satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
+                            sat_angles_from_lonlat(lon, lat, sat_x, sat_y, sat_z, gmst_val);
 
-                        let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
+                        let azidiff = AngleSet::relative_azimuth_single(sata, suna);
                         if !azidiff.is_finite() {
                             continue;
                         }
 
-                        let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
-                        let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
+                        let sunzsec = secant_clamped(sunz, sunz_max);
+                        let satzsec = secant_clamped(satz, satz_max);
 
                         let mut correction = trilinear_interpolate(
                             grid_3d,
@@ -304,14 +312,17 @@ impl RayleighCorrector {
                             &lut.satz_coord,
                         );
 
-                        if let Some(red_vals) = red {
-                            let r = f64::from(red_vals[offset + row * width + col]);
-                            if r.is_finite() && r >= 20.0 {
-                                correction *= 1.0 - (r - 20.0) / 80.0;
-                            }
+                        if let RedRelax::Values(vals) = red {
+                            let r = f64::from(vals[offset + row * width + col]);
+                            correction = relax_correction(correction, r);
                         }
 
-                        if reduce && sunz.is_finite() && zenith_span > 0.0 {
+                        // pyspectral clips the correction to [0, 100] after
+                        // the red relaxation, then Satpy applies the optional
+                        // high-zenith reduction.
+                        correction = correction.clamp(0.0, 100.0);
+
+                        if reduce && zenith_span > 0.0 {
                             let t = if sunz < zenith_lo {
                                 0.0
                             } else {
@@ -321,8 +332,9 @@ impl RayleighCorrector {
                             correction *= factor;
                         }
 
-                        let corrected = (f64::from(*out) - correction).max(0.0);
-                        *out = corrected as f32;
+                        // Satpy: `proj = vis - refl_cor_band` (no clamping of
+                        // the result; negative values clip to black downstream).
+                        *out = (f64::from(*out) - correction) as f32;
                     }
                 });
         }
@@ -345,7 +357,7 @@ impl RayleighCorrector {
     ///
     /// ```text
     /// refl *= sza_factor      // sun zenith (88°→max_sza gradient falloff)
-    /// refl  = max(0, refl - LUT_correction)                // Rayleigh
+    /// refl  -= LUT_correction // Rayleigh (relaxed by the red band, clipped)
     /// ```
     ///
     /// This avoids computing solar/satellite angles twice when both
@@ -353,8 +365,8 @@ impl RayleighCorrector {
     pub fn apply_correction_with_sun_zenith(
         self,
         vis_dataset: Dataset,
-        red_dataset: Option<&Dataset>,
-        params: crate::angles::AngleParams,
+        red: RedBandSource,
+        params: AngleParams,
         max_sza: f64,
     ) -> Result<Dataset> {
         let max_sza_rad = max_sza.to_radians();
@@ -376,21 +388,13 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_values = red_values_from_red_dataset(red_dataset, height * width)?;
+        let red_relax = red_relax_from_source(red, height * width, true)?;
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
         let sat_alt_km = params.sat_alt / 1000.0;
         let (sat_x, sat_y, sat_z) =
             observer_position(params.utc, params.sat_lon, params.sat_lat, sat_alt_km);
-
-        let h = params.geos.perspective_point_height;
-        let h_inv = 1.0 / h;
-        let lon_0_rad = params.geos.longitude_of_projection_origin.to_radians();
-        let column_data = precompute_columns(&params.x_coords, h_inv, lon_0_rad, gmst_val, sun_ra);
-
-        let max_angle = (params.geos.semi_major_axis / params.geos.satellite_radius()).asin();
-        let max_angle_sq = max_angle * max_angle;
 
         let reduce = config.reduce_strength > 0.0;
         let (zenith_lo, zenith_hi) = if config.reduce_lim_low > config.reduce_lim_high {
@@ -415,14 +419,18 @@ impl RayleighCorrector {
             }
         };
 
+        // pyspectral clips the sun/sat zenith ANGLE to the LUT maximum
+        // secant before computing 1/cos; out-of-range pixels evaluate exactly
+        // at the LUT boundary (no extrapolation past the last grid point).
+        let sunz_max = lut.sunz_coord[lut.sunz_coord.len() - 1];
+        let satz_max = lut.satz_coord[lut.satz_coord.len() - 1];
+
         const STRIP_HEIGHT: usize = 64;
 
         for y0 in (0..height).step_by(STRIP_HEIGHT) {
             let y1 = (y0 + STRIP_HEIGHT).min(height);
             let strip_n = (y1 - y0) * width;
-
-            let tan_theta_y_row = precompute_rows(&params.y_coords, y0, y1, h_inv);
-            let red = red_values.as_ref();
+            let red = &red_relax;
             let offset = y0 * width;
 
             use rayon::prelude::*;
@@ -437,19 +445,17 @@ impl RayleighCorrector {
                         if !out.is_finite() {
                             continue;
                         }
-                        let col_pre = &column_data[col];
-
                         let x_pos = params.x_coords[col];
                         let y_pos = params.y_coords[y0 + row];
-                        let rsq = (x_pos * x_pos + y_pos * y_pos) / (h * h);
-                        if rsq > max_angle_sq {
+
+                        // Exact geos inverse: space pixels become NaN.
+                        let Some((lon, lat)) = params.geos.inverse_rad(x_pos, y_pos) else {
                             *out = f32::NAN;
                             continue;
-                        }
+                        };
 
-                        let lat_rad = (tan_theta_y_row[row] * col_pre.cos_theta_x).atan();
-
-                        let (sunz, suna) = solar_single_precomputed(lat_rad, sun_dec, col_pre);
+                        let (sunz, suna) =
+                            sun_angles_from_lonlat(lon, lat, sun_ra, sun_dec, gmst_val);
                         if !sunz.is_finite() {
                             *out = f32::NAN;
                             continue;
@@ -464,15 +470,15 @@ impl RayleighCorrector {
                         );
 
                         let (satz, sata) =
-                            satellite_single_precomputed(lat_rad, col_pre, sat_x, sat_y, sat_z);
+                            sat_angles_from_lonlat(lon, lat, sat_x, sat_y, sat_z, gmst_val);
 
-                        let azidiff = crate::angles::AngleSet::relative_azimuth_single(sata, suna);
+                        let azidiff = AngleSet::relative_azimuth_single(sata, suna);
                         if !azidiff.is_finite() {
                             continue;
                         }
 
-                        let sunzsec = 1.0 / sunz.to_radians().cos().max(0.0001);
-                        let satzsec = 1.0 / satz.to_radians().cos().max(0.0001);
+                        let sunzsec = secant_clamped(sunz, sunz_max);
+                        let satzsec = secant_clamped(satz, satz_max);
 
                         let mut correction = trilinear_interpolate(
                             grid_3d,
@@ -484,14 +490,26 @@ impl RayleighCorrector {
                             &lut.satz_coord,
                         );
 
-                        if let Some(red_vals) = red {
-                            let r = f64::from(red_vals[offset + row * width + col]);
-                            if r.is_finite() && r >= 20.0 {
-                                correction *= 1.0 - (r - 20.0) / 80.0;
+                        match red {
+                            RedRelax::Values(vals) => {
+                                let r = f64::from(vals[offset + row * width + col]);
+                                correction = relax_correction(correction, r);
                             }
+                            RedRelax::InPlaceVis => {
+                                // Satpy: the red prerequisite is the
+                                // sun-zenith-corrected band itself, which is
+                                // exactly the in-place value at this point.
+                                correction = relax_correction(correction, f64::from(*out));
+                            }
+                            RedRelax::None => {}
                         }
 
-                        if reduce && sunz.is_finite() && zenith_span > 0.0 {
+                        // pyspectral clips the correction to [0, 100] after
+                        // the red relaxation, then Satpy applies the optional
+                        // high-zenith reduction.
+                        correction = correction.clamp(0.0, 100.0);
+
+                        if reduce && zenith_span > 0.0 {
                             let t = if sunz < zenith_lo {
                                 0.0
                             } else {
@@ -501,8 +519,9 @@ impl RayleighCorrector {
                             correction *= factor;
                         }
 
-                        let corrected = (f64::from(*out) - correction).max(0.0);
-                        *out = corrected as f32;
+                        // Satpy: `proj = vis - refl_cor_band` (no clamping of
+                        // the result; negative values clip to black downstream).
+                        *out = (f64::from(*out) - correction) as f32;
                     }
                 });
         }
@@ -617,7 +636,97 @@ pub(crate) fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
     }
 }
 
-/// Extract the red band values as f32, or `None` when no red dataset is given.
+/// Red-band source for the Rayleigh cloud relaxation (Satpy
+/// `PSPRayleighReflectance` red prerequisite).
+///
+/// Satpy's `rayleigh_corrected` modifier relaxes the Rayleigh correction
+/// where the red band (sun-zenith-corrected B03 for AHI) is bright:
+/// `correction *= 1 − (red − 20)/80` for `red ≥ 20`, per pyspectral
+/// `_relax_rayleigh_refl_correction_where_cloudy`. The formula is applied
+/// without clipping — the factor goes negative for `red > 100` — matching
+/// pyspectral and rustyspectral.
+///
+/// The red band must be on the same grid as the visible band (Satpy resamples
+/// the red prerequisite to the visible band's area before correction).
+#[derive(Debug, Clone, Copy)]
+pub enum RedBandSource<'a> {
+    /// No red-band relaxation (full Rayleigh correction).
+    None,
+    /// Relax using an explicit red dataset on the same y/x grid as the
+    /// visible band. For AHI this is the sun-zenith-corrected B03 (resampled
+    /// to the visible band's resolution when they differ).
+    Dataset(&'a Dataset),
+    /// Use the sun-zenith-corrected visible band itself as the red band.
+    /// This is Satpy's behavior when the red prerequisite is the band being
+    /// corrected (e.g. B03 for `rayleigh_corrected`). Only valid in the
+    /// combined sun-zenith + Rayleigh path (`rayleigh_correct_with_sun_zenith`
+    /// / `RayleighCorrector::apply_correction_with_sun_zenith`), where it
+    /// reads the in-place post-sun-zenith values with no extra memory.
+    SunZenithCorrectedVis,
+}
+
+/// Prepared red-band relaxation source for the strip loops.
+#[derive(Debug)]
+enum RedRelax {
+    /// No relaxation.
+    None,
+    /// Explicit red values (f32 copy of the red dataset).
+    Values(Vec<f32>),
+    /// Combined path: read the sun-zenith-corrected in-place visible value.
+    InPlaceVis,
+}
+
+/// Extract red values from a `RedBandSource` for the strip loops.
+///
+/// `allow_in_place_vis` is `true` only in the combined sun-zenith + Rayleigh
+/// path, where `SunZenithCorrectedVis` can read the corrected in-place
+/// values. The explicit dataset path validates the array length to avoid an
+/// indexed panic in the strip loop.
+fn red_relax_from_source(
+    red: RedBandSource<'_>,
+    visible_count: usize,
+    allow_in_place: bool,
+) -> Result<RedRelax> {
+    match red {
+        RedBandSource::None => Ok(RedRelax::None),
+        RedBandSource::SunZenithCorrectedVis if allow_in_place => Ok(RedRelax::InPlaceVis),
+        RedBandSource::SunZenithCorrectedVis => Err(RustySatError::unsupported(
+            "RedBandSource::SunZenithCorrectedVis requires the combined \
+             sun-zenith + Rayleigh correction path",
+        )),
+        RedBandSource::Dataset(ds) => Ok(RedRelax::Values(red_values_from_dataset(
+            ds,
+            visible_count,
+        )?)),
+    }
+}
+
+/// pyspectral `_relax_rayleigh_refl_correction_where_cloudy`: for `red ≥ 20`
+/// the correction is scaled by `1 − (red − 20)/80`. No clipping is applied —
+/// the factor goes negative for `red > 100`, matching pyspectral and
+/// rustyspectral. Non-finite red leaves the correction unchanged.
+#[inline]
+fn relax_correction(correction: f64, red: f64) -> f64 {
+    if red.is_finite() && red >= 20.0 {
+        correction * (1.0 - (red - 20.0) / 80.0)
+    } else {
+        correction
+    }
+}
+
+/// Clamp a zenith angle to the LUT range and return its secant, matching
+/// pyspectral `_clip_angles_inside_coordinate_range`: the ANGLE is clipped to
+/// `acos(1/max_secant)` before computing `1/cos`, so out-of-range (limb/night)
+/// pixels evaluate exactly at the LUT boundary instead of extrapolating past
+/// the last grid point.
+#[inline]
+fn secant_clamped(zenith_deg: f64, max_secant: f64) -> f64 {
+    let clip_angle = (1.0 / max_secant).acos().to_degrees();
+    let z = zenith_deg.clamp(0.0, clip_angle);
+    1.0 / z.to_radians().cos()
+}
+
+/// Extract the red band values as f32.
 ///
 /// The red band is stored as f32 (narrowing f64 sources) to halve the copy
 /// for 0.5 km red bands. A pixel whose value sits within ~1e-6 of the
@@ -625,14 +734,8 @@ pub(crate) fn into_vis_f32(array: AnyDataArray) -> Vec<f32> {
 /// full-f64 copy, which is accepted for the memory win. A dataset without an
 /// array, or with fewer values than the visible band, is rejected instead of
 /// panicking on an indexed access in the strip loop.
-fn red_values_from_red_dataset(
-    red_dataset: Option<&Dataset>,
-    visible_count: usize,
-) -> Result<Option<Vec<f32>>> {
-    let Some(ds) = red_dataset else {
-        return Ok(None);
-    };
-    let Some(array) = ds.array() else {
+fn red_values_from_dataset(red_dataset: &Dataset, visible_count: usize) -> Result<Vec<f32>> {
+    let Some(array) = red_dataset.array() else {
         return Err(RustySatError::invalid_input(
             "red dataset has no array data for Rayleigh correction",
         ));
@@ -643,21 +746,20 @@ fn red_values_from_red_dataset(
             array.len()
         )));
     }
-    let values = match array {
+    Ok(match array {
         AnyDataArray::F32(a) => a.values().to_vec(),
         AnyDataArray::F64(a) => a.values().iter().map(|v| *v as f32).collect(),
         AnyDataArray::U8(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
         AnyDataArray::U16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
         AnyDataArray::I16(a) => a.values().iter().map(|v| f32::from(*v)).collect(),
-    };
-    Ok(Some(values))
+    })
 }
 
 /// Compute angles and apply Rayleigh correction in one call.
 pub fn rayleigh_correct(
     corrector: RayleighCorrector,
     vis_dataset: Dataset,
-    red_dataset: Option<&Dataset>,
+    red: RedBandSource,
     utc: UtcInstant,
 ) -> Result<Dataset> {
     use crate::angles::{extract_xy_coords, AngleParams};
@@ -674,7 +776,7 @@ pub fn rayleigh_correct(
     let (x_coords, y_coords) = extract_xy_coords(coords)?;
     let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
 
-    corrector.apply_correction(vis_dataset, red_dataset, params)
+    corrector.apply_correction(vis_dataset, red, params)
 }
 
 /// Compute angles and apply both sun zenith and Rayleigh correction
@@ -685,7 +787,7 @@ pub fn rayleigh_correct(
 pub fn rayleigh_correct_with_sun_zenith(
     corrector: RayleighCorrector,
     vis_dataset: Dataset,
-    red_dataset: Option<&Dataset>,
+    red: RedBandSource,
     utc: UtcInstant,
     max_sza: f64,
 ) -> Result<Dataset> {
@@ -703,7 +805,7 @@ pub fn rayleigh_correct_with_sun_zenith(
     let (x_coords, y_coords) = extract_xy_coords(coords)?;
     let params = AngleParams::from_dataset_area(area_attr, x_coords, y_coords, utc)?;
 
-    corrector.apply_correction_with_sun_zenith(vis_dataset, red_dataset, params, max_sza)
+    corrector.apply_correction_with_sun_zenith(vis_dataset, red, params, max_sza)
 }
 
 #[cfg(test)]
@@ -805,7 +907,7 @@ mod tests {
         drop(tmp);
         match RayleighCorrector::new(&p, 1.0) {
             Ok(c) => {
-                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 95.0);
+                let r = rayleigh_correct_with_sun_zenith(c, ds, RedBandSource::None, utc, 95.0);
                 assert!(r.is_err());
             }
             Err(_) => { /* can't test — no LUT available */ }
@@ -822,7 +924,7 @@ mod tests {
         drop(tmp);
         match RayleighCorrector::new(&p, 1.0) {
             Ok(c) => {
-                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 95.0);
+                let r = rayleigh_correct_with_sun_zenith(c, ds, RedBandSource::None, utc, 95.0);
                 assert!(r.is_err());
             }
             Err(_) => { /* can't test — no LUT available */ }
@@ -847,7 +949,7 @@ mod tests {
         drop(tmp);
         match RayleighCorrector::new(&p, 1.0) {
             Ok(c) => {
-                let r = rayleigh_correct_with_sun_zenith(c, ds, None, utc, 95.0);
+                let r = rayleigh_correct_with_sun_zenith(c, ds, RedBandSource::None, utc, 95.0);
                 // With grid_3d=None (wavelength out of range), this is a
                 // no-op pass-through but should still produce a Dataset.
                 assert!(r.is_ok());
@@ -863,14 +965,18 @@ mod tests {
     #[test]
     fn red_values_reject_missing_or_short_arrays() {
         let visible_count = 9;
-        // No red dataset -> None.
-        assert!(red_values_from_red_dataset(None, visible_count)
-            .expect("no red is fine")
-            .is_none());
+        // No red source -> no relaxation.
+        assert!(matches!(
+            red_relax_from_source(RedBandSource::None, visible_count, true)
+                .expect("no red is fine"),
+            RedRelax::None
+        ));
         // Dataset without an array -> error, not an empty-Vec indexed access.
         let no_array =
             rusty_sat_core::Dataset::new(rusty_sat_core::DataId::new("red").expect("id"));
-        assert!(red_values_from_red_dataset(Some(&no_array), visible_count).is_err());
+        assert!(
+            red_relax_from_source(RedBandSource::Dataset(&no_array), visible_count, true).is_err()
+        );
         // Shorter than the visible band -> error with a clear message.
         let short = rusty_sat_core::Dataset::new(rusty_sat_core::DataId::new("red").expect("id"))
             .with_array(
@@ -881,7 +987,7 @@ mod tests {
                 )
                 .expect("array"),
             );
-        let err = red_values_from_red_dataset(Some(&short), visible_count)
+        let err = red_relax_from_source(RedBandSource::Dataset(&short), visible_count, true)
             .expect_err("short red array must fail");
         assert!(err.to_string().contains("smaller than the visible band"));
         // Matching length -> values.
@@ -894,10 +1000,62 @@ mod tests {
                 )
                 .expect("array"),
             );
-        let values = red_values_from_red_dataset(Some(&ok), visible_count)
-            .expect("valid red")
-            .expect("values");
+        let RedRelax::Values(values) =
+            red_relax_from_source(RedBandSource::Dataset(&ok), visible_count, true)
+                .expect("valid red")
+        else {
+            panic!("expected values");
+        };
         assert_eq!(values.len(), 9);
+    }
+
+    #[test]
+    fn in_place_red_requires_combined_path() {
+        // SunZenithCorrectedVis is allowed in the combined path ...
+        assert!(matches!(
+            red_relax_from_source(RedBandSource::SunZenithCorrectedVis, 9, true)
+                .expect("combined path allows in-place red"),
+            RedRelax::InPlaceVis
+        ));
+        // ... and rejected in the plain Rayleigh path.
+        let err = red_relax_from_source(RedBandSource::SunZenithCorrectedVis, 9, false)
+            .expect_err("plain path must reject in-place red");
+        assert!(err.to_string().contains("combined"));
+    }
+
+    #[test]
+    fn relax_correction_matches_pyspectral_where() {
+        // red < 20: correction unchanged.
+        assert_eq!(relax_correction(50.0, 0.0), 50.0);
+        assert_eq!(relax_correction(50.0, 19.9), 50.0);
+        // red == 20: factor 1.0.
+        assert!((relax_correction(50.0, 20.0) - 50.0).abs() < 1e-12);
+        // Linear scaling between 20 and 100: factor (1 - (red-20)/80).
+        assert!((relax_correction(80.0, 60.0) - 80.0 * (1.0 - 40.0 / 80.0)).abs() < 1e-12);
+        // red == 100: factor 0.
+        assert_eq!(relax_correction(50.0, 100.0), 0.0);
+        // red > 100: NO clipping — the factor goes negative (pyspectral parity).
+        assert!((relax_correction(50.0, 140.0) - 50.0 * (1.0 - 120.0 / 80.0)).abs() < 1e-12);
+        assert!(relax_correction(50.0, 140.0) < 0.0);
+        // Non-finite red leaves the correction unchanged.
+        assert_eq!(relax_correction(50.0, f64::NAN), 50.0);
+    }
+
+    #[test]
+    fn secant_clamped_matches_pyspectral_angle_clip() {
+        // Within range: plain 1/cos.
+        assert!((secant_clamped(60.0, 24.75) - 1.0 / 60.0_f64.to_radians().cos()).abs() < 1e-12);
+        // At the LUT boundary: the angle is clipped to acos(1/max), so the
+        // secant is exactly the axis maximum (no extrapolation).
+        assert!((secant_clamped(84.54, 24.75) - 1.0 / 84.54_f64.to_radians().cos()).abs() < 1e-12);
+        assert!((secant_clamped(89.0, 24.75) - 24.75).abs() < 1e-12);
+        assert!(
+            (secant_clamped(137.0, 24.75) - 24.75).abs() < 1e-12,
+            "night pixels clip too"
+        );
+        // Satellite secant axis: max 3.0 -> clip at ~70.5°.
+        assert!((secant_clamped(81.0, 3.0) - 3.0).abs() < 1e-12);
+        assert!((secant_clamped(85.0, 3.0) - 3.0).abs() < 1e-12);
     }
 
     fn combined_area_attr() -> MetadataValue {
