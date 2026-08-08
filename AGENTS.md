@@ -300,6 +300,7 @@ Highest priority. Complete these before major reader/composite/writer expansion.
   - `[~]` I5-next: Execute supported enhancement operations against `FloatImage` and integrate default/sensor enhancement lookup.
     - `[x]` I5-next-a: Add safe allow-listed enhancement execution for parsed `stretch`/`gamma`/`invert` operations against `FloatImage<f32/f64>`; unsupported Python-tag methods are rejected in strict mode.
 - `[ ]` I6: Instrument enhancements for ABI, AHI, VIIRS, MIMIC, and enhancement YAML data.
+  - `[x]` I6-m9d1: Add the JMA True Color Reproduction enhancement — the per-pixel color conversion matrix (Satpy `enhancements/ahi.py`, Himawari-8/9) plus the trollimage `stretch_logarithmic` log stretch (min 3 / max 150, factor 100, base e) from Satpy's `true_color_reproduction_color_stretch` — with the fused `finalize_rgb_jma_u8` finalizer, wired into the JMA `true_color_reproduction` integration test.
 - `[ ]` I7: Convolution filters and overlays.
 
 ### C: Composites
@@ -668,7 +669,7 @@ After every implementation step that adds, removes, or changes public API, featu
 
 | Can | Cannot |
 |-----|--------|
-| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; construct RGB images from compositor-style band-major `[bands,y,x]` datasets with per-channel crude stretch and pixel-level mask collapse; apply in-place crude stretch, Trollimage-style gamma/invert, and mask-aware RGBA finalization with rayon-parallel per-pixel enhancement ops | Broader XRImage parity: richer band metadata, broader alpha/finalize policy, colorize, mode conversion, or save helpers |
+| Store owned u8 `Image`, owned u16 `Image16`, and generic owned `FloatImage<f32/f64>` pixels for Luma/RGB/RGBA; construct luma images from 2D runtime-typed datasets; construct RGB images from compositor-style band-major `[bands,y,x]` datasets with per-channel crude stretch and pixel-level mask collapse; apply in-place crude stretch, Trollimage-style gamma/invert, and mask-aware RGBA finalization with rayon-parallel per-pixel enhancement ops; finalize band-major RGB straight to u8 with the fused CIRA stretch or the JMA True Color Reproduction enhancement (per-pixel color conversion matrix + log stretch, `finalize_rgb_jma_u8`) | Broader XRImage parity: richer band metadata, broader alpha/finalize policy, colorize, mode conversion, or save helpers |
 
 ### rusty_sat_writers
 

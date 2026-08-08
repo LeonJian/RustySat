@@ -5,19 +5,23 @@
 //!   SelfSharpenedRgb up-sample to 0.5 km → cira stretch → 8-bit PNG.
 //!
 //! Three outputs:
-//!   - `true_color_05km.png` — standard Satpy `true_color` (hybrid green).
-//!     The sunlit limb is bright/desaturated there by design: the
-//!     sun-zenith-corrected B03 (the red-relaxation band) exceeds 100%
+//!   - `true_color_05km.png` — standard Satpy `true_color` (hybrid green,
+//!     CIRA stretch). The sunlit limb is bright/desaturated there by design:
+//!     the sun-zenith-corrected B03 (the red-relaxation band) exceeds 100%
 //!     reflectance at SZA ≳ 86°, which relaxes the Rayleigh correction to zero
 //!     (pyspectral `_relax_rayleigh_refl_correction_where_cloudy`), so the
 //!     bands stay at their amplified values and the CIRA stretch compresses
 //!     them to near-white. This matches pyspectral/Satpy exactly.
 //!   - `true_color_reproduction_05km.png` — JMA `true_color_reproduction_corr`
-//!     (reproduced green: 0.6321 B02 + 0.2928 B03 + 0.0751 B04).
+//!     (reproduced green: 0.6321 B02 + 0.2928 B03 + 0.0751 B04) enhanced with
+//!     Satpy's `true_color_reproduction_color_stretch` chain: the per-pixel
+//!     JMA color conversion matrix (Satpy `enhancements/ahi.py`) followed by a
+//!     log stretch (min 3, max 150).
 //!   - `true_color_reproduction_jma_05km.png` — the full JMA
 //!     `true_color_reproduction`: DayNightCompositor blend (lim_low 73°,
-//!     lim_high 85°) of the corrected and UNCORRECTED composites, which
-//!     replaces the bright gray limb with the natural uncorrected colors.
+//!     lim_high 85°) of the corrected and UNCORRECTED composites (both JMA
+//!     enhanced), which replaces the bright gray limb with the natural
+//!     uncorrected colors.
 //!
 //! Memory: f32 calibration, consuming APIs, drop intermediates promptly.
 //!
@@ -31,7 +35,7 @@
 
 use rusty_sat_composites::{SelfSharpenedRgb, SpectralBlender};
 use rusty_sat_core::{AnyDataArray, DataQuery, Dataset, MetadataValue, NumericElement, Scene};
-use rusty_sat_image::{finalize_rgb_cira_u8, Image, ImageMode};
+use rusty_sat_image::{finalize_rgb_cira_u8, finalize_rgb_jma_u8, Image, ImageMode};
 use rusty_sat_modifiers::{
     daynight_blend_weights, extract_xy_coords, rayleigh_correct_with_sun_zenith,
     sun_zenith_correct, AngleParams, Atmosphere, RayleighConfig, RayleighCorrector, RedBandSource,
@@ -565,14 +569,17 @@ fn true_color_reproduction() {
     let repro_shape = rgb_reproduction.array().expect("arr").shape().to_vec();
     assert_eq!(repro_shape, rgb.array().expect("arr").shape().to_vec());
 
-    // ── Step 7: fused cira stretch → 8-bit PNG (Satpy true_color_default) ──
-    // Memory: band-major f32 [3,y,x] (~5.8 GB) is finalized straight to
-    // interleaved u8 with the CIRA stretch applied per pixel, so the
-    // interleaved f32 FloatImage intermediate (~5.8 GB) never exists.
-    eprintln!("--- cira_stretch + save ---");
+    // ── Step 7: fused finalize → 8-bit PNG ───────────────────────────────
+    // Path A uses Satpy's `true_color_default` (CIRA stretch); the JMA TCR
+    // renders use `true_color_reproduction_color_stretch` (color conversion
+    // matrix + log stretch min 3 / max 150). Memory: band-major f32
+    // [3,y,x] (~5.8 GB) is finalized straight to interleaved u8 in one
+    // rayon-parallel pass, so the interleaved f32 FloatImage intermediate
+    // (~5.8 GB) never exists.
+    eprintln!("--- finalize + save ---");
     let u8_img = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8 image");
     drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
-    let u8_repro = finalize_rgb_cira_u8(rgb_reproduction.array().expect("arr"), 0)
+    let u8_repro = finalize_rgb_jma_u8(rgb_reproduction.array().expect("arr"), 0, "Himawari-9")
         .expect("u8 reproduction image");
     drop(rgb_reproduction); // free band-major [3,y,x] f32 (~5.8 GB)
     assert_eq!(u8_repro.shape(), u8_img.shape());
@@ -770,8 +777,8 @@ fn true_color_reproduction() {
         ])
         .expect("compose uncorr");
     assert!(scene2.is_empty(), "all raw bands consumed");
-    let u8_uncorr =
-        finalize_rgb_cira_u8(uncorr_rgb.array().expect("arr"), 0).expect("u8 uncorrected image");
+    let u8_uncorr = finalize_rgb_jma_u8(uncorr_rgb.array().expect("arr"), 0, "Himawari-9")
+        .expect("u8 uncorrected image");
     drop(uncorr_rgb);
 
     // Per-pixel day weights: 1 for SZA ≤ 73° (corrected), 0 for SZA ≥ 85°

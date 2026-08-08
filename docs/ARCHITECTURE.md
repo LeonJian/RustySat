@@ -247,6 +247,10 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 - `Image` — 8-bit output (u8 pixels) via `to_u8_image()`
 - `Image16` — 16-bit output (u16 pixels) for HDR/scientific display
 
+**Enhancement Finalizers**:
+- `finalize_rgb_cira_u8` — fused CIRA log stretch (Satpy `true_color_default`)
+- `finalize_rgb_jma_u8` — fused JMA True Color Reproduction enhancement: per-pixel color conversion matrix (Satpy `enhancements/ahi.py`, Himawari-8/9) + log stretch min 3/max 150 (Satpy `true_color_reproduction_color_stretch`)
+
 **Image Modes**:
 - `ImageMode::Luma` — 1 channel (grayscale)
 - `ImageMode::Rgb` — 3 channels

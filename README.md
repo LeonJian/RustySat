@@ -187,6 +187,7 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
 - **Auto-stretch** — percentile-based normalization
 - **Gamma/Invert** — tone curve adjustments
 - **ValidityMask** — bit-packed missing pixel tracking
+- **JMA True Color Reproduction** — per-pixel color conversion matrix + log stretch (Satpy `true_color_reproduction_color_stretch`), fused 8-bit finalizer `finalize_rgb_jma_u8`
 
 ### Modifiers
 

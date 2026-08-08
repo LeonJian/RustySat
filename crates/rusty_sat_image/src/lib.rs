@@ -325,6 +325,219 @@ fn cira_byte<U: NumericElement>(value: U, fill_value: u8) -> u8 {
     }
 }
 
+/// JMA True Color Reproduction color conversion matrix for Himawari-8.
+///
+/// Reference: `satpy/satpy/enhancements/ahi.py` —
+/// `_jma_true_color_reproduction` (Murata et al., "True Color Imagery
+/// Rendering for Himawari-8 with a Color Reproduction Approach Based on the
+/// CIE XYZ Color System").
+pub const JMA_CCM_HIMAWARI_8: [[f64; 3]; 3] = [
+    [1.1629, 0.1539, -0.2175],
+    [-0.0252, 0.8725, 0.1300],
+    [-0.0204, -0.1100, 1.0633],
+];
+
+/// JMA True Color Reproduction color conversion matrix for Himawari-9.
+pub const JMA_CCM_HIMAWARI_9: [[f64; 3]; 3] = [
+    [1.1619, 0.1542, -0.2168],
+    [-0.0271, 0.8749, 0.1295],
+    [-0.0202, -0.1103, 1.0634],
+];
+
+/// Look up the JMA True Color Reproduction color conversion matrix for a
+/// platform name (case-insensitive, accepts `himawari-8`/`himawari-9`).
+pub fn jma_ccm_for_platform(platform: &str) -> Option<[[f64; 3]; 3]> {
+    match platform.to_ascii_lowercase().as_str() {
+        "himawari-8" | "himawari8" => Some(JMA_CCM_HIMAWARI_8),
+        "himawari-9" | "himawari9" => Some(JMA_CCM_HIMAWARI_9),
+        _ => None,
+    }
+}
+
+/// JMA True Color Reproduction per-pixel color conversion:
+/// `out = ccm · (red, green, blue)`.
+///
+/// Port of Satpy `_jma_true_color_reproduction`
+/// (`da.dot(img_data.T, ccm.T).T`), i.e. each output band is a linear
+/// combination of the input bands.
+#[inline]
+pub fn jma_true_color_reproduction_value(
+    red: f64,
+    green: f64,
+    blue: f64,
+    ccm: &[[f64; 3]; 3],
+) -> (f64, f64, f64) {
+    (
+        ccm[0][0] * red + ccm[0][1] * green + ccm[0][2] * blue,
+        ccm[1][0] * red + ccm[1][1] * green + ccm[1][2] * blue,
+        ccm[2][0] * red + ccm[2][1] * green + ccm[2][2] * blue,
+    )
+}
+
+/// Trollimage `XRImage.stretch_logarithmic` per-value — the stretch used by
+/// Satpy's `true_color_reproduction_color_stretch` enhancement (kwargs
+/// `stretch: log, min_stretch: [3,3,3], max_stretch: [150,150,150]`, defaults
+/// `factor=100`, `base="e"`):
+///
+/// ```text
+/// slope = (factor - 1) / (max - min)
+/// v' = 1 + (clip(v, min, max) - min) * slope
+/// out = ln(v') / ln(factor)
+/// ```
+///
+/// `min`/`max` must satisfy `min < max` and `factor > 1`.
+#[inline]
+pub fn log_stretch_value(value: f64, min: f64, max: f64, factor: f64) -> f64 {
+    let clipped = value.clamp(min, max);
+    let slope = (factor - 1.0) / (max - min);
+    let scaled = 1.0 + (clipped - min) * slope;
+    scaled.ln() / factor.ln()
+}
+
+/// Finalize a band-major `[3, y, x]` RGB array straight to an 8-bit
+/// interleaved `Image` with the JMA True Color Reproduction enhancement
+/// (Satpy `true_color_reproduction_color_stretch`): the per-pixel color
+/// conversion matrix followed by the log stretch, applied in one
+/// rayon-parallel pass.
+///
+/// Reference: `satpy/satpy/enhancements/ahi.py` (`jma_true_color_reproduction`)
+/// and `satpy/satpy/etc/enhancements/generic.yaml`
+/// (`true_color_reproduction_color_stretch`).
+pub fn finalize_rgb_jma_u8(array: &AnyDataArray, fill_value: u8, platform: &str) -> Result<Image> {
+    let ccm = jma_ccm_for_platform(platform).ok_or_else(|| {
+        RustySatError::unsupported(format!(
+            "no JMA True Color Reproduction color conversion matrix for platform '{platform}'"
+        ))
+    })?;
+    let (height, width, pixel_count) = require_band_major_rgb_shape(array)?;
+    let mask = array.mask();
+    match array {
+        AnyDataArray::F32(a) => finalize_rgb_jma_typed(
+            a.values(),
+            mask,
+            height,
+            width,
+            pixel_count,
+            fill_value,
+            &ccm,
+        ),
+        AnyDataArray::F64(a) => finalize_rgb_jma_typed(
+            a.values(),
+            mask,
+            height,
+            width,
+            pixel_count,
+            fill_value,
+            &ccm,
+        ),
+        AnyDataArray::U8(a) => finalize_rgb_jma_typed(
+            a.values(),
+            mask,
+            height,
+            width,
+            pixel_count,
+            fill_value,
+            &ccm,
+        ),
+        AnyDataArray::U16(a) => finalize_rgb_jma_typed(
+            a.values(),
+            mask,
+            height,
+            width,
+            pixel_count,
+            fill_value,
+            &ccm,
+        ),
+        AnyDataArray::I16(a) => finalize_rgb_jma_typed(
+            a.values(),
+            mask,
+            height,
+            width,
+            pixel_count,
+            fill_value,
+            &ccm,
+        ),
+    }
+}
+
+fn finalize_rgb_jma_typed<U: NumericElement>(
+    values: &[U],
+    mask: Option<&ValidityMask>,
+    height: usize,
+    width: usize,
+    pixel_count: usize,
+    fill_value: u8,
+    ccm: &[[f64; 3]; 3],
+) -> Result<Image> {
+    let channels = ImageMode::Rgb.channels();
+    let mut pixels = vec![0u8; pixel_count * channels];
+    if let Some(mask) = mask {
+        // Masked path: per-pixel band mask checks.
+        pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_index, chunk)| {
+                let masked = (0..channels).any(|band| {
+                    mask.is_masked(band * pixel_count + pixel_index)
+                        .unwrap_or(false)
+                });
+                if masked {
+                    chunk.copy_from_slice(&[fill_value; 3]);
+                    return;
+                }
+                chunk.copy_from_slice(&jma_rgb_byte(
+                    values[pixel_index],
+                    values[pixel_count + pixel_index],
+                    values[2 * pixel_count + pixel_index],
+                    fill_value,
+                    ccm,
+                ));
+            });
+    } else {
+        // Fast path: no mask, no per-pixel branch.
+        pixels
+            .par_chunks_mut(channels)
+            .enumerate()
+            .for_each(|(pixel_index, chunk)| {
+                chunk.copy_from_slice(&jma_rgb_byte(
+                    values[pixel_index],
+                    values[pixel_count + pixel_index],
+                    values[2 * pixel_count + pixel_index],
+                    fill_value,
+                    ccm,
+                ));
+            });
+    }
+    Image::from_pixels(ImageMode::Rgb, height, width, pixels)
+}
+
+/// JMA color conversion + log stretch + 8-bit scale for one RGB pixel.
+///
+/// The stretched values are stored as f32 before scaling by 255, matching the
+/// CIRA path's rounding convention; non-finite pixels become `fill_value`.
+fn jma_rgb_byte<U: NumericElement>(
+    red: U,
+    green: U,
+    blue: U,
+    fill_value: u8,
+    ccm: &[[f64; 3]; 3],
+) -> [u8; 3] {
+    let (red, green, blue) = (red.to_f64(), green.to_f64(), blue.to_f64());
+    if red.is_finite() && green.is_finite() && blue.is_finite() {
+        let (cr, cg, cb) = jma_true_color_reproduction_value(red, green, blue, ccm);
+        let sr = log_stretch_value(cr, 3.0, 150.0, 100.0) as f32;
+        let sg = log_stretch_value(cg, 3.0, 150.0, 100.0) as f32;
+        let sb = log_stretch_value(cb, 3.0, 150.0, 100.0) as f32;
+        [
+            (f64::from(sr) * 255.0).clamp(0.0, 255.0).round() as u8,
+            (f64::from(sg) * 255.0).clamp(0.0, 255.0).round() as u8,
+            (f64::from(sb) * 255.0).clamp(0.0, 255.0).round() as u8,
+        ]
+    } else {
+        [fill_value; 3]
+    }
+}
+
 /// Finalize a band-major `[3, y, x]` RGB array straight to an 8-bit
 /// interleaved `Image` with a per-channel crude stretch.
 ///
@@ -1866,5 +2079,99 @@ mod tests {
             let right = right.to_f64();
             assert!((left - right).abs() < tolerance, "{left} != {right}");
         }
+    }
+
+    // ── JMA True Color Reproduction enhancement ──
+
+    #[test]
+    fn jma_ccm_platform_lookup() {
+        assert_eq!(jma_ccm_for_platform("Himawari-9"), Some(JMA_CCM_HIMAWARI_9));
+        assert_eq!(jma_ccm_for_platform("himawari-8"), Some(JMA_CCM_HIMAWARI_8));
+        assert_eq!(jma_ccm_for_platform("himawari9"), Some(JMA_CCM_HIMAWARI_9));
+        assert_eq!(jma_ccm_for_platform("GOES-16"), None);
+        assert_eq!(jma_ccm_for_platform(""), None);
+    }
+
+    #[test]
+    fn jma_color_conversion_matches_satpy_matrix() {
+        // Reference: `satpy/satpy/enhancements/ahi.py` —
+        // `_jma_true_color_reproduction` with the Himawari-9 matrix.
+        let (r, g, b) = jma_true_color_reproduction_value(100.0, 50.0, 25.0, &JMA_CCM_HIMAWARI_9);
+        assert!((r - 118.48).abs() < 1e-9, "R={r}");
+        assert!((g - 44.2725).abs() < 1e-9, "G={g}");
+        assert!((b - 19.05).abs() < 1e-9, "B={b}");
+
+        let (r, g, b) = jma_true_color_reproduction_value(20.0, 40.0, 10.0, &JMA_CCM_HIMAWARI_9);
+        assert!((r - 27.238).abs() < 1e-9, "R={r}");
+        assert!((g - 35.749).abs() < 1e-9, "G={g}");
+        assert!((b - 5.818).abs() < 1e-9, "B={b}");
+    }
+
+    #[test]
+    fn log_stretch_matches_trollimage_stretch_logarithmic() {
+        // trollimage `stretch_logarithmic(factor=100, base="e",
+        // min_stretch=3, max_stretch=150)` — Satpy
+        // `true_color_reproduction_color_stretch` kwargs.
+        assert_eq!(log_stretch_value(3.0, 3.0, 150.0, 100.0), 0.0);
+        assert_eq!(log_stretch_value(150.0, 3.0, 150.0, 100.0), 1.0);
+        assert!((log_stretch_value(20.0, 3.0, 150.0, 100.0) - 0.547_567).abs() < 1e-6);
+        assert!((log_stretch_value(50.0, 3.0, 150.0, 100.0) - 0.756_962).abs() < 1e-6);
+        // Clipping at both ends.
+        assert_eq!(log_stretch_value(0.0, 3.0, 150.0, 100.0), 0.0);
+        assert_eq!(log_stretch_value(200.0, 3.0, 150.0, 100.0), 1.0);
+    }
+
+    #[test]
+    fn finalize_rgb_jma_u8_applies_matrix_and_log_stretch() {
+        // 1×1 RGB pixel (100, 50, 25) with the Himawari-9 matrix:
+        // CCM → (118.48, 44.2725, 19.05); log stretch → (0.94819, 0.72966,
+        // 0.53611); bytes → (242, 186, 137).
+        let array = DataArray::<f32>::from_vec_named(
+            vec![3, 1, 1],
+            ["bands", "y", "x"],
+            vec![100.0_f32, 50.0, 25.0],
+        )
+        .unwrap();
+        let image = finalize_rgb_jma_u8(&array.into(), 0, "Himawari-9").unwrap();
+        assert_eq!(image.shape(), (1, 1));
+        assert_eq!(image.pixels(), &[242, 186, 137]);
+    }
+
+    #[test]
+    fn finalize_rgb_jma_u8_handles_masks_and_fill() {
+        // Masked pixel → fill value; unknown platform → error.
+        let mut array = DataArray::<f32>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![100.0_f32, 10.0, 50.0, 20.0, 25.0, 30.0],
+        )
+        .unwrap();
+        let mut mask = rusty_sat_core::ValidityMask::all_valid(6);
+        mask.set_masked(1, true); // second pixel's red band masked
+        array = array.with_mask(mask).unwrap();
+        let image = finalize_rgb_jma_u8(&array.into(), 7, "Himawari-9").unwrap();
+        let pixels = image.pixels();
+        assert_eq!(&pixels[3..6], &[7, 7, 7], "masked pixel gets fill");
+        assert_ne!(&pixels[0..3], &[7, 7, 7], "valid pixel is enhanced");
+
+        let bad = DataArray::<f32>::from_vec_named(
+            vec![3, 1, 1],
+            ["bands", "y", "x"],
+            vec![1.0_f32, 2.0, 3.0],
+        )
+        .unwrap();
+        assert!(finalize_rgb_jma_u8(&bad.into(), 0, "GOES-16").is_err());
+    }
+
+    #[test]
+    fn finalize_rgb_jma_u8_non_finite_pixels_get_fill() {
+        let array = DataArray::<f32>::from_vec_named(
+            vec![3, 1, 2],
+            ["bands", "y", "x"],
+            vec![100.0_f32, f32::NAN, 50.0, 20.0, 25.0, 30.0],
+        )
+        .unwrap();
+        let image = finalize_rgb_jma_u8(&array.into(), 0, "Himawari-9").unwrap();
+        assert_eq!(&image.pixels()[3..6], &[0, 0, 0], "NaN pixel gets fill");
     }
 }
