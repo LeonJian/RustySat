@@ -197,6 +197,7 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
   - Pyspectral-compatible LUT loading
   - Parallel pixel interpolation with LUT-boundary secant clamping
   - Cloud relaxation via the red band (Satpy `rayleigh_corrected` semantics) and high-zenith handling
+  - Batched multi-band corrections sharing one angle pass, plus fused day/night blend-weight emission
 - **Exact geos inverse** — curved-Earth ray–ellipsoid geolocation for full-disk limb-correct angles
 
 ### Writers

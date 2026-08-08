@@ -37,9 +37,8 @@ use rusty_sat_composites::{SelfSharpenedRgb, SpectralBlender};
 use rusty_sat_core::{AnyDataArray, DataQuery, Dataset, MetadataValue, NumericElement, Scene};
 use rusty_sat_image::{finalize_rgb_cira_u8, finalize_rgb_jma_u8, Image, ImageMode};
 use rusty_sat_modifiers::{
-    daynight_blend_weights, extract_xy_coords, rayleigh_correct_with_sun_zenith,
-    sun_zenith_correct, AngleParams, Atmosphere, RayleighConfig, RayleighCorrector, RedBandSource,
-    UtcInstant,
+    extract_xy_coords, rayleigh_correct_with_sun_zenith_and_weights, AngleParams, Atmosphere,
+    BatchBandSpec, RayleighConfig, RayleighCorrector, RedBandSource, UtcInstant,
 };
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo};
 use rusty_sat_resample::{
@@ -48,6 +47,15 @@ use rusty_sat_resample::{
 use rusty_sat_writers::{SimpleImageWriter, Writer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+/// Time a pipeline phase and print the elapsed seconds (perf instrumentation).
+fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let result = f();
+    eprintln!("  [t] {label}: {:.2}s", start.elapsed().as_secs_f64());
+    result
+}
 
 // ── Data helpers ────────────────────────────────────────────────────────
 
@@ -132,37 +140,36 @@ fn ahi_time_to_utc(days: f64) -> UtcInstant {
     UtcInstant::from_unix(((days - 40587.0) * 86400.0) as i64)
 }
 
-/// Build one reflectance-calibrated AHI reader per band (B01-B04) for the
-/// given data directory, returning the readers and the observation time.
+/// Build ONE reflectance-calibrated AHI reader holding all B01-B04 handlers
+/// for the given data directory, returning the reader and the observation
+/// time. A single reader lets `Scene::load` batch the four band loads
+/// concurrently (the reader's `load` matches handlers by dataset id).
 /// Returns `None` when any band is missing from the directory.
 fn build_band_readers(dir: &Path) -> Option<(Vec<AhiHsdReader>, UtcInstant)> {
     let mut obs_time = None;
-    let mut readers = Vec::new();
+    let mut handlers = Vec::new();
     for band in ["B01", "B02", "B03", "B04"] {
         let files = try_files(dir, band)?;
         let file_type = format!("hsd_{}", band.to_lowercase());
-        let handlers: Vec<_> = files
-            .iter()
-            .map(|(path, seg)| AhiHsdFileHandler::from_path(path, &file_type, *seg).expect("open"))
-            .collect();
+        for (path, seg) in files {
+            handlers.push(AhiHsdFileHandler::from_path(&path, &file_type, seg).expect("open"));
+        }
         if obs_time.is_none() {
             obs_time = Some(ahi_time_to_utc(
                 handlers[0].header().basic.observation_start_time_days,
             ));
         }
-        readers.push(
-            AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)
-                .expect("reader")
-                // 8-way segment parallelism: bzip2 decompression is
-                // single-threaded per segment, so more concurrent segments
-                // use more cores during the load phase. Peak assembly memory
-                // grows to assembled + 8 segment buffers, which fits after
-                // the later pipeline stages were made leaner.
-                .with_parallel_segments(8)
-                .expect("valid segment parallelism"),
-        );
     }
-    Some((readers, obs_time.expect("observation time")))
+    let reader = AhiHsdReader::with_calibration(AhiCalibration::Reflectance, handlers)
+        .expect("reader")
+        // 8-way segment parallelism: bzip2 decompression is single-threaded
+        // per segment, so more concurrent segments use more cores during the
+        // load phase. Peak assembly memory grows to assembled + 8 segment
+        // buffers, which fits after the later pipeline stages were made
+        // leaner.
+        .with_parallel_segments(8)
+        .expect("valid segment parallelism");
+    Some((vec![reader], obs_time.expect("observation time")))
 }
 
 /// Blend two 8-bit RGB images with per-pixel day/night weights
@@ -238,15 +245,6 @@ macro_rules! lut {
             None => panic!("LUT required but not available"),
         }
     };
-}
-
-/// Correct a band with combined sunz+rayleigh (no resampling).
-///
-/// `red` follows Satpy's `rayleigh_corrected` red prerequisite (the
-/// sun-zenith-corrected B03, resampled to the band's grid when needed).
-fn correct_band(ds: Dataset, red: RedBandSource, t: UtcInstant, nm: f64, max_sza: f64) -> Dataset {
-    rayleigh_correct_with_sun_zenith(lut!(build_corrector(nm)), ds, red, t, max_sza)
-        .expect("combined")
 }
 
 /// Convert a dataset's runtime-typed array to f64, preserving dims, mask,
@@ -403,13 +401,15 @@ fn true_color_reproduction() {
     // ── Step 1: one AHI reader per band, loaded through a Scene ──────────
     let (readers, t) = build_band_readers(&dir).expect("B01-B04 present in test data");
     let mut scene = Scene::with_loaders(readers);
-    scene
-        .load(
-            ["B01", "B02", "B03", "B04"]
-                .into_iter()
-                .map(|name| DataQuery::named(name).expect("valid query")),
-        )
-        .expect("load bands through Scene");
+    timed("scene 1 load", || {
+        scene
+            .load(
+                ["B01", "B02", "B03", "B04"]
+                    .into_iter()
+                    .map(|name| DataQuery::named(name).expect("valid query")),
+            )
+            .expect("load bands through Scene");
+    });
 
     assert_eq!(
         scene.available_dataset_names(),
@@ -426,7 +426,10 @@ fn true_color_reproduction() {
     // it is nearest-resampled to 1 km (we resample the raw B03 first and
     // sunz-correct on the 1 km grid — equivalent within a pixel); for B03
     // itself the red is the in-place sunz-corrected value.
+    // Raw clones are kept for the uncorrected JMA composite (step 9) so the
+    // files are not re-read/decompressed a second time.
     let b03_raw = take_dataset(&mut scene, "B03"); // 0.5 km raw
+    let b03_raw_unc = b03_raw.clone();
     let b02_id = DataQuery::named("B02")
         .expect("query")
         .best_match(scene.available_dataset_ids().iter())
@@ -443,39 +446,90 @@ fn true_color_reproduction() {
     // The area nearest resampler is f64-only, so promote the 0.5 km raw band
     // for the borrowed 0.5→1 km resample; the temporary f64 copy is dropped
     // right after.
-    let b03_f64 = to_f64_dataset(&b03_raw);
-    let b03_1km = resample_dataset_from_attrs(&b03_f64, &b02_area, ResampleOptions::default())
-        .expect("B03 -> 1 km nearest");
-    drop(b03_f64);
-    // The resampler leaves the nested `area` attr at the destination id
-    // string; re-attach the destination area metadata for downstream
-    // angle/geometry consumers.
-    let b03_1km = with_area_attr(b03_1km, &b02_area).expect("attach 1 km area");
-    // Keep a second 1 km copy for the JMA reproduced-green band (B03 is a
-    // `reproduced_green` prerequisite in Satpy's true_color_reproduction_corr).
-    let b03_1km_for_repro = b03_1km.clone();
-    let b03_red_1km = sun_zenith_correct(b03_1km, t).expect("sunz-corrected 1 km B03 red");
-    // B03 sunz+rayleigh at 1 km for the JMA reproduced green (Satpy resamples
-    // the corrected 0.5 km B03 to 1 km; correcting the resampled raw band is
-    // equivalent within a pixel, as above).
-    let b03_corr_1km = correct_band(
-        b03_1km_for_repro,
-        RedBandSource::Dataset(&b03_red_1km),
-        t,
-        640.0,
-        max_sza,
-    );
+    let (b03_1km, b03_1km_for_repro) = timed("b03 0.5->1km resample", || {
+        let b03_f64 = to_f64_dataset(&b03_raw);
+        let b03_1km = resample_dataset_from_attrs(&b03_f64, &b02_area, ResampleOptions::default())
+            .expect("B03 -> 1 km nearest");
+        drop(b03_f64);
+        // The resampler leaves the nested `area` attr at the destination id
+        // string; re-attach the destination area metadata for downstream
+        // angle/geometry consumers.
+        let b03_1km = with_area_attr(b03_1km, &b02_area).expect("attach 1 km area");
+        // Keep a second 1 km copy for the JMA reproduced-green band (B03 is a
+        // `reproduced_green` prerequisite in Satpy's true_color_reproduction_corr).
+        let b03_1km_for_repro = b03_1km.clone();
+        (b03_1km, b03_1km_for_repro)
+    });
 
-    // ── Step 3: B02 (green) correct at native 1 km + sanity check ────────
-    eprintln!("--- B02: correct (1 km) ---");
+    // ── Steps 3-5: correct the five 1 km bands in ONE batched pass ────────
+    // The combined sun-zenith+Rayleigh corrections of B01/B02/B04 and both B03
+    // 1 km variants share the same grid and time, so the solar/satellite
+    // angles are computed once per pixel and shared across the bands.
+    eprintln!("--- 1 km batch corrections ---");
     let orig_mean = finite_mean(scene.get(&b02_id).unwrap().array().expect("arr"));
-    let d02_corr = correct_band(
-        scene.remove_dataset(&b02_id).unwrap(),
-        RedBandSource::Dataset(&b03_red_1km),
-        t,
-        510.0,
-        max_sza,
-    );
+    let b02_raw_unc = scene.get(&b02_id).unwrap().clone();
+    let b04_raw_unc = scene
+        .get(
+            DataQuery::named("B04")
+                .expect("q")
+                .best_match(scene.available_dataset_ids().iter())
+                .expect("id"),
+        )
+        .unwrap()
+        .clone();
+    let b02_raw = scene.remove_dataset(&b02_id).unwrap();
+    let b04_raw = take_dataset(&mut scene, "B04");
+    let b01_raw = take_dataset(&mut scene, "B01");
+    let b01_raw_unc = b01_raw.clone();
+    let [b03_corr_1km, d02_corr, d04_corr, d01_corr] = timed("1 km batch ×5", || {
+        let corrector = lut!(build_corrector(510.0)); // shared LUT; per-band grids derived inside
+        let area_attr = b03_1km.attr("area").expect("area").clone();
+        let coords = b03_1km.array().expect("arr").coords().clone();
+        let (x_coords, y_coords) = extract_xy_coords(&coords).expect("xy coords");
+        let params =
+            AngleParams::from_dataset_area(&area_attr, x_coords, y_coords, t).expect("params");
+        let results = corrector
+            .apply_corrections_with_sun_zenith_batch(
+                vec![
+                    BatchBandSpec {
+                        dataset: b03_1km,
+                        wavelength_nm: 640.0,
+                        apply_rayleigh: false, // [sunz_corrected] red band
+                        red_band: None,
+                    },
+                    BatchBandSpec {
+                        dataset: b03_1km_for_repro,
+                        wavelength_nm: 640.0,
+                        apply_rayleigh: true,
+                        red_band: Some(0),
+                    },
+                    BatchBandSpec {
+                        dataset: b02_raw,
+                        wavelength_nm: 510.0,
+                        apply_rayleigh: true,
+                        red_band: Some(0),
+                    },
+                    BatchBandSpec {
+                        dataset: b04_raw,
+                        wavelength_nm: 860.0, // outside the LUT: sunz-only
+                        apply_rayleigh: false,
+                        red_band: None,
+                    },
+                    BatchBandSpec {
+                        dataset: b01_raw,
+                        wavelength_nm: 470.0,
+                        apply_rayleigh: true,
+                        red_band: Some(0),
+                    },
+                ],
+                params,
+                max_sza,
+            )
+            .expect("1 km batch");
+        let [_, b03_corr_1km, d02_corr, d04_corr, d01_corr] =
+            results.try_into().expect("5 batch outputs");
+        [b03_corr_1km, d02_corr, d04_corr, d01_corr]
+    });
     let corr_mean = finite_mean(d02_corr.array().expect("arr"));
     assert_eq!(
         d02_corr.attr("modifier").and_then(MetadataValue::as_str),
@@ -490,53 +544,47 @@ fn true_color_reproduction() {
     );
     eprintln!("  B02: {orig_mean:.2} → {corr_mean:.2}");
 
-    // ── Step 4: B04 (NIR) correct, then the two green channels at 1 km ─────
-    // B04 (0.86 µm) is outside the Rayleigh LUT range (400–800 nm), so its
-    // correction is the sunz-only path (Satpy `[sunz_corrected]`); the red
-    // band is irrelevant there.
-    eprintln!("--- B04 + greens (1 km) ---");
-    let d04_corr = correct_band(
-        take_dataset(&mut scene, "B04"),
-        RedBandSource::None,
-        t,
-        860.0,
-        max_sza,
-    );
+    // ── Step 6: the two green channels at 1 km ─────────────────────────────
     // Standard Satpy `true_color` green: hybrid_green = 0.85*B02 + 0.15*B04.
     // JMA `true_color_reproduction_corr` green: reproduced_green =
     // 0.6321*B02 + 0.2928*B03 + 0.0751*B04 (Satpy ahi.yaml). Keep both
     // paths so the standard and JMA-TCR renders can be compared.
+    eprintln!("--- greens (1 km) ---");
     let d02_for_repro = d02_corr.clone();
     let d04_for_repro = d04_corr.clone();
-    let hybrid = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
-        .expect("blender")
-        .compose_owned(vec![d02_corr, d04_corr])
-        .expect("hybrid");
-    let reproduced_green = SpectralBlender::new("reproduced_green", vec![0.6321, 0.2928, 0.0751])
-        .expect("blender")
-        .compose_owned(vec![d02_for_repro, b03_corr_1km, d04_for_repro])
-        .expect("reproduced green");
+    let (hybrid, reproduced_green) = timed("green blends @1km", || {
+        let hybrid = SpectralBlender::new("hybrid_green", vec![0.85, 0.15])
+            .expect("blender")
+            .compose_owned(vec![d02_corr, d04_corr])
+            .expect("hybrid");
+        let reproduced_green =
+            SpectralBlender::new("reproduced_green", vec![0.6321, 0.2928, 0.0751])
+                .expect("blender")
+                .compose_owned(vec![d02_for_repro, b03_corr_1km, d04_for_repro])
+                .expect("reproduced green");
+        (hybrid, reproduced_green)
+    });
     assert!(hybrid.array().is_some());
     assert!(reproduced_green.array().is_some());
 
-    // ── Step 5: B03 (red, 0.5 km) and B01 (blue, 1 km) correct ───────────
-    eprintln!("--- B03 (0.5 km) + B01: correct ---");
-    // B03's own red is its sunz-corrected self (Satpy behavior); B01 uses the
-    // 1 km resampled B03-sunz red.
-    let d03_corr = correct_band(
-        b03_raw,
-        RedBandSource::SunZenithCorrectedVis,
-        t,
-        640.0,
-        max_sza,
-    );
-    let d01_corr = correct_band(
-        take_dataset(&mut scene, "B01"),
-        RedBandSource::Dataset(&b03_red_1km),
-        t,
-        470.0,
-        max_sza,
-    );
+    // ── Step 7: B03 (red, 0.5 km) correct, emitting the day/night weights ──
+    eprintln!("--- B03 (0.5 km) correct ---");
+    // B03's own red is its sunz-corrected self (Satpy behavior). The
+    // day/night blend weights for the 0.5 km grid are emitted during the
+    // correction (the angles are computed once), avoiding a second full-disk
+    // angle pass.
+    let (d03_corr, weights) = timed("b03 combined @0.5km + weights", || {
+        rayleigh_correct_with_sun_zenith_and_weights(
+            lut!(build_corrector(640.0)),
+            b03_raw,
+            RedBandSource::SunZenithCorrectedVis,
+            t,
+            max_sza,
+            73.0,
+            85.0,
+        )
+        .expect("combined + weights")
+    });
     assert!(scene.is_empty(), "all bands taken out for processing");
 
     // ── Step 6: SelfSharpenedRgb(R_05, G_1km, B_1km) → 0.5 km RGB ────────
@@ -547,14 +595,17 @@ fn true_color_reproduction() {
     eprintln!("--- SelfSharpenedRgb composites ---");
     let d03_for_repro = d03_corr.clone();
     let d01_for_repro = d01_corr.clone();
-    let rgb = SelfSharpenedRgb::new("true_color")
-        .expect("compositor")
-        .compose_rgb_owned(vec![d03_corr, hybrid, d01_corr])
-        .expect("compose");
-    let rgb_reproduction = SelfSharpenedRgb::new("true_color_reproduction")
-        .expect("compositor")
-        .compose_rgb_owned(vec![d03_for_repro, reproduced_green, d01_for_repro])
-        .expect("compose reproduction");
+    let (rgb, rgb_reproduction) = timed("SelfSharpenedRgb ×2", || {
+        let rgb = SelfSharpenedRgb::new("true_color")
+            .expect("compositor")
+            .compose_rgb_owned(vec![d03_corr, hybrid, d01_corr])
+            .expect("compose");
+        let rgb_reproduction = SelfSharpenedRgb::new("true_color_reproduction")
+            .expect("compositor")
+            .compose_rgb_owned(vec![d03_for_repro, reproduced_green, d01_for_repro])
+            .expect("compose reproduction");
+        (rgb, rgb_reproduction)
+    });
     {
         let a = rgb.array().expect("arr");
         let s = a.shape().to_vec();
@@ -577,11 +628,14 @@ fn true_color_reproduction() {
     // rayon-parallel pass, so the interleaved f32 FloatImage intermediate
     // (~5.8 GB) never exists.
     eprintln!("--- finalize + save ---");
-    let u8_img = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8 image");
-    drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
-    let u8_repro = finalize_rgb_jma_u8(rgb_reproduction.array().expect("arr"), 0, "Himawari-9")
-        .expect("u8 reproduction image");
-    drop(rgb_reproduction); // free band-major [3,y,x] f32 (~5.8 GB)
+    let (u8_img, u8_repro) = timed("finalize ×2 (cira + jma)", || {
+        let u8_img = finalize_rgb_cira_u8(rgb.array().expect("arr"), 0).expect("u8 image");
+        drop(rgb); // free band-major [3,y,x] f32 (~5.8 GB)
+        let u8_repro = finalize_rgb_jma_u8(rgb_reproduction.array().expect("arr"), 0, "Himawari-9")
+            .expect("u8 reproduction image");
+        drop(rgb_reproduction); // free band-major [3,y,x] f32 (~5.8 GB)
+        (u8_img, u8_repro)
+    });
     assert_eq!(u8_repro.shape(), u8_img.shape());
 
     // ── Step 8: edge-contrast regression assertions ──────────────────────
@@ -710,9 +764,11 @@ fn true_color_reproduction() {
     drop(u8_img); // free ~1.45 GB before the uncorrected render
 
     let png_repro = out.join("true_color_reproduction_05km.png");
-    SimpleImageWriter::default()
-        .save_image(&u8_repro, &png_repro)
-        .expect("save reproduction");
+    timed("save reproduction PNG", || {
+        SimpleImageWriter::default()
+            .save_image(&u8_repro, &png_repro)
+            .expect("save reproduction");
+    });
     assert!(png_repro.is_file());
     let sz_repro = std::fs::metadata(&png_repro).expect("meta").len();
     assert!(sz_repro > 1024, "size={sz_repro}");
@@ -725,31 +781,15 @@ fn true_color_reproduction() {
     // sunz-amplified B03 exceeds 100%). JMA's `true_color_reproduction` is a
     // DayNightCompositor that blends the corrected composite with the
     // UNCORRECTED one between SZA 73° and 85°, so the limb returns to the
-    // natural uncorrected colors. Reload the raw bands through a second Scene
-    // (fresh readers, no copies of the corrected data).
+    // natural uncorrected colors. The raw clones taken in phase 1 avoid a
+    // second file load.
     eprintln!("--- JMA true_color_reproduction (uncorr blend) ---");
-    let (readers2, t2) = build_band_readers(&dir).expect("B01-B04 present in test data");
-    assert_eq!(t2, t, "same observation time across scenes");
-    let mut scene2 = Scene::with_loaders(readers2);
-    scene2
-        .load(
-            ["B01", "B02", "B03", "B04"]
-                .into_iter()
-                .map(|name| DataQuery::named(name).expect("valid query")),
-        )
-        .expect("load raw bands through Scene");
 
-    // The 0.5 km B03 raw composite input; grab its geometry for the blend
-    // weights before it is consumed. Masked (outside-scan) pixels become NaN
-    // so the uncorrected composite keeps the black background of the
+    // The 0.5 km B03 raw composite input; masked (outside-scan) pixels become
+    // NaN so the uncorrected composite keeps the black background of the
     // corrected renders instead of stretching the bright space values to
     // white.
-    let b03_raw2 = mask_to_nan(take_dataset(&mut scene2, "B03"));
-    let area_attr = b03_raw2.attr("area").expect("area").clone();
-    let coords = b03_raw2.array().expect("arr").coords().clone();
-    let (x_coords, y_coords) = extract_xy_coords(&coords).expect("xy coords");
-    let weights_params =
-        AngleParams::from_dataset_area(&area_attr, x_coords, y_coords, t).expect("angle params");
+    let b03_raw2 = mask_to_nan(b03_raw_unc);
 
     // Uncorrected reproduced green at 1 km (raw B02/B03/B04) and the
     // SelfSharpenedRgb uncorrected composite (Satpy true_color_reproduction_uncorr).
@@ -759,32 +799,35 @@ fn true_color_reproduction() {
             .expect("B03 -> 1 km nearest");
     drop(b03_f64_2);
     let b03_1km_raw = with_area_attr(b03_1km_raw, &b02_area).expect("attach 1 km area");
-    let reproduced_green_uncorr =
-        SpectralBlender::new("reproduced_green_uncorr", vec![0.6321, 0.2928, 0.0751])
-            .expect("blender")
-            .compose_owned(vec![
-                mask_to_nan(take_dataset(&mut scene2, "B02")),
-                b03_1km_raw,
-                mask_to_nan(take_dataset(&mut scene2, "B04")),
+    let (uncorr_rgb, u8_uncorr) = timed("uncorr composite", || {
+        let reproduced_green_uncorr =
+            SpectralBlender::new("reproduced_green_uncorr", vec![0.6321, 0.2928, 0.0751])
+                .expect("blender")
+                .compose_owned(vec![
+                    mask_to_nan(b02_raw_unc),
+                    b03_1km_raw,
+                    mask_to_nan(b04_raw_unc),
+                ])
+                .expect("reproduced green uncorr");
+        let uncorr_rgb = SelfSharpenedRgb::new("true_color_reproduction_uncorr")
+            .expect("compositor")
+            .compose_rgb_owned(vec![
+                b03_raw2,
+                reproduced_green_uncorr,
+                mask_to_nan(b01_raw_unc),
             ])
-            .expect("reproduced green uncorr");
-    let uncorr_rgb = SelfSharpenedRgb::new("true_color_reproduction_uncorr")
-        .expect("compositor")
-        .compose_rgb_owned(vec![
-            b03_raw2,
-            reproduced_green_uncorr,
-            mask_to_nan(take_dataset(&mut scene2, "B01")),
-        ])
-        .expect("compose uncorr");
-    assert!(scene2.is_empty(), "all raw bands consumed");
-    let u8_uncorr = finalize_rgb_jma_u8(uncorr_rgb.array().expect("arr"), 0, "Himawari-9")
-        .expect("u8 uncorrected image");
+            .expect("compose uncorr");
+        let u8_uncorr = finalize_rgb_jma_u8(uncorr_rgb.array().expect("arr"), 0, "Himawari-9")
+            .expect("u8 uncorrected image");
+        (uncorr_rgb, u8_uncorr)
+    });
     drop(uncorr_rgb);
 
-    // Per-pixel day weights: 1 for SZA ≤ 73° (corrected), 0 for SZA ≥ 85°
-    // (uncorrected), linear in cos(SZA) between.
-    let weights = daynight_blend_weights(&weights_params, 73.0, 85.0).expect("blend weights");
-    let u8_jma = blend_daynight_u8(&u8_repro, &u8_uncorr, &weights);
+    // Per-pixel day weights (1 for SZA ≤ 73°, 0 for SZA ≥ 85°) were emitted
+    // during the 0.5 km B03 correction (fused angle pass).
+    let u8_jma = timed("u8 day/night blend", || {
+        blend_daynight_u8(&u8_repro, &u8_uncorr, &weights)
+    });
     // The day side (SZA ≤ 73°) must match the corrected render pixel-for-pixel,
     // the night side (SZA ≥ 85°) the uncorrected render. The corrected chain
     // clips the deep-night limb to black (`vis - corr` goes negative), so the
@@ -901,9 +944,11 @@ fn true_color_reproduction() {
         );
     }
     let png_jma = out.join("true_color_reproduction_jma_05km.png");
-    SimpleImageWriter::default()
-        .save_image(&u8_jma, &png_jma)
-        .expect("save jma");
+    timed("save JMA PNG", || {
+        SimpleImageWriter::default()
+            .save_image(&u8_jma, &png_jma)
+            .expect("save jma");
+    });
     assert!(png_jma.is_file());
     let sz_jma = std::fs::metadata(&png_jma).expect("meta").len();
     assert!(sz_jma > 1024, "size={sz_jma}");

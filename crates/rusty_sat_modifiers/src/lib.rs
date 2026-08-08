@@ -48,8 +48,9 @@ pub use astronomy::UtcInstant;
 pub use geos::GeosProjection;
 pub use orbital::{get_observer_look, satellite_angles_grid};
 pub use rayleigh::{
-    rayleigh_correct, rayleigh_correct_with_sun_zenith, AerosolType, Atmosphere, RayleighConfig,
-    RayleighCorrector, RedBandSource,
+    rayleigh_correct, rayleigh_correct_with_sun_zenith,
+    rayleigh_correct_with_sun_zenith_and_weights, AerosolType, Atmosphere, BatchBandSpec,
+    RayleighConfig, RayleighCorrector, RedBandSource,
 };
 pub use sun_zenith::{
     daynight_blend_weights, sun_zenith_correct, sun_zenith_correct_with, SunZenithCorrector,

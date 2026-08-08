@@ -295,7 +295,7 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 - `orbital` — satellite look angles (azimuth, elevation, zenith) ported from pyorbital
 - `angles` — combined angle computation for dataset grids (exact geos inverse + pyorbital solar/satellite angles; strip-parallel per-pixel)
 - `sun_zenith` — solar-zenith correction with Satpy-style 88°–max_sza angle-domain gradient falloff, plus `daynight_blend_weights` (cos-zenith blend weights for the `DayNightCompositor`, Satpy `DayNightCompositor._get_coszen_blending_weights` parity)
-- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate), pyspectral-parity red-band cloud relaxation via `RedBandSource` (`None` / `Dataset` / `SunZenithCorrectedVis`), LUT-boundary angle clipping, correction clip to [0,100]
+- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate), pyspectral-parity red-band cloud relaxation via `RedBandSource` (`None` / `Dataset` / `SunZenithCorrectedVis`), LUT-boundary angle clipping, correction clip to [0,100]; batched multi-band corrections sharing one angle pass (`apply_corrections_with_sun_zenith_batch`) and fused day/night blend-weight emission (`apply_correction_with_sun_zenith_and_weights`)
 
 **Design Patterns**:
 - `UtcInstant` for time representation (dependency-free)
