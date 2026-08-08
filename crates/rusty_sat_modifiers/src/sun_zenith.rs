@@ -21,7 +21,7 @@ use rusty_sat_core::{
 
 /// Solar zenith angle correction.
 ///
-/// ## Formula (Satpy `SunZenithCorrector`)
+/// ## Formula (Satpy `SunZenithCorrector` / `_sunzen_corr_cos_ndarray`)
 ///
 /// ```text
 /// limit = 88.0°
@@ -29,12 +29,16 @@ use rusty_sat_core::{
 /// max_sza_cos = cos(max_sza)
 ///
 /// if     cos_sza > limit_cos:     corr = 1 / cos_sza
-/// elif   cos_sza > max_sza_cos:  grad = (cos_sza - max_sza_cos) / (limit_cos - max_sza_cos)
+/// elif   cos_sza > max_sza_cos:  grad = (arccos(cos_sza) - 88°) / (max_sza - 88°)
 ///                                  corr = (1 - log₂(grad+1)) / limit_cos
 /// else   (night):                  corr = 0
 ///
 /// result = refl * corr
 /// ```
+///
+/// The gradient is evaluated in the ANGLE domain exactly like Satpy, so the
+/// correction is continuous at 88° (1/cos(88°) ≈ 28.65) and falls to 0 at
+/// `max_sza`.
 ///
 /// The default `max_sza` 95.0° matches Satpy default.
 ///
@@ -79,9 +83,8 @@ impl SunZenithCorrector {
         let max_sza_rad = max_sza.to_radians();
         let max_sza_cos = max_sza_rad.cos();
         const LIMIT_DEG: f64 = 88.0;
-        let limit_cos = LIMIT_DEG.to_radians().cos();
-        let span = limit_cos - max_sza_cos;
-        let inv_span = 1.0 / span;
+        let limit_rad = LIMIT_DEG.to_radians();
+        let limit_cos = limit_rad.cos();
 
         let area_attr = dataset.attr("area").cloned();
         let source_coords = dataset.array().map(|a| a.coords().clone());
@@ -130,7 +133,13 @@ impl SunZenithCorrector {
                         return;
                     }
                     let cos_sza = sunz_deg.to_radians().cos();
-                    *out *= sza_correction_factor(cos_sza, limit_cos, max_sza_cos, inv_span);
+                    *out *= sza_correction_factor(
+                        cos_sza,
+                        limit_cos,
+                        max_sza_cos,
+                        limit_rad,
+                        max_sza_rad,
+                    );
                 });
         }
 
@@ -140,23 +149,95 @@ impl SunZenithCorrector {
 
 /// Compute the SZA correction factor with Satpy-style gradient falloff.
 ///
-/// `inv_span = 1.0 / (limit_cos - max_sza_cos)`
+/// Exact port of Satpy `_sunzen_corr_cos_ndarray`: the gradient is computed in
+/// the ANGLE domain (`arccos(cos_sza)`), so the correction is continuous at the
+/// 88° limit (1/cos(88°) ≈ 28.65) and falls to 0 at `max_sza`.
 #[inline]
 pub(crate) fn sza_correction_factor(
     cos_sza: f64,
     limit_cos: f64,
     max_sza_cos: f64,
-    inv_span: f64,
+    limit_rad: f64,
+    max_sza_rad: f64,
 ) -> f32 {
     if cos_sza > limit_cos {
         (1.0 / cos_sza) as f32
     } else if cos_sza > max_sza_cos {
-        let grad = ((cos_sza - max_sza_cos) * inv_span).clamp(0.0, 1.0);
-        let fac = 1.0 - (grad + 1.0).log2();
+        // g is 0 at the 88° limit and 1 at max_sza (angle domain, like Satpy).
+        let g = ((cos_sza.acos() - limit_rad) / (max_sza_rad - limit_rad)).clamp(0.0, 1.0);
+        let fac = 1.0 - (g + 1.0).log2();
         (fac / limit_cos) as f32
     } else {
         0.0_f32
     }
+}
+
+/// Satpy `DayNightCompositor` cos-zenith blend weights.
+///
+/// Port of Satpy `DayNightCompositor._get_coszen_blending_weights`:
+///
+/// ```text
+/// w = (cos(SZA) - min(cos(lim_low), cos(lim_high)))
+///     / abs(cos(lim_low) - cos(lim_high)),   clipped to [0, 1]
+/// ```
+///
+/// `w == 1` for SZA ≤ `lim_low` (day side / corrected composite) and `w == 0`
+/// for SZA ≥ `lim_high` (night side / uncorrected composite). Space pixels get
+/// weight 0. The weights are computed in row strips with rayon so no full-grid
+/// angle array is ever allocated.
+pub fn daynight_blend_weights(
+    params: &AngleParams,
+    lim_low_deg: f64,
+    lim_high_deg: f64,
+) -> Result<Vec<f32>> {
+    if !lim_low_deg.is_finite() || !lim_high_deg.is_finite() || lim_low_deg >= lim_high_deg {
+        return Err(RustySatError::invalid_input(format!(
+            "day/night blend limits must satisfy lim_low < lim_high, got {lim_low_deg} / {lim_high_deg}"
+        )));
+    }
+    let low_cos = lim_low_deg.to_radians().cos();
+    let high_cos = lim_high_deg.to_radians().cos();
+    let min_cos = low_cos.min(high_cos);
+    let denom = (low_cos - high_cos).abs();
+    let height = params.height;
+    let width = params.width;
+    let total = height * width;
+    let mut weights = vec![0.0_f32; total];
+
+    let gmst_val = gmst(params.utc);
+    let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
+
+    const STRIP_HEIGHT: usize = 64;
+    for y0 in (0..height).step_by(STRIP_HEIGHT) {
+        let y1 = (y0 + STRIP_HEIGHT).min(height);
+        let strip_n = (y1 - y0) * width;
+        let offset = y0 * width;
+
+        use rayon::prelude::*;
+        weights[offset..offset + strip_n]
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(row, row_out)| {
+                let y_pos = params.y_coords[y0 + row];
+                for (col, out) in row_out.iter_mut().enumerate() {
+                    let x_pos = params.x_coords[col];
+                    // Exact geos inverse: space pixels get weight 0.
+                    let Some((lon, lat)) = params.geos.inverse_rad(x_pos, y_pos) else {
+                        *out = 0.0;
+                        continue;
+                    };
+                    let (sunz, _suna) = sun_angles_from_lonlat(lon, lat, sun_ra, sun_dec, gmst_val);
+                    if !sunz.is_finite() {
+                        *out = 0.0;
+                        continue;
+                    }
+                    let coszen = sunz.to_radians().cos();
+                    let w = ((coszen - min_cos) / denom).clamp(0.0, 1.0);
+                    *out = w as f32;
+                }
+            });
+    }
+    Ok(weights)
 }
 
 fn build_result(
@@ -689,6 +770,103 @@ mod tests {
         // Some edge pixels may be NaN (space) or have very large corrections.
         let finite: Vec<_> = vals.iter().filter(|v| v.is_finite()).copied().collect();
         assert!(!finite.is_empty());
+    }
+
+    #[test]
+    fn sza_gradient_matches_satpy_reference_in_falloff_band() {
+        // Reference values from Satpy `_sunzen_corr_cos_ndarray`
+        // (limit=88°, max_sza=95°), evaluated in the ANGLE domain. The
+        // correction is continuous at 88° with the 1/cos branch
+        // (1/cos(88°) ≈ 28.65) and falls to 0 at max_sza. A previous
+        // cosine-domain gradient was inverted (0 at 88°, ~25.8 at 94.5°).
+        let max_sza = 95.0_f64;
+        let max_sza_rad = max_sza.to_radians();
+        let max_sza_cos = max_sza_rad.cos();
+        const LIMIT_DEG: f64 = 88.0;
+        let limit_rad = LIMIT_DEG.to_radians();
+        let limit_cos = limit_rad.cos();
+        let cases = [
+            // (sza_deg, satpy reference factor)
+            (88.0_f64, 1.0 / limit_cos), // continuous at the limit
+            (88.5, 25.801_642_188),
+            (89.0, 23.133_712_470),
+            (90.0, 18.264_731_037),
+            (91.0, 13.909_278_730),
+            (92.0, 9.969_292_864),
+            (93.0, 6.372_367_580),
+            (94.0, 3.063_517_071),
+            (94.5, 1.503_386_147),
+            (95.0, 0.0), // zero at max_sza
+            (96.0, 0.0), // night
+        ];
+        for (sza_deg, expected) in cases {
+            let cos = sza_deg.to_radians().cos();
+            let got = sza_correction_factor(cos, limit_cos, max_sza_cos, limit_rad, max_sza_rad);
+            assert!(
+                (f64::from(got) - expected).abs() < 1e-6,
+                "SZA {sza_deg}°: got {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn daynight_weights_match_satpy_coszen_blend() {
+        // 3×3 grid with the cardinal pixels at the AHI full-disk limb
+        // (2025-09-23 07:20 UTC reference angles from angles.rs tests).
+        // Satpy `DayNightCompositor` with lim_low=73, lim_high=85:
+        // w = (cos(SZA) - cos(85°)) / (cos(73°) - cos(85°)), clipped [0, 1].
+        let geos = crate::geos::GeosProjection {
+            semi_major_axis: 6_378_137.0,
+            semi_minor_axis: 6_356_752.314_14,
+            perspective_point_height: 35_785_863.0,
+            longitude_of_projection_origin: 140.7,
+        };
+        let limb = 5.225_25e6;
+        let params = AngleParams {
+            sat_lon: 140.7,
+            sat_lat: 0.0,
+            sat_alt: geos.perspective_point_height,
+            utc: UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0),
+            width: 3,
+            height: 3,
+            geos,
+            x_coords: vec![-limb, 0.0, limb],
+            y_coords: vec![limb, 0.0, -limb],
+        };
+        let weights = daynight_blend_weights(&params, 73.0, 85.0).expect("weights");
+        // Row 0: space corner, top limb, space corner.
+        // Row 1: left limb, center, right limb.
+        // Row 2: space corner, bottom limb, space corner.
+        let expected = [
+            [0.0, 0.171_689, 0.0], // space ... top limb ... space
+            [1.0, 1.0, 0.0],       // left limb (day) ... right limb (night)
+            [0.0, 0.204_594, 0.0], // space ... bottom limb ... space
+        ];
+        for row in 0..3 {
+            for col in 0..3 {
+                let got = weights[row * 3 + col];
+                let exp = expected[row][col];
+                assert!(
+                    (f64::from(got) - exp).abs() < 1e-3,
+                    "pixel ({row},{col}) weight {got}, expected {exp}"
+                );
+            }
+        }
+        // The center SZA (72.61°) is below lim_low → weight clipped to 1.
+        assert_eq!(weights[4], 1.0);
+    }
+
+    #[test]
+    fn daynight_weights_validate_limits() {
+        let params = make_angle_params(3, 3);
+        assert!(daynight_blend_weights(&params, 85.0, 73.0).is_err());
+        assert!(daynight_blend_weights(&params, 73.0, 73.0).is_err());
+        assert!(daynight_blend_weights(&params, f64::NAN, 85.0).is_err());
+        assert!(daynight_blend_weights(&params, 73.0, 85.0).is_ok());
+        // Space pixels (outside the disk) get weight 0.
+        let w = daynight_blend_weights(&params, 73.0, 85.0).expect("ok");
+        assert_eq!(w.len(), 9);
+        assert!(w.iter().all(|v| (0.0..=1.0).contains(v)));
     }
 
     #[test]

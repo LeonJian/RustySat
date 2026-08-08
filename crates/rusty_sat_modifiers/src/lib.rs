@@ -51,4 +51,6 @@ pub use rayleigh::{
     rayleigh_correct, rayleigh_correct_with_sun_zenith, AerosolType, Atmosphere, RayleighConfig,
     RayleighCorrector, RedBandSource,
 };
-pub use sun_zenith::{sun_zenith_correct, sun_zenith_correct_with, SunZenithCorrector};
+pub use sun_zenith::{
+    daynight_blend_weights, sun_zenith_correct, sun_zenith_correct_with, SunZenithCorrector,
+};

@@ -372,9 +372,8 @@ impl RayleighCorrector {
         let max_sza_rad = max_sza.to_radians();
         let max_sza_cos = max_sza_rad.cos();
         const LIMIT_DEG: f64 = 88.0;
-        let limit_cos = LIMIT_DEG.to_radians().cos();
-        let span = limit_cos - max_sza_cos;
-        let inv_span = 1.0 / span;
+        let limit_rad = LIMIT_DEG.to_radians();
+        let limit_cos = limit_rad.cos();
         let config = self.config;
         let lut = self.lut_data;
 
@@ -388,7 +387,15 @@ impl RayleighCorrector {
         let mask = array.mask().cloned();
         let mut vis_f32 = into_vis_f32(array);
 
-        let red_relax = red_relax_from_source(red, height * width, true)?;
+        // The Rayleigh LUT only covers 400-800 nm. Bands outside that range
+        // (e.g. AHI B04 at 0.86 µm) still receive the sun-zenith amplification
+        // — Satpy's `hybrid_green` feeds B04 through `[sunz_corrected]` only —
+        // and the Rayleigh subtraction runs just for in-range wavelengths.
+        let grid_3d = lut.grid_3d.as_ref();
+        let red_relax = match grid_3d {
+            Some(_) => red_relax_from_source(red, height * width, true)?,
+            None => RedRelax::None,
+        };
 
         let gmst_val = gmst(params.utc);
         let (sun_ra, sun_dec) = sun_ra_dec(params.utc);
@@ -403,21 +410,6 @@ impl RayleighCorrector {
             (config.reduce_lim_low, config.reduce_lim_high)
         };
         let zenith_span = zenith_hi - zenith_lo;
-
-        let grid_3d = match &lut.grid_3d {
-            Some(g) => g,
-            None => {
-                return build_result_combined(
-                    vis_f32,
-                    mask,
-                    height,
-                    width,
-                    &config,
-                    area_attr,
-                    source_coords,
-                );
-            }
-        };
 
         // pyspectral clips the sun/sat zenith ANGLE to the LUT maximum
         // secant before computing 1/cos; out-of-range pixels evaluate exactly
@@ -466,8 +458,15 @@ impl RayleighCorrector {
                             cos_sza,
                             limit_cos,
                             max_sza_cos,
-                            inv_span,
+                            limit_rad,
+                            max_sza_rad,
                         );
+
+                        // Wavelength outside the Rayleigh LUT range: this band
+                        // is sun-zenith corrected only (Satpy `[sunz_corrected]`).
+                        let Some(grid) = grid_3d else {
+                            continue;
+                        };
 
                         let (satz, sata) =
                             sat_angles_from_lonlat(lon, lat, sat_x, sat_y, sat_z, gmst_val);
@@ -481,7 +480,7 @@ impl RayleighCorrector {
                         let satzsec = secant_clamped(satz, satz_max);
 
                         let mut correction = trilinear_interpolate(
-                            grid_3d,
+                            grid,
                             sunzsec,
                             azidiff,
                             satzsec,
@@ -958,6 +957,85 @@ mod tests {
             }
             Err(_) => { /* no real LUT available in unit test */ }
         }
+    }
+
+    #[test]
+    fn combined_out_of_lut_wavelength_still_applies_sun_zenith() {
+        // AHI B04 (0.86 µm) is outside the Rayleigh LUT range (400-800 nm).
+        // Satpy's `hybrid_green` feeds B04 through `[sunz_corrected]` only, so
+        // the combined path must still apply the sun-zenith amplification
+        // instead of returning the raw reflectance. Regression for the early
+        // return that skipped the whole strip loop for out-of-LUT wavelengths.
+        let Some(lut_path) = local_rayleigh_lut() else {
+            eprintln!("SKIP: no Rayleigh LUT available");
+            return;
+        };
+        let cfg = RayleighConfig {
+            platform_name: "Himawari-9".into(),
+            sensor: "ahi".into(),
+            atmosphere: Atmosphere::UsStandard,
+            aerosol_type: AerosolType::RayleighOnly,
+            ..RayleighConfig::default()
+        };
+        let corrector = RayleighCorrector::with_config(&lut_path, cfg, 860.0).expect("corrector");
+        let utc = UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0);
+
+        let ds = combined_area_dataset(vec![50.0_f32; 9]);
+        let result =
+            rayleigh_correct_with_sun_zenith(corrector, ds, RedBandSource::None, utc, 95.0)
+                .expect("combined path with out-of-LUT wavelength");
+        assert_eq!(
+            result.attr("modifier").and_then(MetadataValue::as_str),
+            Some("combined_sun_zenith_rayleigh_correction")
+        );
+
+        // Parity with the standalone SunZenithCorrector: both paths must run
+        // the identical sunz-only math for an out-of-LUT band.
+        let ds_ref = combined_area_dataset(vec![50.0_f32; 9]);
+        let area = ds_ref.attr("area").expect("area");
+        let coords = ds_ref.array().expect("arr").coords();
+        let (x_coords, y_coords) = crate::angles::extract_xy_coords(coords).expect("coords");
+        let params = AngleParams::from_dataset_area(area, x_coords, y_coords, utc).expect("params");
+        let reference = SunZenithCorrector::default()
+            .apply_correction(ds_ref, params)
+            .expect("sunz-only reference");
+
+        let a = result.array().expect("arr").values_as_f64();
+        let b = reference.array().expect("arr").values_as_f64();
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            if y.is_nan() {
+                assert!(x.is_nan(), "pixel {i}: expected NaN, got {x}");
+            } else {
+                assert!(
+                    (x - y).abs() < 1e-4,
+                    "pixel {i}: combined {x} != sunz-only reference {y}"
+                );
+            }
+        }
+        // The center pixel must be amplified above the raw 50
+        // (1/cos(72.6°) ≈ 3.35 for 2025-09-23 07:20 UTC), proving the
+        // sun-zenith path ran instead of returning the raw array.
+        let center = a[4];
+        assert!(
+            center > 100.0 && center < 300.0,
+            "center amplified by sunz: {center}"
+        );
+    }
+
+    /// Locate a local pyspectral Rayleigh LUT in the standard per-platform
+    /// directories; `None` when unavailable (test then skips).
+    fn local_rayleigh_lut() -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(PathBuf::from(format!(
+                "{home}/Library/Application Support/pyspectral/rayleigh_only/rayleigh_lut_us-standard.h5"
+            )));
+            candidates.push(PathBuf::from(format!(
+                "{home}/.local/share/pyspectral/rayleigh_only/rayleigh_lut_us-standard.h5"
+            )));
+        }
+        candidates.into_iter().find(|p| p.is_file())
     }
 
     // ── Helpers for combined tests ──
