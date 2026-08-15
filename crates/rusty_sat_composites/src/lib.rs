@@ -15,6 +15,8 @@
 //!   difference, ratio, sum, normalized-difference (NDVI-style).
 //! - [`BandReplacementCompositor`](spectral::BandReplacementCompositor) —
 //!   in-place band replacement in a band-major composite.
+//! - [`DayNightCompositor`] — blend a corrected (day) and uncorrected (night)
+//!   RGB composite with per-pixel solar-zenith weights (Satpy `fill.py`).
 //!
 //! # Enhancement
 //!
@@ -37,6 +39,7 @@ pub mod arithmetic;
 mod common;
 pub mod config;
 pub mod enhancement;
+pub mod fill;
 pub mod self_sharpened;
 pub mod spectral;
 
@@ -46,6 +49,7 @@ pub use config::{
     EnhancementOperation,
 };
 pub use enhancement::EnhancementExecutor;
+pub use fill::DayNightCompositor;
 pub use self_sharpened::SelfSharpenedRgb;
 pub use spectral::{BandReplacementCompositor, SpectralBlender};
 

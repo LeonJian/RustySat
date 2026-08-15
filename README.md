@@ -128,10 +128,10 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
 | `rusty_sat_core` | Foundation types, dataset model, scene orchestration | `DataId`, `Dataset`, `Scene`, `RustySatError` |
 | `rusty_sat_readers` | File format parsers and data loaders | `Reader` trait, `AhiHsdReader`, `NetCdfFileHandler` |
 | `rusty_sat_resample` | Spatial resampling algorithms | `AreaDefinition`, `NearestAreaResampler`, `BilinearAreaResampler` |
-| `rusty_sat_composites` | Image compositing and enhancement | `RgbCompositor`, `ArithmeticCompositor`, `EnhancementExecutor` |
+| `rusty_sat_composites` | Image compositing and enhancement | `RgbCompositor`, `SelfSharpenedRgb`, `DayNightCompositor`, `EnhancementExecutor` |
 | `rusty_sat_image` | Image buffer management | `FloatImage`, `ValidityMask` |
 | `rusty_sat_writers` | File output serializers | `SimpleImageWriter`, `FloatTiffWriter`, `PgmWriter` |
-| `rusty_sat_modifiers` | Atmospheric and geometric corrections | `RayleighCorrector`, angle computation |
+| `rusty_sat_modifiers` | Atmospheric and geometric corrections | `RayleighCorrector`, `SunZenithCorrector`, angle computation |
 | `rusty_sat_config` | YAML configuration loading | `AppConfig`, area definitions |
 | `rusty_sat_cli` | Command-line interface (skeleton) | `main()` |
 
@@ -178,6 +178,8 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
 - **Arithmetic Compositor** — NDVI, difference, ratio, sum
 - **Spectral Blender** — weighted band combination
 - **Band Replacement** — patch corrected channels into composites
+- **Self-Sharpened RGB** — high-resolution band sharpening (Satpy `resolution.py`)
+- **Day/Night Blend** — corrected/uncorrected RGB blending by solar-zenith weights (Satpy `fill.py`), used by the JMA `true_color_reproduction` composite
 
 ### Image Processing
 
@@ -185,13 +187,18 @@ Files (.DAT.bz2, .nc) → Readers → Scene → Composites/Resample → Image �
 - **Auto-stretch** — percentile-based normalization
 - **Gamma/Invert** — tone curve adjustments
 - **ValidityMask** — bit-packed missing pixel tracking
+- **JMA True Color Reproduction** — per-pixel color conversion matrix + log stretch (Satpy `true_color_reproduction_color_stretch`), fused 8-bit finalizer `finalize_rgb_jma_u8`
 
 ### Modifiers
 
+- **Sun-Zenith Correction** — TOA reflectance normalization with Satpy-style 88°→95° angle-domain gradient falloff
+- **Day/Night Blend Weights** — cos-zenith weights for the `DayNightCompositor` (Satpy `DayNightCompositor._get_coszen_blending_weights`)
 - **Rayleigh Correction** — atmospheric scattering removal
   - Pyspectral-compatible LUT loading
-  - Parallel pixel interpolation
-  - Cloud relaxation and high-zenith handling
+  - Parallel pixel interpolation with LUT-boundary secant clamping
+  - Cloud relaxation via the red band (Satpy `rayleigh_corrected` semantics) and high-zenith handling
+  - Batched multi-band corrections sharing one angle pass, plus fused day/night blend-weight emission
+- **Exact geos inverse** — curved-Earth ray–ellipsoid geolocation for full-disk limb-correct angles
 
 ### Writers
 

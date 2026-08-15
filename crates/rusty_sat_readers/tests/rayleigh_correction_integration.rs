@@ -15,7 +15,8 @@
 
 use rusty_sat_core::{AnyDataArray, MetadataValue};
 use rusty_sat_modifiers::{
-    rayleigh_correct, AerosolType, Atmosphere, RayleighConfig, RayleighCorrector, UtcInstant,
+    rayleigh_correct, AerosolType, Atmosphere, RayleighConfig, RayleighCorrector, RedBandSource,
+    UtcInstant,
 };
 use rusty_sat_readers::{AhiCalibration, AhiHsdFileHandler, AhiHsdReader, AhiSegmentInfo, Reader};
 use rusty_sat_writers::{SimpleImageWriter, Writer};
@@ -217,8 +218,8 @@ fn rayleigh_correction_on_ahi_b01() {
 
     // Step 3: Apply Rayleigh correction
     let t_corr = Instant::now();
-    let corrected =
-        rayleigh_correct(corrector, dataset, None, obs_time).expect("rayleigh correction");
+    let corrected = rayleigh_correct(corrector, dataset, RedBandSource::None, obs_time)
+        .expect("rayleigh correction");
     let corr_time = t_corr.elapsed();
     eprintln!("  Correction time: {:.2}s", corr_time.as_secs_f64());
 
@@ -360,16 +361,16 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
         b02_arr.shape_nd()[1]
     );
 
-    let red_ref = if b03_arr.shape_nd() == b02_arr.shape_nd() {
+    let red_source = if b03_arr.shape_nd() == b02_arr.shape_nd() {
         eprintln!("  B03 and B02 shapes match — using cloud relaxation");
-        Some(&b02_dataset)
+        RedBandSource::Dataset(&b02_dataset)
     } else {
         eprintln!(
             "  B03 ({}) and B02 ({}) shapes differ — skipping cloud relaxation",
             b03_arr.shape_nd()[0],
             b02_arr.shape_nd()[0]
         );
-        None
+        RedBandSource::None
     };
 
     let lut_path = lut_base.join("rayleigh_lut_us-standard.h5");
@@ -382,8 +383,8 @@ fn rayleigh_correction_on_ahi_b03_with_red_band() {
         RayleighCorrector::with_config(&lut_path, RayleighConfig::default(), wavelength_nm)
             .expect("create corrector");
 
-    let corrected =
-        rayleigh_correct(corrector, b03_dataset, red_ref, obs_time).expect("rayleigh correction");
+    let corrected = rayleigh_correct(corrector, b03_dataset, red_source, obs_time)
+        .expect("rayleigh correction");
 
     let corr_arr = corrected.array().expect("corrected array");
     eprintln!(

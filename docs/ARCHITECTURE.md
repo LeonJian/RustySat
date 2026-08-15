@@ -221,6 +221,8 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 - `ArithmeticCompositor` — binary ops: difference, ratio, sum, normalized difference (NDVI)
 - `SpectralBlender` — weighted sum of N bands
 - `BandReplacementCompositor` — in-place band replacement
+- `SelfSharpenedRgb` — high-resolution band sharpening (Satpy `resolution.py`)
+- `DayNightCompositor` — blend corrected (day) and uncorrected (night) band-major RGB composites with per-pixel solar-zenith weights (Satpy `fill.py`; weights computed externally, e.g. `rusty_sat_modifiers::daynight_blend_weights`)
 
 **Enhancement**:
 - `EnhancementExecutor` — safely executes YAML-defined operations (stretch, gamma, invert)
@@ -244,6 +246,10 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
   - Tracks history for reproducibility
 - `Image` — 8-bit output (u8 pixels) via `to_u8_image()`
 - `Image16` — 16-bit output (u16 pixels) for HDR/scientific display
+
+**Enhancement Finalizers**:
+- `finalize_rgb_cira_u8` — fused CIRA log stretch (Satpy `true_color_default`)
+- `finalize_rgb_jma_u8` — fused JMA True Color Reproduction enhancement: per-pixel color conversion matrix (Satpy `enhancements/ahi.py`, Himawari-8/9) + log stretch min 3/max 150 (Satpy `true_color_reproduction_color_stretch`)
 
 **Image Modes**:
 - `ImageMode::Luma` — 1 channel (grayscale)
@@ -285,10 +291,11 @@ The processing pipeline transforms raw satellite files into calibrated, enhanced
 
 **Modules**:
 - `astronomy` — solar position math (GMST, sun RA/DEC, cos_zen, alt/az) ported from pyorbital
-- `geos` — geostationary projection inverse (x/y meters → lon/lat degrees)
+- `geos` — geostationary projection inverse (x/y meters → lon/lat degrees) via exact ray–ellipsoid intersection (PROJ `geos` / pyresample `get_lonlats` parity; replaces the old flat-plane approximation that was off by ~57° at the disk limb)
 - `orbital` — satellite look angles (azimuth, elevation, zenith) ported from pyorbital
-- `angles` — combined angle computation for dataset grids
-- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate)
+- `angles` — combined angle computation for dataset grids (exact geos inverse + pyorbital solar/satellite angles; strip-parallel per-pixel)
+- `sun_zenith` — solar-zenith correction with Satpy-style 88°–max_sza angle-domain gradient falloff, plus `daynight_blend_weights` (cos-zenith blend weights for the `DayNightCompositor`, Satpy `DayNightCompositor._get_coszen_blending_weights` parity)
+- `rayleigh` — Rayleigh scattering correction modifier (delegates LUT I/O and interpolation to `rustyspectral` crate), pyspectral-parity red-band cloud relaxation via `RedBandSource` (`None` / `Dataset` / `SunZenithCorrectedVis`), LUT-boundary angle clipping, correction clip to [0,100]; batched multi-band corrections sharing one angle pass (`apply_corrections_with_sun_zenith_batch`) and fused day/night blend-weight emission (`apply_correction_with_sun_zenith_and_weights`)
 
 **Design Patterns**:
 - `UtcInstant` for time representation (dependency-free)

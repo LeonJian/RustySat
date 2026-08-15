@@ -228,16 +228,16 @@ pub(crate) fn compute_angles_strip(
                 let row = y0 + local_row;
                 let y = y_coords[row];
                 for (col, &x) in x_coords.iter().enumerate() {
-                    let Some((lon, lat)) = geos.inverse(x, y) else {
+                    let Some((lon, lat)) = geos.inverse_rad(x, y) else {
                         zen_row[col] = f64::NAN;
                         azi_row[col] = f64::NAN;
                         sz_row[col] = f64::NAN;
                         sa_row[col] = f64::NAN;
                         continue;
                     };
-                    let (sunz, suna) = solar_zenith_azimuth(lon, lat, sun_ra, sun_dec, gmst_val);
+                    let (sunz, suna) = sun_angles_from_lonlat(lon, lat, sun_ra, sun_dec, gmst_val);
                     let (satzv, satav) =
-                        satellite_zenith_azimuth(lon, lat, sat_x, sat_y, sat_z, gmst_val);
+                        sat_angles_from_lonlat(lon, lat, sat_x, sat_y, sat_z, gmst_val);
                     zen_row[col] = sunz;
                     azi_row[col] = suna;
                     sz_row[col] = satzv;
@@ -249,7 +249,7 @@ pub(crate) fn compute_angles_strip(
             let row = y0 + local_row;
             let y = y_coords[row];
             for (col, &x) in x_coords.iter().enumerate() {
-                let Some((lon, lat)) = geos.inverse(x, y) else {
+                let Some((lon, lat)) = geos.inverse_rad(x, y) else {
                     let idx = local_row * width + col;
                     sun_zenith[idx] = f64::NAN;
                     sun_azimuth[idx] = f64::NAN;
@@ -257,9 +257,9 @@ pub(crate) fn compute_angles_strip(
                     sat_azimuth[idx] = f64::NAN;
                     continue;
                 };
-                let (sunz, suna) = solar_zenith_azimuth(lon, lat, sun_ra, sun_dec, gmst_val);
+                let (sunz, suna) = sun_angles_from_lonlat(lon, lat, sun_ra, sun_dec, gmst_val);
                 let (satzv, satav) =
-                    satellite_zenith_azimuth(lon, lat, sat_x, sat_y, sat_z, gmst_val);
+                    sat_angles_from_lonlat(lon, lat, sat_x, sat_y, sat_z, gmst_val);
                 let idx = local_row * width + col;
                 sun_zenith[idx] = sunz;
                 sun_azimuth[idx] = suna;
@@ -277,134 +277,21 @@ pub(crate) fn compute_angles_strip(
     }
 }
 
-/// Per-column precomputed trig constants to avoid redundant sin/cos per pixel.
-#[derive(Clone)]
-pub(crate) struct ColumnPrecompute {
-    pub cos_theta_x: f64,
-    pub sin_h_solar: f64,
-    pub cos_h_solar: f64,
-    pub sin_theta_sat: f64,
-    pub cos_theta_sat: f64,
-}
-
-/// Build per-column precomputed trig tables.
-pub(crate) fn precompute_columns(
-    x_coords: &[f64],
-    h_inv: f64,
-    lon_0_rad: f64,
-    gmst_val: f64,
-    sun_ra: f64,
-) -> Vec<ColumnPrecompute> {
-    x_coords
-        .iter()
-        .map(|&x| {
-            let theta_x = x * h_inv;
-            let cos_theta_x = theta_x.cos();
-            let psr = lon_0_rad - sun_ra;
-            let h_solar = (gmst_val + theta_x + psr).rem_euclid(2.0 * std::f64::consts::PI);
-            let theta_sat = (gmst_val + theta_x + lon_0_rad).rem_euclid(2.0 * std::f64::consts::PI);
-            ColumnPrecompute {
-                cos_theta_x,
-                sin_h_solar: h_solar.sin(),
-                cos_h_solar: h_solar.cos(),
-                sin_theta_sat: theta_sat.sin(),
-                cos_theta_sat: theta_sat.cos(),
-            }
-        })
-        .collect()
-}
-
-/// Per-strip row precomputation: `tan(theta_y)` for each row in `y0..y1`.
-pub(crate) fn precompute_rows(y_coords: &[f64], y0: usize, y1: usize, h_inv: f64) -> Vec<f64> {
-    (y0..y1)
-        .map(|row| {
-            let theta_y = y_coords[row] * h_inv;
-            theta_y.tan()
-        })
-        .collect()
-}
-
-/// Solar zenith + azimuth using precomputed column constants.
+/// Solar zenith + azimuth from geodetic lon/lat (radians).
+///
+/// Ported from `pyorbital.astronomy.cos_zen` / `get_alt_az`.
 #[inline]
-pub(crate) fn solar_single_precomputed(
+pub(crate) fn sun_angles_from_lonlat(
+    lon_rad: f64,
     lat_rad: f64,
-    sun_dec: f64,
-    col: &ColumnPrecompute,
-) -> (f64, f64) {
-    let sin_lat = lat_rad.sin();
-    let cos_lat = lat_rad.cos();
-    let sun_dec_sin = sun_dec.sin();
-    let sun_dec_cos = sun_dec.cos();
-
-    let cz = sin_lat * sun_dec_sin + cos_lat * sun_dec_cos * col.cos_h_solar;
-    let sunz = if cz.is_finite() && cz.abs() <= 1.0 {
-        cz.acos().to_degrees()
-    } else if cz > 1.0 {
-        0.0
-    } else {
-        180.0
-    };
-
-    let az = (-col.sin_h_solar).atan2(cos_lat * sun_dec.tan() - sin_lat * col.cos_h_solar);
-    let suna = az.to_degrees().rem_euclid(360.0);
-
-    (sunz, suna)
-}
-
-/// Satellite zenith + azimuth using precomputed column constants.
-#[inline]
-pub(crate) fn satellite_single_precomputed(
-    lat_rad: f64,
-    col: &ColumnPrecompute,
-    sat_x: f64,
-    sat_y: f64,
-    sat_z: f64,
-) -> (f64, f64) {
-    let sin_lat = lat_rad.sin();
-    let cos_lat = lat_rad.cos();
-
-    let f_minus2 = F - 2.0;
-    let c = 1.0 / (1.0 + F * f_minus2 * sin_lat.powi(2)).sqrt();
-    let sq = c * (1.0 - F).powi(2);
-    let achcp = (EARTH_A_KM * c) * cos_lat;
-    let opos_x = achcp * col.cos_theta_sat;
-    let opos_y = achcp * col.sin_theta_sat;
-    let opos_z = EARTH_A_KM * sq * sin_lat;
-
-    let rx = sat_x - opos_x;
-    let ry = sat_y - opos_y;
-    let rz = sat_z - opos_z;
-
-    let top_s = sin_lat * col.cos_theta_sat * rx + sin_lat * col.sin_theta_sat * ry - cos_lat * rz;
-    let top_e = -col.sin_theta_sat * rx + col.cos_theta_sat * ry;
-    let top_z = cos_lat * col.cos_theta_sat * rx + cos_lat * col.sin_theta_sat * ry + sin_lat * rz;
-
-    let az = (-top_e).atan2(top_s) + std::f64::consts::PI;
-    let sata = az.rem_euclid(2.0 * std::f64::consts::PI).to_degrees();
-
-    let rg = (rx * rx + ry * ry + rz * rz).sqrt();
-    let el = (top_z / rg).min(1.0).asin();
-    let satz = (std::f64::consts::FRAC_PI_2 - el).to_degrees();
-
-    (satz, sata)
-}
-
-/// Solar zenith and azimuth angles for a single pixel, using precomputed
-/// solar right-ascension/declination and GMST to avoid redundant work.
-#[inline]
-fn solar_zenith_azimuth(
-    lon_deg: f64,
-    lat_deg: f64,
     sun_ra: f64,
     sun_dec: f64,
     gmst_val: f64,
 ) -> (f64, f64) {
-    let lon = lon_deg.to_radians();
-    let lat = lat_deg.to_radians();
-    let h = (gmst_val + lon).rem_euclid(2.0 * std::f64::consts::PI) - sun_ra;
+    let h = (gmst_val + lon_rad).rem_euclid(2.0 * std::f64::consts::PI) - sun_ra;
 
     // solar zenith (inline from astronomy::cos_zen)
-    let cz = lat.sin() * sun_dec.sin() + lat.cos() * sun_dec.cos() * h.cos();
+    let cz = lat_rad.sin() * sun_dec.sin() + lat_rad.cos() * sun_dec.cos() * h.cos();
     let sunz = if cz.is_finite() && cz.abs() <= 1.0 {
         cz.acos().to_degrees()
     } else if cz > 1.0 {
@@ -414,42 +301,41 @@ fn solar_zenith_azimuth(
     };
 
     // solar azimuth (inline from astronomy::get_alt_az)
-    let az = (-h.sin()).atan2(lat.cos() * sun_dec.tan() - lat.sin() * h.cos());
+    let az = (-h.sin()).atan2(lat_rad.cos() * sun_dec.tan() - lat_rad.sin() * h.cos());
     let suna = az.to_degrees().rem_euclid(360.0);
 
     (sunz, suna)
 }
 
-/// Satellite zenith and azimuth angles for a single pixel, using precomputed
-/// satellite ECI position and GMST to avoid redundant work.
+/// Satellite zenith + azimuth from geodetic lon/lat (radians).
+///
+/// Ported from `pyorbital.orbital.get_observer_look`.
 #[inline]
-fn satellite_zenith_azimuth(
-    lon_deg: f64,
-    lat_deg: f64,
+pub(crate) fn sat_angles_from_lonlat(
+    lon_rad: f64,
+    lat_rad: f64,
     sat_x: f64,
     sat_y: f64,
     sat_z: f64,
     gmst_val: f64,
 ) -> (f64, f64) {
-    let lon = lon_deg.to_radians();
-    let lat = lat_deg.to_radians();
-    let theta = (gmst_val + lon).rem_euclid(2.0 * std::f64::consts::PI);
+    let theta = (gmst_val + lon_rad).rem_euclid(2.0 * std::f64::consts::PI);
+    let sin_lat = lat_rad.sin();
+    let cos_lat = lat_rad.cos();
 
     // Ground observer position (inline from astronomy::observer_position)
-    let c = 1.0 / (1.0 + F * (F - 2.0) * lat.sin().powi(2)).sqrt();
+    let c = 1.0 / (1.0 + F * (F - 2.0) * sin_lat.powi(2)).sqrt();
     let sq = c * (1.0 - F).powi(2);
-    let achcp = (EARTH_A_KM * c) * lat.cos();
+    let achcp = (EARTH_A_KM * c) * cos_lat;
     let opos_x = achcp * theta.cos();
     let opos_y = achcp * theta.sin();
-    let opos_z = EARTH_A_KM * sq * lat.sin();
+    let opos_z = EARTH_A_KM * sq * sin_lat;
 
     // Vector from observer to satellite
     let rx = sat_x - opos_x;
     let ry = sat_y - opos_y;
     let rz = sat_z - opos_z;
 
-    let sin_lat = lat.sin();
-    let cos_lat = lat.cos();
     let sin_theta = theta.sin();
     let cos_theta = theta.cos();
 
@@ -463,8 +349,7 @@ fn satellite_zenith_azimuth(
 
     // satellite zenith
     let rg = (rx * rx + ry * ry + rz * rz).sqrt();
-    let top_z_div = top_z / rg;
-    let el = top_z_div.min(1.0).asin();
+    let el = (top_z / rg).min(1.0).asin();
     let satz = (std::f64::consts::FRAC_PI_2 - el).to_degrees(); // 90° - elevation
 
     (satz, sata)
@@ -514,6 +399,68 @@ mod tests {
             x_coords,
             y_coords,
         }
+    }
+
+    fn make_limb_params() -> AngleParams {
+        // AHI full-disk 3×3 grid with the cardinal pixels at the limb
+        // (±5.22525e6 m projection coordinates).
+        let geos = GeosProjection {
+            semi_major_axis: 6_378_137.0,
+            semi_minor_axis: 6_356_752.314_14,
+            perspective_point_height: 35_785_863.0,
+            longitude_of_projection_origin: 140.7,
+        };
+        let limb = 5.225_25e6;
+        AngleParams {
+            sat_lon: 140.7,
+            sat_lat: 0.0,
+            sat_alt: geos.perspective_point_height,
+            utc: UtcInstant::from_ymdhms(2025, 9, 23, 7, 20, 0),
+            width: 3,
+            height: 3,
+            geos,
+            x_coords: vec![-limb, 0.0, limb],
+            y_coords: vec![limb, 0.0, -limb],
+        }
+    }
+
+    #[test]
+    fn limb_angles_match_curved_earth_reference() {
+        // Reference sun zenith angles for 2025-09-23 07:20:00 UTC computed
+        // with the exact ellipsoidal geos inverse + the pyorbital solar
+        // model. The old flat-plane approximation gave ~15° everywhere
+        // instead of the true 8°-137° pattern.
+        let angles = make_limb_params().compute_angles();
+        // Row 1 (equator): left limb, center, right limb.
+        assert!(
+            (angles.sun_zenith[3] - 8.147_514).abs() < 1e-5,
+            "left limb sunz = {}",
+            angles.sun_zenith[3]
+        );
+        assert!(
+            (angles.sun_zenith[4] - 72.608_919).abs() < 1e-5,
+            "center sunz = {}",
+            angles.sun_zenith[4]
+        );
+        assert!(
+            (angles.sun_zenith[5] - 137.072_392).abs() < 1e-5,
+            "right limb sunz = {}",
+            angles.sun_zenith[5]
+        );
+        // Column 1 (sub-satellite meridian): top limb, center, bottom limb.
+        assert!(
+            (angles.sun_zenith[1] - 82.972_097).abs() < 1e-5,
+            "top limb sunz = {}",
+            angles.sun_zenith[1]
+        );
+        assert!(
+            (angles.sun_zenith[7] - 82.584_799).abs() < 1e-5,
+            "bottom limb sunz = {}",
+            angles.sun_zenith[7]
+        );
+        // Space corner pixels have NaN angles.
+        assert!(angles.sun_zenith[0].is_nan());
+        assert!(angles.sun_zenith[8].is_nan());
     }
 
     #[test]

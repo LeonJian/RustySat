@@ -2,7 +2,8 @@
 //! coordinates (meters) to geographic lon/lat (degrees).
 //!
 //! Reference:
-//! - PROJ `geos` projection source code (spherical forward/inverse).
+//! - PROJ `geos` projection (Snyder, "Map Projections — A Working Manual",
+//!   §32 Geostationary Satellite View; used by pyresample `get_lonlats`).
 //! - `deps/pyresample/pyresample/geometry.py` — `AreaDefinition.get_lonlats`.
 //! - `satpy/satpy/readers/ahi_hsd.py` — area extent computation.
 //! - `crates/rusty_sat_readers/src/ahi_hsd.rs` — `geos_area_extent` uses
@@ -13,23 +14,27 @@
 //!
 //! The existing Rusty Sat code stores projection coordinates as
 //! `scanning_angle_radians * h`, where `h` is the perspective point height
-//! above the surface.  In the standard PROJ geos convention, coordinates are
-//! `(a + h) * tan(scanning_angle)`.  We recover the scanning angle from the
-//! stored coordinates and then convert to geocentric lon/lat using the
-//! proper geostationary perspective geometry.
+//! above the surface.  The inverse treats `(x, y)` as the point on the
+//! projection plane at distance `h` from the satellite along the nadir
+//! direction and solves the exact ray–ellipsoid intersection.
 //!
-//! From the PROJ geos forward (spherical), the direction vector from the
-//! satellite is:
+//! The satellite is at ECEF `S = ((a + h)·cos(λ₀), (a + h)·sin(λ₀), 0)` with
+//! `λ₀` the projection origin.  The ray direction through the projection
+//! plane point `(x, y)` is:
 //! ```text
-//!   Vx = cos(φ) * sin(λ_s)     // λ_s = geocentric lon offset
-//!   Vy = sin(φ)                 // φ = geocentric latitude
-//!   Vz = cos(φ) * cos(λ_s)
+//!   d = x·east + y·north − h·nadir
 //! ```
+//! with `east = (−sin λ₀, cos λ₀, 0)`, `north = (0, 0, 1)`, and
+//! `nadir = S/|S|`.  Intersecting `P = S + t·d` with the Earth ellipsoid
+//! `X²/a² + Y²/a² + Z²/b² = 1` gives a quadratic in `t`; a negative
+//! discriminant means the ray misses the Earth (space pixel).  The hit point
+//! is converted to geodetic lon/lat by Newton iteration on the ellipsoid
+//! normal.
 //!
-//! The column scanning angle `θ_x = atan(Vx / Vz) = λ_s` and the line
-//! scanning angle `θ_y = atan(Vy / Vz) = atan(tan(φ) / cos(λ_s))`.
-//!
-//! Inverting: `λ_s = θ_x`, `φ = atan(tan(θ_y) * cos(θ_x))`.
+//! This replaces the earlier flat tangent-plane approximation
+//! (`lat = atan(tan θ_y · cos θ_x)`, `lon = λ₀ + θ_x`) which is exact only
+//! at the sub-satellite point and underestimates ground offsets by the
+//! `h/a` curvature factor (≈5.6× at the limb).
 
 use rusty_sat_core::{Result, RustySatError};
 
@@ -83,52 +88,80 @@ impl GeosProjection {
         (self.semi_major_axis - self.semi_minor_axis).abs() < 1.0
     }
 
-    /// Maximum scanning angle (radians) before the horizon is reached.
+    /// Exact ellipsoidal geos inverse: projection x/y (meters) → geodetic
+    /// lon/lat (radians).
     ///
-    /// Pixels beyond this angle are space pixels.
-    fn max_scanning_angle(&self) -> f64 {
-        let d = self.satellite_radius();
-        let a = self.semi_major_axis;
-        (a / d).asin()
-    }
-
-    /// Inverse transform: geos projection x/y (meters) → lon/lat (degrees).
+    /// The ray from the satellite through the projection-plane point `(x, y)`
+    /// is intersected with the Earth ellipsoid (PROJ `geos` / pyresample
+    /// `get_lonlats` behavior). Returns `None` for space pixels (ray misses
+    /// the Earth, or the discriminant is negative).
     ///
-    /// Uses the scanning-angle convention from the existing Rusty Sat code:
-    /// `θ = proj_coord / h` (radians), then converts to geocentric lon/lat.
-    ///
-    /// Returns `(lon_deg, lat_deg)` or `None` if the point is a space pixel.
-    pub fn inverse(&self, x_meters: f64, y_meters: f64) -> Option<(f64, f64)> {
-        if !x_meters.is_finite() || !y_meters.is_finite() {
-            return None;
-        }
-
+    /// `lon_rad` includes the projection-origin longitude offset.
+    fn inverse_rad_inner(&self, x_meters: f64, y_meters: f64) -> Option<(f64, f64)> {
         let h = self.perspective_point_height;
         if h <= 0.0 {
             return None;
         }
+        let a = self.semi_major_axis;
+        let b = self.semi_minor_axis;
+        let lon_0 = self.longitude_of_projection_origin.to_radians();
+        let (sin_lon0, cos_lon0) = lon_0.sin_cos();
 
-        // Recover scanning angles (radians) from projection coordinates.
-        let theta_x = x_meters / h; // column scanning angle = geocentric lon offset
-        let theta_y = y_meters / h; // line scanning angle
+        // Satellite ECEF position, on the equator above the projection origin.
+        let r_sat = h + a;
+        let sx = r_sat * cos_lon0;
+        let sy = r_sat * sin_lon0;
 
-        // Visibility check: total scanning angle must be within the horizon.
-        let total_angle_sq = theta_x * theta_x + theta_y * theta_y;
-        let max_angle = self.max_scanning_angle();
-        if total_angle_sq.sqrt() >= max_angle {
+        // Ray direction: projection-plane point at distance h along nadir.
+        let dx = -x_meters * sin_lon0 - h * cos_lon0;
+        let dy = x_meters * cos_lon0 - h * sin_lon0;
+        let dz = y_meters;
+
+        // Ray–ellipsoid intersection quadratic: |S + t·d|_ell² = 1.
+        // (d is unit-free; A is separable in x/y, B and C are constants.)
+        let a_inv2 = 1.0 / (a * a);
+        let b_inv2 = 1.0 / (b * b);
+        let quad_a = (dx * dx + dy * dy) * a_inv2 + dz * dz * b_inv2;
+        let quad_b = 2.0 * (sx * dx + sy * dy) * a_inv2;
+        let quad_c = (sx * sx + sy * sy) * a_inv2 - 1.0;
+        let disc = quad_b * quad_b - 4.0 * quad_a * quad_c;
+        if !disc.is_finite() || disc < 0.0 {
             return None; // space pixel
         }
+        let t = (-quad_b - disc.sqrt()) / (2.0 * quad_a);
+        if t <= 0.0 {
+            return None;
+        }
+        let px = sx + t * dx;
+        let py = sy + t * dy;
+        let pz = t * dz;
 
-        // Geocentric longitude offset = scanning angle θ_x.
-        let lon_offset_rad = theta_x;
+        let lon = py.atan2(px);
 
-        // Geocentric latitude: φ = atan(tan(θ_y) * cos(θ_x))
-        let lat_rad = (theta_y.tan() * theta_x.cos()).atan();
+        // Geodetic latitude by Newton iteration on the ellipsoid normal.
+        let e2 = 1.0 - (b * b) / (a * a);
+        let rho = px.hypot(py);
+        let mut phi = pz.atan2(rho * (1.0 - e2));
+        for _ in 0..4 {
+            let sin_phi = phi.sin();
+            let n = a / (1.0 - e2 * sin_phi * sin_phi).sqrt();
+            phi = (pz + e2 * n * sin_phi).atan2(rho);
+        }
 
-        let lon_deg = lon_offset_rad.to_degrees() + self.longitude_of_projection_origin;
-        let lat_deg = lat_rad.to_degrees();
+        Some((lon, phi))
+    }
 
-        Some((normalize_lon(lon_deg), lat_deg))
+    /// Inverse transform: geos projection x/y (meters) → lon/lat (degrees).
+    ///
+    /// Exact ellipsoidal inverse matching the PROJ `geos` projection used by
+    /// Satpy/pyresample `get_lonlats`. Returns `(lon_deg, lat_deg)` or `None`
+    /// if the point is a space pixel.
+    pub fn inverse(&self, x_meters: f64, y_meters: f64) -> Option<(f64, f64)> {
+        if !x_meters.is_finite() || !y_meters.is_finite() {
+            return None;
+        }
+        let (lon, lat) = self.inverse_rad_inner(x_meters, y_meters)?;
+        Some((normalize_lon(lon.to_degrees()), lat.to_degrees()))
     }
 
     /// Inverse transform: geos projection x/y (meters) → lon/lat (radians).
@@ -142,25 +175,7 @@ impl GeosProjection {
         if !x_meters.is_finite() || !y_meters.is_finite() {
             return None;
         }
-
-        let h = self.perspective_point_height;
-        if h <= 0.0 {
-            return None;
-        }
-
-        let theta_x = x_meters / h;
-        let theta_y = y_meters / h;
-
-        let total_angle_sq = theta_x * theta_x + theta_y * theta_y;
-        let max_angle = self.max_scanning_angle();
-        if total_angle_sq.sqrt() >= max_angle {
-            return None;
-        }
-
-        let lat_rad = (theta_y.tan() * theta_x.cos()).atan();
-        let lon_rad = theta_x + self.longitude_of_projection_origin.to_radians();
-
-        Some((lon_rad, lat_rad))
+        self.inverse_rad_inner(x_meters, y_meters)
     }
 
     /// Batch inverse: convert arrays of x/y projection coordinates to
@@ -246,7 +261,7 @@ mod tests {
     fn ahi_geos() -> GeosProjection {
         GeosProjection {
             semi_major_axis: 6_378_137.0,
-            semi_minor_axis: 6_356_752.3,
+            semi_minor_axis: 6_356_752.314_14,
             perspective_point_height: 35_785_863.0,
             longitude_of_projection_origin: 140.7,
         }
@@ -300,12 +315,13 @@ mod tests {
     fn inverse_at_equator_east_of_ssp() {
         let g = ahi_spherical();
         let h = g.perspective_point_height;
-        // 1° east of sub-satellite point
+        // 1° east of sub-satellite point (scanning angle ≈ x/h)
         let theta_x = 1.0_f64.to_radians();
         let x = h * theta_x;
         let (lon, lat) = g.inverse(x, 0.0).expect("equator pixel should project");
-        assert!((lon - 141.7).abs() < 0.01, "lon={lon}");
-        assert!(lat.abs() < 0.01, "lat={lat}");
+        // Exact curved-Earth value: ground offset ≈ 5.62× the scan angle.
+        assert!((lon - 146.324_551_684_591).abs() < 1e-9, "lon={lon}");
+        assert!(lat.abs() < 1e-9, "lat={lat}");
     }
 
     #[test]
@@ -316,9 +332,83 @@ mod tests {
         let theta_y = 1.0_f64.to_radians();
         let y = h * theta_y;
         let (lon, lat) = g.inverse(0.0, y).expect("north pixel should project");
-        assert!((lon - 140.7).abs() < 0.01, "lon={lon}");
-        // At x=0, cos(theta_x) = 1, so lat = theta_y = 1°
-        assert!((lat - 1.0).abs() < 0.01, "lat={lat}");
+        assert!((lon - 140.7).abs() < 1e-9, "lon={lon}");
+        // Exact curved-Earth value, not the flat-plane scan angle.
+        assert!((lat - 5.624_551_684_591).abs() < 1e-9, "lat={lat}");
+    }
+
+    /// Reference values computed with the exact ellipsoidal ray–ellipsoid
+    /// intersection for the AHI geometry (a=6378137, b=6356752.31414,
+    /// h=35785863, lon_0=140.7). These match the PROJ `geos` projection used
+    /// by Satpy `area.get_lonlats()`. Provenance: independent numerical solve
+    /// of the ray–ellipsoid quadratic + geodetic normal iteration; the
+    /// horizon latitude (±81.28°) is consistent with the known AHI full-disk
+    /// limit and the small-angle limit `lat ≈ θ_y·(h+a)/a` near the center.
+    #[test]
+    fn inverse_matches_curved_earth_reference_at_limb() {
+        let g = ahi_geos();
+        let h = g.perspective_point_height;
+        let cases: &[(f64, f64, f64, f64)] = &[
+            // (x, y, expected_lon, expected_lat)
+            (0.0, 0.0, 140.7, 0.0),
+            (h * 4.0_f64.to_radians(), 0.0, 164.119_006_320_043, 0.0),
+            (0.0, h * 4.0_f64.to_radians(), 140.7, 23.575_595_238_793),
+            (0.0, 5.225_25e6, 140.7, 65.129_298_005_784),
+            (0.0, -5.225_25e6, 140.7, -65.129_298_005_784),
+            (-5.225_25e6, 0.0, 76.235_983_903_003, 0.0),
+            (5.225_25e6, 0.0, -154.835_983_903_003, 0.0),
+        ];
+        for (x, y, lon_ref, lat_ref) in cases {
+            let (lon, lat) = g.inverse(*x, *y).expect("interior pixel should project");
+            assert!(
+                (lon - lon_ref).abs() < 1e-9,
+                "lon mismatch at ({x}, {y}): {lon} != {lon_ref}"
+            );
+            assert!(
+                (lat - lat_ref).abs() < 1e-9,
+                "lat mismatch at ({x}, {y}): {lat} != {lat_ref}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_rad_matches_inverse_degrees() {
+        let g = ahi_geos();
+        for (x, y) in [(0.0, 0.0), (500_000.0, 300_000.0), (-2.0e6, 3.0e6)] {
+            let (lon_d, lat_d) = g.inverse(x, y).expect("valid pixel");
+            let (lon_r, lat_r) = g.inverse_rad(x, y).expect("valid pixel");
+            assert!((lon_r.to_degrees() - lon_d).abs() < 1e-12, "lon mismatch");
+            assert!((lat_r.to_degrees() - lat_d).abs() < 1e-12, "lat mismatch");
+        }
+    }
+
+    #[test]
+    fn space_pixels_beyond_ellipsoid_horizon_are_none() {
+        let g = ahi_geos();
+        // The visible horizon for the ellipsoid is slightly beyond the
+        // spherical limit; well outside it the ray misses the Earth.
+        let h = g.perspective_point_height;
+        let theta_max = (g.semi_major_axis / g.satellite_radius()).asin();
+        let edge = h * theta_max;
+        assert!(g.inverse(edge * 1.01, 0.0).is_none());
+        assert!(g.inverse(0.0, edge * 1.01).is_none());
+        // Just inside the disk the inverse must succeed.
+        assert!(g.inverse(edge * 0.99, 0.0).is_some());
+    }
+
+    #[test]
+    fn horizon_latitude_matches_known_ahi_limit() {
+        let g = ahi_geos();
+        let a = g.semi_major_axis;
+        let b = g.semi_minor_axis;
+        let h = g.perspective_point_height;
+        // Meridian tangent point: ray just grazing the ellipsoid.
+        let y_tan = b * h / (h * h + 2.0 * a * h).sqrt();
+        let (_, lat) = g
+            .inverse(0.0, y_tan * 0.999_99)
+            .expect("just inside the meridian horizon");
+        // AHI full-disk maximum latitude ≈ 81.28° (ellipsoid; 81.30° sphere).
+        assert!((lat - 81.28).abs() < 0.25, "horizon lat={lat}");
     }
 
     #[test]
